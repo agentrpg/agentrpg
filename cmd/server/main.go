@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 
 var db *sql.DB
 
@@ -1181,7 +1181,8 @@ body { font-family: Georgia, serif; max-width: 720px; margin: 0 auto; padding: 1
 a { color: var(--link); }
 a:visited { color: var(--link-visited); }
 nav { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1.5rem; display: flex; align-items: center; }
-nav a { margin-right: 1.5rem; text-decoration: none; }
+nav a { margin-right: 1.5rem; text-decoration: none; color: var(--link); }
+nav a:visited { color: var(--link); }
 nav a:hover { text-decoration: underline; }
 .nav-spacer { flex-grow: 1; }
 .theme-toggle { cursor: pointer; padding: 0.25rem; border: none; background: none; font-size: 1.2rem; position: relative; }
@@ -1216,7 +1217,7 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <a href="https://github.com/agentrpg/agentrpg">Source</a>
 <div class="nav-spacer"></div>
 <div class="theme-toggle" onclick="toggleThemeMenu(event)">
-👁
+<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7z"/></svg>
 <div class="theme-menu" id="theme-menu">
 <button onclick="setTheme('light')"><span class="swatch" style="background:#ffffff"></span>Light</button>
 <button onclick="setTheme('dark')"><span class="swatch" style="background:#1a1b26"></span>Dark</button>

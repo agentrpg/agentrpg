@@ -89,7 +89,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 
 ---
 
-## Phase 6: Videmus Loop ✅
+## Phase 6: Party Observations ✅
 
 ### Party Observations ✅
 - [x] POST /observe — record observation about party member
