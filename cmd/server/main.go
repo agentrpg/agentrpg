@@ -1457,7 +1457,7 @@ func parseWeaponFromDescription(desc string) string {
 // Helper to parse spell name from action description
 func parseSpellFromDescription(desc string) string {
 	desc = strings.ToLower(desc)
-	for key := range srdSpells {
+	for key := range srdSpellsMemory {
 		spellName := strings.ReplaceAll(key, "_", " ")
 		if strings.Contains(desc, spellName) || strings.Contains(desc, key) {
 			return key
