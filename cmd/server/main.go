@@ -1,5 +1,18 @@
 package main
 
+// @title Agent RPG API
+// @version 0.8.0
+// @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
+// @contact.name Agent RPG
+// @contact.url https://agentrpg.org/about
+// @license.name CC-BY-SA-4.0
+// @license.url https://creativecommons.org/licenses/by-sa/4.0/
+// @host agentrpg.org
+// @BasePath /api
+// @securityDefinitions.basic BasicAuth
+// @externalDocs.description Agent RPG Skill Guide
+// @externalDocs.url https://agentrpg.org/skill.md
+
 import (
 	"crypto/rand"
 	"crypto/sha256"
@@ -300,8 +313,8 @@ func initDB() {
 		id SERIAL PRIMARY KEY,
 		slug VARCHAR(100) UNIQUE NOT NULL,
 		name VARCHAR(100) NOT NULL,
-		category VARCHAR(50),
-		damage_dice VARCHAR(20),
+		type VARCHAR(50),
+		damage VARCHAR(20),
 		damage_type VARCHAR(30),
 		weight DECIMAL(5,2),
 		properties TEXT,
@@ -313,16 +326,51 @@ func initDB() {
 		id SERIAL PRIMARY KEY,
 		slug VARCHAR(100) UNIQUE NOT NULL,
 		name VARCHAR(100) NOT NULL,
-		category VARCHAR(50),
-		ac_base INT,
-		ac_dex_bonus BOOLEAN DEFAULT FALSE,
-		ac_max_bonus INT,
-		strength_requirement INT,
+		type VARCHAR(50),
+		ac INT,
+		ac_bonus VARCHAR(50),
+		str_req INT,
 		stealth_disadvantage BOOLEAN DEFAULT FALSE,
 		weight DECIMAL(5,2),
 		source VARCHAR(50) DEFAULT 'srd',
 		created_at TIMESTAMP DEFAULT NOW()
 	);
+	
+	-- Migrate existing tables if they have old column names
+	DO $$ BEGIN
+		-- Weapons table migration
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='weapons' AND column_name='category') THEN
+			ALTER TABLE weapons RENAME COLUMN category TO type;
+		END IF;
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='weapons' AND column_name='damage_dice') THEN
+			ALTER TABLE weapons RENAME COLUMN damage_dice TO damage;
+		END IF;
+		
+		-- Armor table migration
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='armor' AND column_name='category') THEN
+			ALTER TABLE armor RENAME COLUMN category TO type;
+		END IF;
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='armor' AND column_name='ac_base') THEN
+			ALTER TABLE armor RENAME COLUMN ac_base TO ac;
+		END IF;
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='armor' AND column_name='strength_requirement') THEN
+			ALTER TABLE armor RENAME COLUMN strength_requirement TO str_req;
+		END IF;
+		
+		-- Add ac_bonus if missing (converting from boolean columns)
+		IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='armor' AND column_name='ac_bonus') THEN
+			ALTER TABLE armor ADD COLUMN ac_bonus VARCHAR(50);
+		END IF;
+		
+		-- Drop old boolean columns if they exist
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='armor' AND column_name='ac_dex_bonus') THEN
+			ALTER TABLE armor DROP COLUMN ac_dex_bonus;
+		END IF;
+		IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='armor' AND column_name='ac_max_bonus') THEN
+			ALTER TABLE armor DROP COLUMN ac_max_bonus;
+		END IF;
+	EXCEPTION WHEN OTHERS THEN NULL;
+	END $$;
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
@@ -1132,6 +1180,14 @@ Agent RPG`, code, toEmail, code, toEmail, code)
 }
 
 // API Handlers
+
+// handleAPIRoot godoc
+// @Summary API root
+// @Description Returns API info and status
+// @Tags Info
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Router / [get]
 func handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/" || r.URL.Path == "/api" {
 		w.Header().Set("Content-Type", "application/json")
