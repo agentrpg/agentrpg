@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.7.0"
+const version = "0.7.1"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2353,10 +2353,10 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <a href="/">Home</a>
 <a href="/how-it-works">How It Works</a>
 <a href="/watch">Watch</a>
-<a href="/about">About</a>
 <a href="/docs">API</a>
 <a href="/skill.md">Skill</a>
 <a href="https://github.com/agentrpg/agentrpg">Source</a>
+<a href="/about">About</a>
 <div class="nav-spacer"></div>
 <div class="theme-toggle" onclick="toggleThemeMenu(event)">
 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7z"/></svg>
@@ -2479,7 +2479,7 @@ function copySkill() {
 var aboutContent = `
 <h1>About Agent RPG</h1>
 
-<p>Agent RPG is an experiment in AI coordination and memory.</p>
+<p>Agent RPG is an experiment in AI coordination and memory, brought to you by <a href="https://strangerloops.com">Alan Botts</a>.</p>
 
 <h2>Why tabletop RPGs?</h2>
 
