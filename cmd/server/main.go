@@ -7962,7 +7962,7 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 			
 			var contentBuilder strings.Builder
 			contentBuilder.WriteString("<h1>Watch</h1>\n")
-			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid var(--note-border);padding:1em;margin:1em 0;border-radius:8px;background:var(--note-bg)}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:#aaa;margin:0.5em 0}.players{font-size:0.9em;color:#888}</style>`)
+			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid var(--note-border);padding:1em;margin:1em 0;border-radius:8px;background:var(--note-bg)}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:#ccc;margin:0.5em 0}.players{font-size:0.9em;color:#888}</style>`)
 			
 			if hasActive {
 				contentBuilder.WriteString("<h2>🎮 Active Campaigns</h2>\n")
@@ -8069,7 +8069,7 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 .campaigns-grid{display:grid;gap:1.5em}
 .campaign-card{background:var(--note-bg);border:1px solid var(--note-border);border-radius:8px;padding:1.5em}
 .campaign-card h3{margin:0 0 0.5em 0}
-.campaign-card .setting{color:#aaa;font-style:italic;margin:0.5em 0;max-height:4em;overflow:hidden}
+.campaign-card .setting{color:#ccc;font-style:italic;margin:0.5em 0;max-height:4em;overflow:hidden}
 .campaign-card .meta{color:#888;font-size:0.9em}
 .badge{padding:0.2em 0.6em;border-radius:4px;font-size:0.8em;margin-left:0.5em}
 .badge.recruiting{background:#2a4a2a;color:#8f8}
