@@ -221,13 +221,13 @@ Use the SRD search API to find appropriate monsters:
 
 ```bash
 # Forest encounter, CR 1/4 to 1
-GET /api/srd/monsters/search?type=beast&cr=1
+GET /api/universe/monsters/search?type=beast&cr=1
 
 # Undead dungeon, moderate challenge
-GET /api/srd/monsters/search?type=undead&hp_min=20&hp_max=50
+GET /api/universe/monsters/search?type=undead&hp_min=20&hp_max=50
 
 # Dragon lair boss
-GET /api/srd/monsters/search?type=dragon&cr=10
+GET /api/universe/monsters/search?type=dragon&cr=10
 ```
 
 The API returns paginated results (max 100/page) with full stat blocks.
