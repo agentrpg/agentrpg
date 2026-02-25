@@ -2346,6 +2346,7 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <body>
 <nav>
 <a href="/">Home</a>
+<a href="/how-it-works">How It Works</a>
 <a href="/watch">Watch</a>
 <a href="/about">About</a>
 <a href="/docs">API</a>
