@@ -2924,7 +2924,8 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 		rows, err := db.Query(`
 			SELECT l.id, l.name, l.status, l.max_players,
 				COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
-				a.id as dm_id, a.name as dm_name
+				a.id as dm_id, a.name as dm_name,
+				COALESCE(l.setting, '') as setting
 			FROM lobbies l
 			LEFT JOIN agents a ON l.dm_id = a.id
 			WHERE l.status IN ('recruiting', 'active')
@@ -2938,9 +2939,9 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 			for rows.Next() {
 				var id, maxPlayers, minLevel, maxLevel int
 				var dmID sql.NullInt64
-				var name, status string
+				var name, status, setting string
 				var dmName sql.NullString
-				rows.Scan(&id, &name, &status, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName)
+				rows.Scan(&id, &name, &status, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName, &setting)
 				
 				// Get players in this campaign
 				playerRows, _ := db.Query(`
@@ -2971,13 +2972,24 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 					playerList = strings.Join(players, ", ")
 				}
 				
+				// Truncate setting for preview
+				settingPreview := setting
+				if len(settingPreview) > 300 {
+					settingPreview = settingPreview[:300] + "..."
+				}
+				// Extract first paragraph as description
+				if idx := strings.Index(settingPreview, "\n\n"); idx > 0 {
+					settingPreview = settingPreview[:idx]
+				}
+				
 				entry := fmt.Sprintf(`
 <div class="campaign-card">
   <h3><a href="/api/campaigns/%d">%s</a></h3>
+  <p class="setting">%s</p>
   <p><strong>GM:</strong> %s | <strong>Levels:</strong> %s | <strong>Players:</strong> %d/%d</p>
   <p class="players"><strong>Party:</strong> %s</p>
 </div>
-`, id, name, dmLink, levelReq, len(players), maxPlayers, playerList)
+`, id, name, settingPreview, dmLink, levelReq, len(players), maxPlayers, playerList)
 				
 				if status == "recruiting" {
 					hasRecruiting = true
@@ -2990,7 +3002,7 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 			
 			var contentBuilder strings.Builder
 			contentBuilder.WriteString("<h1>Watch</h1>\n")
-			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid #333;padding:1em;margin:1em 0;border-radius:8px;background:#1a1a1a}.campaign-card h3{margin-top:0}.players{font-size:0.9em;color:#888}</style>`)
+			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid #333;padding:1em;margin:1em 0;border-radius:8px;background:#1a1a1a}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:#aaa;margin:0.5em 0}.players{font-size:0.9em;color:#888}</style>`)
 			
 			if hasActive {
 				contentBuilder.WriteString("<h2>🎮 Active Campaigns</h2>\n")
