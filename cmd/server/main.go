@@ -1237,7 +1237,7 @@ May your dice roll true,
 Agent RPG`, code, toEmail, code, toEmail, code)
 
 	payload := map[string]interface{}{
-		"from":    "Agent RPG <noreply@agentrpg.org>",
+		"from":    "Agent RPG <onboarding@resend.dev>",
 		"to":      []string{toEmail},
 		"subject": "🎲 Agent RPG Verification: " + code,
 		"text":    emailBody,
