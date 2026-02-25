@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.7.2"
+const version = "0.8.0"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -74,6 +74,7 @@ func main() {
 			} else {
 				log.Println("Connected to Postgres")
 				initDB()
+				seedCampaignTemplates()
 				// checkAndSeedSRD() // Disabled - use seed SQL
 				loadSRDFromDB()
 			}
@@ -1364,61 +1365,211 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	var charID, lobbyID, hp, maxHP, ac int
-	var charName, class, lobbyName, setting string
+	// Get character and campaign info
+	var charID, lobbyID, hp, maxHP, ac, level int
+	var str, dex, con, intl, wis, cha int
+	var charName, class, race, lobbyName, setting, lobbyStatus string
 	err = db.QueryRow(`
-		SELECT c.id, c.name, c.class, c.hp, c.max_hp, c.ac, l.id, l.name, COALESCE(l.setting, '')
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
+			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
+			l.id, l.name, COALESCE(l.setting, ''), l.status
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
 		LIMIT 1
-	`, agentID).Scan(&charID, &charName, &class, &hp, &maxHP, &ac, &lobbyID, &lobbyName, &setting)
+	`, agentID).Scan(&charID, &charName, &class, &race, &level, &hp, &maxHP, &ac,
+		&str, &dex, &con, &intl, &wis, &cha,
+		&lobbyID, &lobbyName, &setting, &lobbyStatus)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
+			"is_my_turn": false,
 			"error": "no_active_game",
-			"message": "You don't have a character in an active game. Join a lobby first.",
+			"message": "You don't have a character in an active game. Join a campaign first.",
+			"how_to_join": map[string]interface{}{
+				"step1": "GET /api/campaigns to list open campaigns",
+				"step2": "POST /api/characters to create a character",
+				"step3": "POST /api/campaigns/{id}/join with your character_id",
+			},
 		})
 		return
 	}
 	
+	// Get party members
 	rows, _ := db.Query(`
-		SELECT name, class, hp, max_hp FROM characters WHERE lobby_id = $1 AND id != $2
+		SELECT id, name, class, race, hp, max_hp, ac FROM characters WHERE lobby_id = $1 AND id != $2
 	`, lobbyID, charID)
 	defer rows.Close()
 	
-	party := []map[string]interface{}{}
+	allies := []string{}
+	partyStatus := []map[string]interface{}{}
 	for rows.Next() {
-		var pname, pclass string
-		var php, pmaxHP int
-		rows.Scan(&pname, &pclass, &php, &pmaxHP)
-		party = append(party, map[string]interface{}{
-			"name": pname, "class": pclass, "hp": php, "max_hp": pmaxHP,
+		var pid, php, pmaxHP, pac int
+		var pname, pclass, prace string
+		rows.Scan(&pid, &pname, &pclass, &prace, &php, &pmaxHP, &pac)
+		
+		status := "healthy"
+		if php <= pmaxHP/4 {
+			status = "critical"
+		} else if php <= pmaxHP/2 {
+			status = "wounded"
+		}
+		
+		allies = append(allies, fmt.Sprintf("%s (%s, %d/%d HP)", pname, pclass, php, pmaxHP))
+		partyStatus = append(partyStatus, map[string]interface{}{
+			"name": pname, "class": pclass, "race": prace,
+			"hp": php, "max_hp": pmaxHP, "ac": pac,
+			"status": status,
 		})
 	}
 	
+	// Get recent actions as events
 	actionRows, _ := db.Query(`
-		SELECT c.name, a.action_type, a.description FROM actions a
+		SELECT c.name, a.action_type, a.description, a.result FROM actions a
 		JOIN characters c ON a.character_id = c.id
 		WHERE a.lobby_id = $1 ORDER BY a.created_at DESC LIMIT 5
 	`, lobbyID)
 	defer actionRows.Close()
 	
-	recentActions := []string{}
+	recentEvents := []string{}
 	for actionRows.Next() {
-		var aname, atype, adesc string
-		actionRows.Scan(&aname, &atype, &adesc)
-		recentActions = append(recentActions, fmt.Sprintf("%s: %s", aname, adesc))
+		var aname, atype, adesc, aresult string
+		actionRows.Scan(&aname, &atype, &adesc, &aresult)
+		if aresult != "" {
+			recentEvents = append(recentEvents, fmt.Sprintf("%s %s: %s", aname, atype, aresult))
+		} else {
+			recentEvents = append(recentEvents, fmt.Sprintf("%s: %s", aname, adesc))
+		}
+	}
+	// Reverse to show oldest first
+	for i, j := 0, len(recentEvents)-1; i < j; i, j = i+1, j-1 {
+		recentEvents[i], recentEvents[j] = recentEvents[j], recentEvents[i]
 	}
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"lobby":     map[string]interface{}{"id": lobbyID, "name": lobbyName, "setting": setting},
-		"character": map[string]interface{}{"id": charID, "name": charName, "class": class, "hp": hp, "max_hp": maxHP, "ac": ac},
-		"party":     party,
-		"recent":    recentActions,
-		"options":   []string{"attack", "cast", "move", "help", "dodge", "ready", "use_item", "other"},
-		"prompt":    "What do you do?",
-	})
+	// Determine character status
+	charStatus := "healthy"
+	if hp <= maxHP/4 {
+		charStatus = "critical"
+	} else if hp <= maxHP/2 {
+		charStatus = "wounded"
+	}
+	
+	// Build available actions based on class
+	actions := []map[string]interface{}{
+		{"name": "Attack", "description": "Make a weapon attack against a target."},
+		{"name": "Dodge", "description": "Focus on defense. Attacks against you have disadvantage until your next turn."},
+		{"name": "Help", "description": "Aid an ally. They gain advantage on their next ability check or attack."},
+	}
+	
+	// Add class-specific actions
+	classKey := strings.ToLower(class)
+	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
+		actions = append(actions, map[string]interface{}{
+			"name": "Cast", "description": fmt.Sprintf("Cast a spell using %s as your spellcasting ability.", c.Spellcasting),
+		})
+	}
+	if classKey == "barbarian" {
+		actions = append(actions, map[string]interface{}{
+			"name": "Rage", "description": "Enter a rage for advantage on STR checks and bonus damage.",
+		})
+		actions = append(actions, map[string]interface{}{
+			"name": "Reckless Attack", "description": "Attack with advantage, but attacks against you also have advantage.",
+		})
+	}
+	if classKey == "rogue" {
+		actions = append(actions, map[string]interface{}{
+			"name": "Sneak Attack", "description": "Deal extra damage when you have advantage or an ally is adjacent to your target.",
+		})
+	}
+	
+	// Build tactical suggestions based on situation
+	suggestions := []string{}
+	if hp <= maxHP/4 {
+		suggestions = append(suggestions, "You're critically wounded. Consider retreating, healing, or using Dodge action.")
+	}
+	if len(allies) > 0 {
+		for _, ally := range partyStatus {
+			if ally["status"] == "critical" {
+				suggestions = append(suggestions, fmt.Sprintf("%s is critically wounded and may need help.", ally["name"]))
+			}
+		}
+	}
+	if len(suggestions) == 0 {
+		suggestions = append(suggestions, "The party is in good shape. Press the attack or explore.")
+	}
+	
+	// Build contextual rules reminder
+	rulesReminder := map[string]interface{}{}
+	if classKey == "barbarian" {
+		rulesReminder["reckless_attack"] = "You can attack recklessly for advantage, but attacks against you also have advantage until your next turn."
+	}
+	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
+		rulesReminder["spellcasting"] = fmt.Sprintf("Your spellcasting ability is %s. Spell save DC = 8 + proficiency + %s modifier.", c.Spellcasting, c.Spellcasting)
+	}
+	
+	// Build response
+	// For now, is_my_turn is always true in active games (no initiative tracking yet)
+	// This will be enhanced when initiative tracking is added
+	response := map[string]interface{}{
+		"is_my_turn": true,
+		"character": map[string]interface{}{
+			"id":         charID,
+			"name":       charName,
+			"class":      class,
+			"race":       race,
+			"level":      level,
+			"hp":         hp,
+			"max_hp":     maxHP,
+			"ac":         ac,
+			"status":     charStatus,
+			"conditions": []string{}, // TODO: track conditions in DB
+			"stats": map[string]int{
+				"str": str, "dex": dex, "con": con,
+				"int": intl, "wis": wis, "cha": cha,
+			},
+			"modifiers": map[string]int{
+				"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
+				"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
+			},
+		},
+		"situation": map[string]interface{}{
+			"summary":  fmt.Sprintf("You are in %s. %s", lobbyName, setting),
+			"allies":   allies,
+			"enemies":  []string{}, // TODO: track enemies when encounter system is built
+			"terrain":  "", // TODO: track terrain
+		},
+		"your_options": map[string]interface{}{
+			"actions":       actions,
+			"bonus_actions": []map[string]interface{}{}, // TODO: class-specific bonus actions
+			"movement":      fmt.Sprintf("You have %dft of movement.", getMovementSpeed(race)),
+			"reaction":      "You have your reaction available.",
+		},
+		"tactical_suggestions": suggestions,
+		"rules_reminder":       rulesReminder,
+		"recent_events":        recentEvents,
+		"party_status":         partyStatus,
+		"how_to_act": map[string]interface{}{
+			"endpoint": "POST /api/action",
+			"headers":  "Authorization: Basic <base64(email:password)>",
+			"example": map[string]interface{}{
+				"action":      "attack",
+				"target":      "goblin_a",
+				"description": "I swing my sword at the nearest enemy",
+			},
+		},
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// getMovementSpeed returns base movement speed for a race
+func getMovementSpeed(race string) int {
+	raceKey := strings.ToLower(strings.ReplaceAll(race, " ", "_"))
+	raceKey = strings.ReplaceAll(raceKey, "-", "_")
+	if r, ok := srdRaces[raceKey]; ok {
+		return r.Speed
+	}
+	return 30 // default
 }
 
 func handleAction(w http.ResponseWriter, r *http.Request) {

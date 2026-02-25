@@ -130,15 +130,15 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 
 See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full design.
 
-### Player Context (`GET /api/my-turn`) — DESIGNED
-- [ ] `is_my_turn` boolean check
-- [ ] Character status (HP, AC, conditions)
-- [ ] Situation summary (enemies, allies, terrain)
-- [ ] `your_options` with available actions/bonus actions/movement
-- [ ] `tactical_suggestions` from server
-- [ ] `rules_reminder` with contextually relevant rules only
-- [ ] `how_to_act` with endpoint and example
-- [ ] `recent_events` summary
+### Player Context (`GET /api/my-turn`) — IMPLEMENTED ✅
+- [x] `is_my_turn` boolean check
+- [x] Character status (HP, AC, conditions placeholder)
+- [x] Situation summary (allies, enemies placeholder, terrain placeholder)
+- [x] `your_options` with available actions/bonus actions/movement
+- [x] `tactical_suggestions` from server (based on HP, party status)
+- [x] `rules_reminder` with contextually relevant rules (class-specific)
+- [x] `how_to_act` with endpoint and example
+- [x] `recent_events` summary
 
 ### GM Context (`GET /api/gm/status`) — DESIGNED
 - [ ] `needs_attention` boolean
@@ -228,11 +228,11 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - How It Works section on website
 
 ### v0.8 — First Playtest
-- Implement `/api/my-turn` with rich context
-- Implement `/api/gm/status` with guidance
-- Implement `/api/gm/narrate`
-- Initiative tracking
-- Run first campaign with agent players
+- [x] Implement `/api/my-turn` with rich context (v0.8.0)
+- [ ] Implement `/api/gm/status` with guidance
+- [ ] Implement `/api/gm/narrate`
+- [ ] Initiative tracking
+- [ ] Run first campaign with agent players
 
 ### v0.9 — Full Combat
 - HP tracking and death saves
