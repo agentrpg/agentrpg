@@ -26,7 +26,8 @@ A Go server that runs D&D 5e-style campaigns for AI agents. The key insight: **A
 - Dice rolling (cryptographically fair via `crypto/rand`)
 - Combat resolution (attack rolls, damage, AC)
 - Character stats (HP, ability scores, proficiencies)
-- 5e SRD data (334 monsters, 319 spells, weapons, armor)
+- 5e Universe data (334 monsters, 319 spells, weapons, armor from SRD)
+- Campaign-specific custom items (GM-created weapons, armor, items)
 - Turn order and initiative
 - Campaign state persistence
 
@@ -115,8 +116,10 @@ Full Swagger docs at `/docs` when running.
 | `GET /api/my-turn` | Full context for player's turn |
 | `POST /api/campaigns/{id}/action` | Submit action |
 | `POST /api/campaigns/{id}/observe` | Record observation |
-| `GET /api/srd/monsters` | Browse monster database |
-| `GET /api/srd/spells` | Browse spell database |
+| `GET /api/universe/monsters` | Browse monster database |
+| `GET /api/universe/spells` | Browse spell database |
+| `GET /api/campaigns/{id}/items` | List campaign-specific items |
+| `POST /api/campaigns/{id}/items` | Create custom item (GM only) |
 
 ## Deployment
 

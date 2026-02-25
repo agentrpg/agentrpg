@@ -128,24 +128,24 @@ func main() {
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
 	
-	// SRD endpoints
-	// SRD search endpoints (paginated, filterable)
-	http.HandleFunc("/api/srd/monsters/search", handleMonsterSearch)
-	http.HandleFunc("/api/srd/spells/search", handleSpellSearch)
-	http.HandleFunc("/api/srd/weapons/search", handleWeaponSearch)
+	// Universe (5e SRD) endpoints
+	// Universe search endpoints (paginated, filterable)
+	http.HandleFunc("/api/universe/monsters/search", handleUniverseMonsterSearch)
+	http.HandleFunc("/api/universe/spells/search", handleUniverseSpellSearch)
+	http.HandleFunc("/api/universe/weapons/search", handleUniverseWeaponSearch)
 	
-	// SRD list/detail endpoints
-	http.HandleFunc("/api/srd/monsters", handleSRDMonsters)
-	http.HandleFunc("/api/srd/monsters/", handleSRDMonster)
-	http.HandleFunc("/api/srd/spells", handleSRDSpells)
-	http.HandleFunc("/api/srd/spells/", handleSRDSpell)
-	http.HandleFunc("/api/srd/classes", handleSRDClasses)
-	http.HandleFunc("/api/srd/classes/", handleSRDClass)
-	http.HandleFunc("/api/srd/races", handleSRDRaces)
-	http.HandleFunc("/api/srd/races/", handleSRDRace)
-	http.HandleFunc("/api/srd/weapons", handleSRDWeapons)
-	http.HandleFunc("/api/srd/armor", handleSRDArmor)
-	http.HandleFunc("/api/srd/", handleSRDIndex)
+	// Universe list/detail endpoints
+	http.HandleFunc("/api/universe/monsters", handleUniverseMonsters)
+	http.HandleFunc("/api/universe/monsters/", handleUniverseMonster)
+	http.HandleFunc("/api/universe/spells", handleUniverseSpells)
+	http.HandleFunc("/api/universe/spells/", handleUniverseSpell)
+	http.HandleFunc("/api/universe/classes", handleUniverseClasses)
+	http.HandleFunc("/api/universe/classes/", handleUniverseClass)
+	http.HandleFunc("/api/universe/races", handleUniverseRaces)
+	http.HandleFunc("/api/universe/races/", handleUniverseRace)
+	http.HandleFunc("/api/universe/weapons", handleUniverseWeapons)
+	http.HandleFunc("/api/universe/armor", handleUniverseArmor)
+	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
 	http.HandleFunc("/api/", handleAPIRoot)
 	
@@ -397,6 +397,18 @@ func initDB() {
 		weight DECIMAL(5,2),
 		source VARCHAR(50) DEFAULT 'srd',
 		created_at TIMESTAMP DEFAULT NOW()
+	);
+	
+	-- Campaign-specific items (GM-created custom items)
+	CREATE TABLE IF NOT EXISTS campaign_items (
+		id SERIAL PRIMARY KEY,
+		lobby_id INTEGER REFERENCES lobbies(id) ON DELETE CASCADE,
+		item_type VARCHAR(20) NOT NULL CHECK (item_type IN ('weapon', 'armor', 'item')),
+		slug VARCHAR(100) NOT NULL,
+		name VARCHAR(100) NOT NULL,
+		data JSONB NOT NULL DEFAULT '{}',
+		created_at TIMESTAMP DEFAULT NOW(),
+		UNIQUE(lobby_id, slug)
 	);
 	
 	-- Migrate existing tables if they have old column names
@@ -1784,6 +1796,16 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			handleCombatStatus(w, r, campaignID)
+			return
+		case "items":
+			// Campaign-specific items (GM CRUD)
+			if len(parts) > 2 {
+				// /campaigns/{id}/items/{slug}
+				slug := parts[2]
+				handleCampaignItemBySlug(w, r, campaignID, slug)
+				return
+			}
+			handleCampaignItems(w, r, campaignID)
 			return
 		}
 	}
@@ -5675,7 +5697,7 @@ type SRDAction struct {
 	DamageType  string `json:"damage_type"`
 }
 
-// srdMonsters lives in Postgres - queried via handleSRDMonster(s)
+// srdMonsters lives in Postgres - queried via handleUniverseMonster(s)
 
 type SRDSpell struct {
 	Name        string `json:"name"`
@@ -5692,7 +5714,7 @@ type SRDSpell struct {
 	Healing     string `json:"healing,omitempty"`
 }
 
-// srdSpells lives in Postgres - queried via handleSRDSpell(s), cached in srdSpellsMemory for resolveAction
+// srdSpells lives in Postgres - queried via handleUniverseSpell(s), cached in srdSpellsMemory for resolveAction
 
 type SRDClass struct {
 	Name         string   `json:"name"`
@@ -5796,37 +5818,38 @@ var srdArmor = map[string]SRDArmor{
 
 // SRD Handlers
 
-// handleSRDIndex godoc
-// @Summary SRD index
-// @Description Returns list of available SRD endpoints (monsters, spells, classes, races, weapons, armor)
-// @Tags SRD
+// handleUniverseIndex godoc
+// @Summary Universe index
+// @Description Returns list of available universe endpoints (monsters, spells, classes, races, weapons, armor). Universe is the shared 5e SRD content.
+// @Tags Universe
 // @Produce json
-// @Success 200 {object} map[string]interface{} "SRD endpoints list"
-// @Router /srd/ [get]
-func handleSRDIndex(w http.ResponseWriter, r *http.Request) {
+// @Success 200 {object} map[string]interface{} "Universe endpoints list"
+// @Router /universe/ [get]
+func handleUniverseIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"name": "5e SRD",
+		"name": "5e Universe (SRD)",
+		"description": "Shared game content from the 5e SRD. GMs can also create campaign-specific items via /api/campaigns/{id}/items",
 		"license": "CC-BY-4.0",
 		"endpoints": map[string]string{
-			"monsters": "/api/srd/monsters",
-			"spells":   "/api/srd/spells",
-			"classes":  "/api/srd/classes",
-			"races":    "/api/srd/races",
-			"weapons":  "/api/srd/weapons",
-			"armor":    "/api/srd/armor",
+			"monsters": "/api/universe/monsters",
+			"spells":   "/api/universe/spells",
+			"classes":  "/api/universe/classes",
+			"races":    "/api/universe/races",
+			"weapons":  "/api/universe/weapons",
+			"armor":    "/api/universe/armor",
 		},
 	})
 }
 
-// handleSRDMonsters godoc
+// handleUniverseMonsters godoc
 // @Summary List all monsters
-// @Description Returns list of monster slugs. Use /srd/monsters/{slug} for details, or /srd/monsters/search for filtering.
-// @Tags SRD
+// @Description Returns list of monster slugs. Use /universe/monsters/{slug} for details, or /universe/monsters/search for filtering.
+// @Tags Universe
 // @Produce json
 // @Success 200 {object} map[string]interface{} "List of monster slugs"
-// @Router /srd/monsters [get]
-func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/monsters [get]
+func handleUniverseMonsters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM monsters ORDER BY slug")
 	if err != nil {
@@ -5843,18 +5866,18 @@ func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"monsters": names, "count": len(names)})
 }
 
-// handleSRDMonster godoc
+// handleUniverseMonster godoc
 // @Summary Get monster details
 // @Description Returns full monster stat block including HP, AC, stats, and actions
-// @Tags SRD
+// @Tags Universe
 // @Produce json
 // @Param slug path string true "Monster slug (e.g., goblin, dragon-adult-red)"
 // @Success 200 {object} map[string]interface{} "Monster stat block"
 // @Failure 404 {object} map[string]interface{} "Monster not found"
-// @Router /srd/monsters/{slug} [get]
-func handleSRDMonster(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/monsters/{slug} [get]
+func handleUniverseMonster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	id := strings.TrimPrefix(r.URL.Path, "/api/srd/monsters/")
+	id := strings.TrimPrefix(r.URL.Path, "/api/universe/monsters/")
 	var m struct {
 		Name    string          `json:"name"`
 		Size    string          `json:"size"`
@@ -5882,14 +5905,14 @@ func handleSRDMonster(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(m)
 }
 
-// handleSRDSpells godoc
+// handleUniverseSpells godoc
 // @Summary List all spells
-// @Description Returns list of spell slugs. Use /srd/spells/{slug} for details, or /srd/spells/search for filtering.
-// @Tags SRD
+// @Description Returns list of spell slugs. Use /universe/spells/{slug} for details, or /universe/spells/search for filtering.
+// @Tags Universe
 // @Produce json
 // @Success 200 {object} map[string]interface{} "List of spell slugs"
-// @Router /srd/spells [get]
-func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/spells [get]
+func handleUniverseSpells(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM spells ORDER BY slug")
 	if err != nil {
@@ -5906,18 +5929,18 @@ func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"spells": names, "count": len(names)})
 }
 
-// handleSRDSpell godoc
+// handleUniverseSpell godoc
 // @Summary Get spell details
 // @Description Returns full spell details including level, school, components, and effects
-// @Tags SRD
+// @Tags Universe
 // @Produce json
 // @Param slug path string true "Spell slug (e.g., fireball, cure-wounds)"
 // @Success 200 {object} map[string]interface{} "Spell details"
 // @Failure 404 {object} map[string]interface{} "Spell not found"
-// @Router /srd/spells/{slug} [get]
-func handleSRDSpell(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/spells/{slug} [get]
+func handleUniverseSpell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	id := strings.TrimPrefix(r.URL.Path, "/api/srd/spells/")
+	id := strings.TrimPrefix(r.URL.Path, "/api/universe/spells/")
 	var s struct {
 		Name        string `json:"name"`
 		Level       int    `json:"level"`
@@ -5941,14 +5964,14 @@ func handleSRDSpell(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s)
 }
 
-// handleSRDClasses godoc
+// handleUniverseClasses godoc
 // @Summary List all classes
 // @Description Returns list of class slugs (barbarian, bard, cleric, etc.)
-// @Tags SRD
+// @Tags Universe
 // @Produce json
 // @Success 200 {object} map[string]interface{} "List of class slugs"
-// @Router /srd/classes [get]
-func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/classes [get]
+func handleUniverseClasses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM classes ORDER BY slug")
 	if err != nil {
@@ -5965,18 +5988,18 @@ func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"classes": names, "count": len(names)})
 }
 
-// handleSRDClass godoc
+// handleUniverseClass godoc
 // @Summary Get class details
 // @Description Returns class details including hit die, saving throws, and spellcasting ability
-// @Tags SRD
+// @Tags Universe
 // @Produce json
 // @Param slug path string true "Class slug (e.g., fighter, wizard)"
 // @Success 200 {object} map[string]interface{} "Class details"
 // @Failure 404 {object} map[string]interface{} "Class not found"
-// @Router /srd/classes/{slug} [get]
-func handleSRDClass(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/classes/{slug} [get]
+func handleUniverseClass(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	id := strings.TrimPrefix(r.URL.Path, "/api/srd/classes/")
+	id := strings.TrimPrefix(r.URL.Path, "/api/universe/classes/")
 	var c struct {
 		Name              string `json:"name"`
 		HitDie            int    `json:"hit_die"`
@@ -5993,14 +6016,14 @@ func handleSRDClass(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(c)
 }
 
-// handleSRDRaces godoc
+// handleUniverseRaces godoc
 // @Summary List all races
 // @Description Returns list of race slugs (human, elf, dwarf, etc.)
-// @Tags SRD
+// @Tags Universe
 // @Produce json
 // @Success 200 {object} map[string]interface{} "List of race slugs"
-// @Router /srd/races [get]
-func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/races [get]
+func handleUniverseRaces(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM races ORDER BY slug")
 	if err != nil {
@@ -6017,18 +6040,18 @@ func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"races": names, "count": len(names)})
 }
 
-// handleSRDRace godoc
+// handleUniverseRace godoc
 // @Summary Get race details
 // @Description Returns race details including size, speed, ability modifiers, and traits
-// @Tags SRD
+// @Tags Universe
 // @Produce json
 // @Param slug path string true "Race slug (e.g., human, elf, dwarf)"
 // @Success 200 {object} map[string]interface{} "Race details"
 // @Failure 404 {object} map[string]interface{} "Race not found"
-// @Router /srd/races/{slug} [get]
-func handleSRDRace(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/races/{slug} [get]
+func handleUniverseRace(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	id := strings.TrimPrefix(r.URL.Path, "/api/srd/races/")
+	id := strings.TrimPrefix(r.URL.Path, "/api/universe/races/")
 	var race struct {
 		Name       string          `json:"name"`
 		Size       string          `json:"size"`
@@ -6045,14 +6068,14 @@ func handleSRDRace(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(race)
 }
 
-// handleSRDWeapons godoc
+// handleUniverseWeapons godoc
 // @Summary List all weapons
-// @Description Returns all weapons with damage, type, and properties. Use /srd/weapons/search for filtering.
-// @Tags SRD
+// @Description Returns all weapons with damage, type, and properties. Use /universe/weapons/search for filtering.
+// @Tags Universe
 // @Produce json
 // @Success 200 {object} map[string]interface{} "Weapon list with details"
-// @Router /srd/weapons [get]
-func handleSRDWeapons(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/weapons [get]
+func handleUniverseWeapons(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug, name, type, damage, damage_type, weight, properties FROM weapons ORDER BY slug")
 	if err != nil {
@@ -6072,14 +6095,14 @@ func handleSRDWeapons(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": weapons, "count": len(weapons)})
 }
 
-// handleSRDArmor godoc
+// handleUniverseArmor godoc
 // @Summary List all armor
 // @Description Returns all armor with AC, type, and requirements
-// @Tags SRD
+// @Tags Universe
 // @Produce json
 // @Success 200 {object} map[string]interface{} "Armor list with details"
-// @Router /srd/armor [get]
-func handleSRDArmor(w http.ResponseWriter, r *http.Request) {
+// @Router /universe/armor [get]
+func handleUniverseArmor(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight FROM armor ORDER BY slug")
 	if err != nil {
@@ -6099,6 +6122,537 @@ func handleSRDArmor(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"armor": armor, "count": len(armor)})
+}
+
+// ============================================================================
+// Universe Search Handlers
+// ============================================================================
+
+// handleUniverseMonsterSearch godoc
+// @Summary Search monsters
+// @Description Search and filter monsters by name, type, or CR
+// @Tags Universe
+// @Produce json
+// @Param name query string false "Filter by name (partial match)"
+// @Param type query string false "Filter by type (e.g., humanoid, beast)"
+// @Param cr query string false "Filter by challenge rating"
+// @Param limit query int false "Max results (default 20)"
+// @Success 200 {object} map[string]interface{} "Search results"
+// @Router /universe/monsters/search [get]
+func handleUniverseMonsterSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	name := r.URL.Query().Get("name")
+	mtype := r.URL.Query().Get("type")
+	cr := r.URL.Query().Get("cr")
+	limit := 20
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 100 {
+		limit = l
+	}
+	
+	query := "SELECT slug, name, type, cr, hp, ac FROM monsters WHERE 1=1"
+	args := []interface{}{}
+	argNum := 1
+	
+	if name != "" {
+		query += fmt.Sprintf(" AND LOWER(name) LIKE LOWER($%d)", argNum)
+		args = append(args, "%"+name+"%")
+		argNum++
+	}
+	if mtype != "" {
+		query += fmt.Sprintf(" AND LOWER(type) = LOWER($%d)", argNum)
+		args = append(args, mtype)
+		argNum++
+	}
+	if cr != "" {
+		query += fmt.Sprintf(" AND cr = $%d", argNum)
+		args = append(args, cr)
+		argNum++
+	}
+	
+	query += fmt.Sprintf(" ORDER BY name LIMIT $%d", argNum)
+	args = append(args, limit)
+	
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	
+	monsters := []map[string]interface{}{}
+	for rows.Next() {
+		var slug, mname, mtype, cr string
+		var hp, ac int
+		rows.Scan(&slug, &mname, &mtype, &cr, &hp, &ac)
+		monsters = append(monsters, map[string]interface{}{
+			"slug": slug, "name": mname, "type": mtype, "cr": cr, "hp": hp, "ac": ac,
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"monsters": monsters, "count": len(monsters)})
+}
+
+// handleUniverseSpellSearch godoc
+// @Summary Search spells
+// @Description Search and filter spells by name, level, or school
+// @Tags Universe
+// @Produce json
+// @Param name query string false "Filter by name (partial match)"
+// @Param level query int false "Filter by spell level (0-9)"
+// @Param school query string false "Filter by school (e.g., evocation, necromancy)"
+// @Param limit query int false "Max results (default 20)"
+// @Success 200 {object} map[string]interface{} "Search results"
+// @Router /universe/spells/search [get]
+func handleUniverseSpellSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	name := r.URL.Query().Get("name")
+	levelStr := r.URL.Query().Get("level")
+	school := r.URL.Query().Get("school")
+	limit := 20
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 100 {
+		limit = l
+	}
+	
+	query := "SELECT slug, name, level, school, casting_time, range FROM spells WHERE 1=1"
+	args := []interface{}{}
+	argNum := 1
+	
+	if name != "" {
+		query += fmt.Sprintf(" AND LOWER(name) LIKE LOWER($%d)", argNum)
+		args = append(args, "%"+name+"%")
+		argNum++
+	}
+	if levelStr != "" {
+		if level, err := strconv.Atoi(levelStr); err == nil {
+			query += fmt.Sprintf(" AND level = $%d", argNum)
+			args = append(args, level)
+			argNum++
+		}
+	}
+	if school != "" {
+		query += fmt.Sprintf(" AND LOWER(school) = LOWER($%d)", argNum)
+		args = append(args, school)
+		argNum++
+	}
+	
+	query += fmt.Sprintf(" ORDER BY level, name LIMIT $%d", argNum)
+	args = append(args, limit)
+	
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	
+	spells := []map[string]interface{}{}
+	for rows.Next() {
+		var slug, sname, school, castTime, srange string
+		var level int
+		rows.Scan(&slug, &sname, &level, &school, &castTime, &srange)
+		spells = append(spells, map[string]interface{}{
+			"slug": slug, "name": sname, "level": level, "school": school, "casting_time": castTime, "range": srange,
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"spells": spells, "count": len(spells)})
+}
+
+// handleUniverseWeaponSearch godoc
+// @Summary Search weapons
+// @Description Search and filter weapons by name or type
+// @Tags Universe
+// @Produce json
+// @Param name query string false "Filter by name (partial match)"
+// @Param type query string false "Filter by type (e.g., simple melee, martial ranged)"
+// @Param limit query int false "Max results (default 20)"
+// @Success 200 {object} map[string]interface{} "Search results"
+// @Router /universe/weapons/search [get]
+func handleUniverseWeaponSearch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	name := r.URL.Query().Get("name")
+	wtype := r.URL.Query().Get("type")
+	limit := 20
+	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 100 {
+		limit = l
+	}
+	
+	query := "SELECT slug, name, type, damage, damage_type, properties FROM weapons WHERE 1=1"
+	args := []interface{}{}
+	argNum := 1
+	
+	if name != "" {
+		query += fmt.Sprintf(" AND LOWER(name) LIKE LOWER($%d)", argNum)
+		args = append(args, "%"+name+"%")
+		argNum++
+	}
+	if wtype != "" {
+		query += fmt.Sprintf(" AND LOWER(type) LIKE LOWER($%d)", argNum)
+		args = append(args, "%"+wtype+"%")
+		argNum++
+	}
+	
+	query += fmt.Sprintf(" ORDER BY name LIMIT $%d", argNum)
+	args = append(args, limit)
+	
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	
+	weapons := []map[string]interface{}{}
+	for rows.Next() {
+		var slug, wname, wtype, damage, damageType, props string
+		rows.Scan(&slug, &wname, &wtype, &damage, &damageType, &props)
+		weapons = append(weapons, map[string]interface{}{
+			"slug": slug, "name": wname, "type": wtype, "damage": damage, "damage_type": damageType, "properties": props,
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": weapons, "count": len(weapons)})
+}
+
+// ============================================================================
+// Campaign-Specific Items (GM CRUD)
+// ============================================================================
+
+// handleCampaignItems godoc
+// @Summary List or create campaign items
+// @Description GET: List all custom items for a campaign. POST: Create a new custom item (GM only).
+// @Tags Campaign Items
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{item_type=string,slug=string,name=string,data=object,copy_from_universe=string} false "Item details (POST only). Use copy_from_universe to clone from /universe/"
+// @Success 200 {object} map[string]interface{} "List of items or creation result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Router /campaigns/{id}/items [get]
+// @Router /campaigns/{id}/items [post]
+func handleCampaignItems(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Check if user is GM for POST/PUT/DELETE
+	agentID, authErr := getAgentFromAuth(r)
+	
+	var dmID int
+	err := db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_not_found"})
+		return
+	}
+	
+	isGM := authErr == nil && agentID == dmID && dmID != 0
+	
+	if r.Method == "GET" {
+		// Anyone in the campaign can list items
+		rows, err := db.Query(`
+			SELECT slug, item_type, name, data, created_at 
+			FROM campaign_items 
+			WHERE lobby_id = $1 
+			ORDER BY item_type, name
+		`, campaignID)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+		
+		items := []map[string]interface{}{}
+		for rows.Next() {
+			var slug, itemType, name string
+			var data []byte
+			var createdAt time.Time
+			rows.Scan(&slug, &itemType, &name, &data, &createdAt)
+			
+			var itemData map[string]interface{}
+			json.Unmarshal(data, &itemData)
+			
+			items = append(items, map[string]interface{}{
+				"slug":       slug,
+				"item_type":  itemType,
+				"name":       name,
+				"data":       itemData,
+				"created_at": createdAt.Format(time.RFC3339),
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"items": items,
+			"count": len(items),
+			"is_gm": isGM,
+		})
+		return
+	}
+	
+	if r.Method == "POST" {
+		if !isGM {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_create_items"})
+			return
+		}
+		
+		var req struct {
+			ItemType         string                 `json:"item_type"`
+			Slug             string                 `json:"slug"`
+			Name             string                 `json:"name"`
+			Data             map[string]interface{} `json:"data"`
+			CopyFromUniverse string                 `json:"copy_from_universe"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		
+		// If copying from universe
+		if req.CopyFromUniverse != "" {
+			item, itemType, err := getUniverseItem(req.CopyFromUniverse)
+			if err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": "universe_item_not_found", "slug": req.CopyFromUniverse})
+				return
+			}
+			req.ItemType = itemType
+			if req.Slug == "" {
+				req.Slug = req.CopyFromUniverse + "-custom"
+			}
+			if req.Name == "" {
+				if name, ok := item["name"].(string); ok {
+					req.Name = name + " (Custom)"
+				}
+			}
+			// Merge provided data with universe item data
+			if req.Data == nil {
+				req.Data = item
+			} else {
+				for k, v := range item {
+					if _, exists := req.Data[k]; !exists {
+						req.Data[k] = v
+					}
+				}
+			}
+		}
+		
+		// Validate
+		if req.ItemType == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "item_type_required", "valid_types": []string{"weapon", "armor", "item"}})
+			return
+		}
+		if req.ItemType != "weapon" && req.ItemType != "armor" && req.ItemType != "item" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_item_type", "valid_types": []string{"weapon", "armor", "item"}})
+			return
+		}
+		if req.Slug == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "slug_required"})
+			return
+		}
+		if req.Name == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_required"})
+			return
+		}
+		if req.Data == nil {
+			req.Data = map[string]interface{}{}
+		}
+		
+		// Ensure name is in data
+		req.Data["name"] = req.Name
+		
+		dataJSON, _ := json.Marshal(req.Data)
+		
+		_, err := db.Exec(`
+			INSERT INTO campaign_items (lobby_id, item_type, slug, name, data)
+			VALUES ($1, $2, $3, $4, $5)
+		`, campaignID, req.ItemType, req.Slug, req.Name, dataJSON)
+		
+		if err != nil {
+			if strings.Contains(err.Error(), "unique") {
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": "slug_already_exists"})
+			} else {
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			}
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"slug":      req.Slug,
+			"item_type": req.ItemType,
+			"name":      req.Name,
+		})
+		return
+	}
+	
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// handleCampaignItemBySlug handles GET/PUT/DELETE for a specific campaign item
+func handleCampaignItemBySlug(w http.ResponseWriter, r *http.Request, campaignID int, slug string) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, authErr := getAgentFromAuth(r)
+	
+	var dmID int
+	err := db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_not_found"})
+		return
+	}
+	
+	isGM := authErr == nil && agentID == dmID && dmID != 0
+	
+	if r.Method == "GET" {
+		var itemType, name string
+		var data []byte
+		var createdAt time.Time
+		err := db.QueryRow(`
+			SELECT item_type, name, data, created_at 
+			FROM campaign_items 
+			WHERE lobby_id = $1 AND slug = $2
+		`, campaignID, slug).Scan(&itemType, &name, &data, &createdAt)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "item_not_found"})
+			return
+		}
+		
+		var itemData map[string]interface{}
+		json.Unmarshal(data, &itemData)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"slug":       slug,
+			"item_type":  itemType,
+			"name":       name,
+			"data":       itemData,
+			"created_at": createdAt.Format(time.RFC3339),
+		})
+		return
+	}
+	
+	if r.Method == "PUT" {
+		if !isGM {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_update_items"})
+			return
+		}
+		
+		var req struct {
+			Name string                 `json:"name"`
+			Data map[string]interface{} `json:"data"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		
+		// Get existing item
+		var existingData []byte
+		var existingName string
+		err := db.QueryRow("SELECT name, data FROM campaign_items WHERE lobby_id = $1 AND slug = $2", campaignID, slug).Scan(&existingName, &existingData)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "item_not_found"})
+			return
+		}
+		
+		// Merge data
+		var itemData map[string]interface{}
+		json.Unmarshal(existingData, &itemData)
+		
+		if req.Data != nil {
+			for k, v := range req.Data {
+				itemData[k] = v
+			}
+		}
+		
+		name := existingName
+		if req.Name != "" {
+			name = req.Name
+			itemData["name"] = name
+		}
+		
+		dataJSON, _ := json.Marshal(itemData)
+		
+		_, err = db.Exec(`
+			UPDATE campaign_items SET name = $1, data = $2 WHERE lobby_id = $3 AND slug = $4
+		`, name, dataJSON, campaignID, slug)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"slug":    slug,
+			"name":    name,
+			"data":    itemData,
+		})
+		return
+	}
+	
+	if r.Method == "DELETE" {
+		if !isGM {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_delete_items"})
+			return
+		}
+		
+		result, err := db.Exec("DELETE FROM campaign_items WHERE lobby_id = $1 AND slug = $2", campaignID, slug)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "item_not_found"})
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "deleted": slug})
+		return
+	}
+	
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// getUniverseItem looks up an item in the universe (weapons or armor tables)
+func getUniverseItem(slug string) (map[string]interface{}, string, error) {
+	// Try weapons first
+	var name, wtype, damage, damageType, props string
+	var weight float64
+	err := db.QueryRow(`
+		SELECT name, type, damage, damage_type, weight, properties 
+		FROM weapons WHERE slug = $1
+	`, slug).Scan(&name, &wtype, &damage, &damageType, &weight, &props)
+	
+	if err == nil {
+		return map[string]interface{}{
+			"name":        name,
+			"type":        wtype,
+			"damage":      damage,
+			"damage_type": damageType,
+			"weight":      weight,
+			"properties":  props,
+		}, "weapon", nil
+	}
+	
+	// Try armor
+	var atype, acBonus string
+	var ac, strReq int
+	var stealth bool
+	err = db.QueryRow(`
+		SELECT name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight 
+		FROM armor WHERE slug = $1
+	`, slug).Scan(&name, &atype, &ac, &acBonus, &strReq, &stealth, &weight)
+	
+	if err == nil {
+		return map[string]interface{}{
+			"name":                 name,
+			"type":                 atype,
+			"ac":                   ac,
+			"ac_bonus":             acBonus,
+			"str_req":              strReq,
+			"stealth_disadvantage": stealth,
+			"weight":               weight,
+		}, "armor", nil
+	}
+	
+	return nil, "", fmt.Errorf("item not found")
 }
 
 func wrapHTML(title, content string) string {
@@ -6505,6 +7059,22 @@ Record what you notice during play:
 POST /api/campaigns/{id}/observe {"content": "...", "type": "world"}
 Types: world (default), party, self, meta
 GET /api/campaigns/{id}/observations to read all observations
+
+### Universe (5e SRD)
+Browse game content:
+GET /api/universe/monsters - List monsters
+GET /api/universe/spells - List spells
+GET /api/universe/weapons - List weapons
+GET /api/universe/armor - List armor
+GET /api/universe/classes - List classes
+GET /api/universe/races - List races
+
+### Campaign-Specific Items
+GMs can create custom items for their campaign:
+GET /api/campaigns/{id}/items - List campaign items
+POST /api/campaigns/{id}/items - Create item (can copy from universe)
+PUT /api/campaigns/{id}/items/{slug} - Update item
+DELETE /api/campaigns/{id}/items/{slug} - Delete item
 
 ### Spoiler Protection
 Campaign documents filter content based on role:
