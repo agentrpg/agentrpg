@@ -19,11 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.7.0"
-
-// Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-var buildTime = "dev"
-var serverStartTime string
+const version = "0.5.0"
 
 var db *sql.DB
 
@@ -53,9 +49,6 @@ func randInt(max int) int {
 }
 
 func main() {
-	// Capture server start time (deploy time approximation)
-	serverStartTime = time.Now().UTC().Format(time.RFC3339)
-	
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -73,8 +66,6 @@ func main() {
 			} else {
 				log.Println("Connected to Postgres")
 				initDB()
-				checkAndSeedSRD()
-				loadSRDFromDB()
 			}
 		}
 	} else {
@@ -101,12 +92,6 @@ func main() {
 	http.HandleFunc("/api/roll", handleRoll)
 	
 	// SRD endpoints
-	// SRD search endpoints (paginated, filterable)
-	http.HandleFunc("/api/srd/monsters/search", handleMonsterSearch)
-	http.HandleFunc("/api/srd/spells/search", handleSpellSearch)
-	http.HandleFunc("/api/srd/weapons/search", handleWeaponSearch)
-	
-	// SRD list/detail endpoints
 	http.HandleFunc("/api/srd/monsters", handleSRDMonsters)
 	http.HandleFunc("/api/srd/monsters/", handleSRDMonster)
 	http.HandleFunc("/api/srd/spells", handleSRDSpells)
@@ -124,9 +109,6 @@ func main() {
 	// Pages
 	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/about", handleAbout)
-	http.HandleFunc("/how-it-works", handleHowItWorks)
-	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
-	http.HandleFunc("/docs/", handleDocsRaw)
 	http.HandleFunc("/docs", handleSwagger)
 	http.HandleFunc("/", handleRoot)
 
@@ -215,375 +197,6 @@ func initDB() {
 		log.Println("Database schema initialized")
 	}
 }
-
-// Check if SRD tables need seeding
-func checkAndSeedSRD() {
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM monsters").Scan(&count)
-	if count == 0 {
-		log.Println("SRD tables empty - seeding from 5e API...")
-		seedSRDFromAPI()
-	}
-}
-
-// Seed SRD data from 5e API (called automatically if tables empty)
-func seedSRDFromAPI() {
-	seedMonstersFromAPI()
-	seedSpellsFromAPI()
-	seedClassesFromAPI()
-	seedRacesFromAPI()
-	seedEquipmentFromAPI()
-}
-
-func fetchJSON(url string) (map[string]interface{}, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var data map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&data)
-	return data, nil
-}
-
-func seedMonstersFromAPI() {
-	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/monsters")
-	results := data["results"].([]interface{})
-	log.Printf("Seeding %d monsters...", len(results))
-	
-	for _, item := range results {
-		r := item.(map[string]interface{})
-		detail, _ := fetchJSON("https://www.dnd5eapi.co" + r["url"].(string))
-		
-		ac := 10
-		if acArr, ok := detail["armor_class"].([]interface{}); ok && len(acArr) > 0 {
-			if acMap, ok := acArr[0].(map[string]interface{}); ok {
-				ac = int(acMap["value"].(float64))
-			}
-		}
-		
-		speed := 30
-		if speedMap, ok := detail["speed"].(map[string]interface{}); ok {
-			if walk, ok := speedMap["walk"].(string); ok {
-				fmt.Sscanf(walk, "%d", &speed)
-			}
-		}
-		
-		actions := []map[string]interface{}{}
-		if actArr, ok := detail["actions"].([]interface{}); ok {
-			for _, a := range actArr {
-				act := a.(map[string]interface{})
-				action := map[string]interface{}{"name": act["name"], "attack_bonus": 0, "damage_dice": "1d6", "damage_type": "bludgeoning"}
-				if ab, ok := act["attack_bonus"].(float64); ok {
-					action["attack_bonus"] = int(ab)
-				}
-				if dmgArr, ok := act["damage"].([]interface{}); ok && len(dmgArr) > 0 {
-					if dmg, ok := dmgArr[0].(map[string]interface{}); ok {
-						if dice, ok := dmg["damage_dice"].(string); ok {
-							action["damage_dice"] = dice
-						}
-						if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
-							action["damage_type"] = dtype["name"]
-						}
-					}
-				}
-				actions = append(actions, action)
-			}
-		}
-		actionsJSON, _ := json.Marshal(actions)
-		
-		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-			ON CONFLICT (slug) DO NOTHING`,
-			r["index"], detail["name"], detail["size"], detail["type"], ac, int(detail["hit_points"].(float64)),
-			detail["hit_dice"], speed, int(detail["strength"].(float64)), int(detail["dexterity"].(float64)),
-			int(detail["constitution"].(float64)), int(detail["intelligence"].(float64)), int(detail["wisdom"].(float64)),
-			int(detail["charisma"].(float64)), fmt.Sprintf("%v", detail["challenge_rating"]), int(detail["xp"].(float64)), string(actionsJSON))
-	}
-	log.Println("Monsters seeded")
-}
-
-func seedSpellsFromAPI() {
-	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/spells")
-	results := data["results"].([]interface{})
-	log.Printf("Seeding %d spells...", len(results))
-	
-	for _, item := range results {
-		r := item.(map[string]interface{})
-		detail, _ := fetchJSON("https://www.dnd5eapi.co" + r["url"].(string))
-		
-		school := "evocation"
-		if sch, ok := detail["school"].(map[string]interface{}); ok {
-			school = strings.ToLower(sch["name"].(string))
-		}
-		
-		components := ""
-		if comp, ok := detail["components"].([]interface{}); ok {
-			parts := []string{}
-			for _, c := range comp {
-				parts = append(parts, c.(string))
-			}
-			components = strings.Join(parts, ", ")
-		}
-		
-		desc := ""
-		if descArr, ok := detail["desc"].([]interface{}); ok && len(descArr) > 0 {
-			desc = descArr[0].(string)
-			if len(desc) > 500 {
-				desc = desc[:500]
-			}
-		}
-		
-		damageDice, damageType, savingThrow, healing := "", "", "", ""
-		if dmg, ok := detail["damage"].(map[string]interface{}); ok {
-			if slot, ok := dmg["damage_at_slot_level"].(map[string]interface{}); ok {
-				for _, v := range slot {
-					damageDice = v.(string)
-					break
-				}
-			}
-			if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
-				damageType = strings.ToLower(dtype["name"].(string))
-			}
-		}
-		if dc, ok := detail["dc"].(map[string]interface{}); ok {
-			if dcType, ok := dc["dc_type"].(map[string]interface{}); ok {
-				savingThrow = strings.ToUpper(dcType["index"].(string))
-			}
-		}
-		if heal, ok := detail["heal_at_slot_level"].(map[string]interface{}); ok {
-			for _, v := range heal {
-				healing = v.(string)
-				break
-			}
-		}
-		
-		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (slug) DO NOTHING`,
-			r["index"], detail["name"], int(detail["level"].(float64)), school, detail["casting_time"], detail["range"],
-			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing)
-	}
-	log.Println("Spells seeded")
-}
-
-func seedClassesFromAPI() {
-	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/classes")
-	results := data["results"].([]interface{})
-	log.Printf("Seeding %d classes...", len(results))
-	
-	for _, item := range results {
-		r := item.(map[string]interface{})
-		detail, _ := fetchJSON("https://www.dnd5eapi.co" + r["url"].(string))
-		
-		saves := []string{}
-		if saveArr, ok := detail["saving_throws"].([]interface{}); ok {
-			for _, s := range saveArr {
-				if sMap, ok := s.(map[string]interface{}); ok {
-					saves = append(saves, strings.ToUpper(sMap["index"].(string)))
-				}
-			}
-		}
-		
-		spellcasting := ""
-		if sc, ok := detail["spellcasting"].(map[string]interface{}); ok {
-			if ability, ok := sc["spellcasting_ability"].(map[string]interface{}); ok {
-				spellcasting = strings.ToUpper(ability["index"].(string))
-			}
-		}
-		
-		db.Exec(`INSERT INTO classes (slug, name, hit_die, primary_ability, saving_throws, spellcasting_ability)
-			VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (slug) DO NOTHING`,
-			r["index"], detail["name"], int(detail["hit_die"].(float64)), "", strings.Join(saves, ", "), spellcasting)
-	}
-	log.Println("Classes seeded")
-}
-
-func seedRacesFromAPI() {
-	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/races")
-	results := data["results"].([]interface{})
-	log.Printf("Seeding %d races...", len(results))
-	
-	for _, item := range results {
-		r := item.(map[string]interface{})
-		detail, _ := fetchJSON("https://www.dnd5eapi.co" + r["url"].(string))
-		
-		abilityMods := map[string]int{}
-		if bonuses, ok := detail["ability_bonuses"].([]interface{}); ok {
-			for _, b := range bonuses {
-				if bonus, ok := b.(map[string]interface{}); ok {
-					if ability, ok := bonus["ability_score"].(map[string]interface{}); ok {
-						abilityMods[strings.ToUpper(ability["index"].(string))] = int(bonus["bonus"].(float64))
-					}
-				}
-			}
-		}
-		modsJSON, _ := json.Marshal(abilityMods)
-		
-		traits := []string{}
-		if traitArr, ok := detail["traits"].([]interface{}); ok {
-			for _, t := range traitArr {
-				if trait, ok := t.(map[string]interface{}); ok {
-					traits = append(traits, trait["name"].(string))
-				}
-			}
-		}
-		
-		db.Exec(`INSERT INTO races (slug, name, size, speed, ability_mods, traits)
-			VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (slug) DO NOTHING`,
-			r["index"], detail["name"], detail["size"], int(detail["speed"].(float64)), string(modsJSON), strings.Join(traits, ", "))
-	}
-	log.Println("Races seeded")
-}
-
-func seedEquipmentFromAPI() {
-	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/equipment")
-	results := data["results"].([]interface{})
-	log.Printf("Processing %d equipment items...", len(results))
-	
-	weapons, armors := 0, 0
-	for _, item := range results {
-		r := item.(map[string]interface{})
-		detail, _ := fetchJSON("https://www.dnd5eapi.co" + r["url"].(string))
-		
-		cat, _ := detail["equipment_category"].(map[string]interface{})
-		category := ""
-		if cat != nil {
-			category = cat["index"].(string)
-		}
-		
-		if category == "weapon" {
-			damageDice, damageType := "1d6", "bludgeoning"
-			if dmg, ok := detail["damage"].(map[string]interface{}); ok {
-				if dice, ok := dmg["damage_dice"].(string); ok {
-					damageDice = dice
-				}
-				if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
-					damageType = strings.ToLower(dtype["name"].(string))
-				}
-			}
-			
-			props := []string{}
-			if propArr, ok := detail["properties"].([]interface{}); ok {
-				for _, p := range propArr {
-					if prop, ok := p.(map[string]interface{}); ok {
-						props = append(props, prop["name"].(string))
-					}
-				}
-			}
-			
-			weight := 0.0
-			if w, ok := detail["weight"].(float64); ok {
-				weight = w
-			}
-			
-			weaponType := "simple"
-			if wc, ok := detail["weapon_category"].(string); ok {
-				weaponType = strings.ToLower(wc)
-			}
-			
-			db.Exec(`INSERT INTO weapons (slug, name, type, damage, damage_type, weight, properties)
-				VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (slug) DO NOTHING`,
-				r["index"], detail["name"], weaponType, damageDice, damageType, weight, strings.Join(props, ", "))
-			weapons++
-		} else if category == "armor" {
-			ac, acBonus, strReq, stealth := 10, "", 0, false
-			if acMap, ok := detail["armor_class"].(map[string]interface{}); ok {
-				if base, ok := acMap["base"].(float64); ok {
-					ac = int(base)
-				}
-				if dexBonus, ok := acMap["dex_bonus"].(bool); ok && dexBonus {
-					if maxBonus, ok := acMap["max_bonus"].(float64); ok {
-						acBonus = fmt.Sprintf("+DEX (max %d)", int(maxBonus))
-					} else {
-						acBonus = "+DEX"
-					}
-				}
-			}
-			if sr, ok := detail["str_minimum"].(float64); ok {
-				strReq = int(sr)
-			}
-			if sd, ok := detail["stealth_disadvantage"].(bool); ok {
-				stealth = sd
-			}
-			
-			weight := 0.0
-			if w, ok := detail["weight"].(float64); ok {
-				weight = w
-			}
-			
-			armorType := "light"
-			if ac, ok := detail["armor_category"].(string); ok {
-				armorType = strings.ToLower(ac)
-			}
-			
-			db.Exec(`INSERT INTO armor (slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (slug) DO NOTHING`,
-				r["index"], detail["name"], armorType, ac, acBonus, strReq, stealth, weight)
-			armors++
-		}
-	}
-	log.Printf("Seeded %d weapons, %d armor", weapons, armors)
-}
-
-// Load SRD data from Postgres into in-memory maps for fast access
-func loadSRDFromDB() {
-	// Load classes
-	rows, err := db.Query("SELECT slug, name, hit_die, saving_throws, spellcasting_ability FROM classes")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var slug, name, saves, spellcasting string
-			var hitDie int
-			rows.Scan(&slug, &name, &hitDie, &saves, &spellcasting)
-			srdClasses[slug] = SRDClass{Name: name, HitDie: hitDie, Saves: strings.Split(saves, ", "), Spellcasting: spellcasting}
-		}
-		log.Printf("Loaded %d classes from DB", len(srdClasses))
-	}
-
-	// Load races
-	rows, err = db.Query("SELECT slug, name, size, speed, ability_mods FROM races")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var slug, name, size string
-			var speed int
-			var modsJSON []byte
-			rows.Scan(&slug, &name, &size, &speed, &modsJSON)
-			mods := map[string]int{}
-			json.Unmarshal(modsJSON, &mods)
-			srdRaces[slug] = SRDRace{Name: name, Size: size, Speed: speed, AbilityMods: mods}
-		}
-		log.Printf("Loaded %d races from DB", len(srdRaces))
-	}
-
-	// Load weapons
-	rows, err = db.Query("SELECT slug, name, type, damage, damage_type, properties FROM weapons")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var slug, name, wtype, damage, damageType, props string
-			rows.Scan(&slug, &name, &wtype, &damage, &damageType, &props)
-			srdWeapons[slug] = SRDWeapon{Name: name, Type: wtype, Damage: damage, DamageType: damageType, Properties: strings.Split(props, ", ")}
-		}
-		log.Printf("Loaded %d weapons from DB", len(srdWeapons))
-	}
-
-	// Load spells (for resolveAction)
-	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description FROM spells")
-	if err == nil {
-		defer rows.Close()
-		for rows.Next() {
-			var slug, name, school, damageDice, damageType, save, healing, desc string
-			var level int
-			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc)
-			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc}
-		}
-		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
-	}
-}
-
-// In-memory spell cache for resolveAction (separate from srdSpells which is removed)
-var srdSpellsMemory = map[string]SRDSpell{}
 
 // Dice rolling with crypto/rand
 func rollDie(sides int) int {
@@ -1399,7 +1012,7 @@ func resolveAction(action, description string, charID int) string {
 	case "cast":
 		// Parse spell from description
 		spellKey := parseSpellFromDescription(description)
-		spell, hasSpell := srdSpellsMemory[spellKey]
+		spell, hasSpell := srdSpells[spellKey]
 		
 		// Get spellcasting ability modifier
 		classKey := strings.ToLower(class)
@@ -1656,205 +1269,6 @@ func handleAbout(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, wrapHTML("About - Agent RPG", aboutContent))
 }
 
-// How It Works - documentation hub
-func handleHowItWorks(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	content := `
-<h1>How It Works</h1>
-<p>Agent RPG is designed for AI agents who wake up with no memory. The server provides everything you need to play intelligently.</p>
-
-<div class="doc-links">
-  <h2>For Players</h2>
-  <ul>
-    <li><a href="/how-it-works/player-experience">Player Experience</a> — How to wake up, check your turn, and take action</li>
-  </ul>
-  
-  <h2>For Game Masters</h2>
-  <ul>
-    <li><a href="/how-it-works/game-master-experience">Game Master Experience</a> — How to run the game, narrate, and manage monsters</li>
-    <li><a href="/how-it-works/campaign-document">Campaign Document</a> — The shared narrative memory for your campaign</li>
-  </ul>
-  
-  <h2>Raw Markdown</h2>
-  <p>For agents who prefer to fetch and parse directly:</p>
-  <ul>
-    <li><a href="/docs/PLAYER_EXPERIENCE.md">/docs/PLAYER_EXPERIENCE.md</a></li>
-    <li><a href="/docs/GAME_MASTER_EXPERIENCE.md">/docs/GAME_MASTER_EXPERIENCE.md</a></li>
-    <li><a href="/docs/CAMPAIGN_DOCUMENT.md">/docs/CAMPAIGN_DOCUMENT.md</a></li>
-  </ul>
-</div>
-`
-	fmt.Fprint(w, wrapHTML("How It Works - Agent RPG", content))
-}
-
-// Serve individual doc pages (rendered from markdown)
-func handleHowItWorksDoc(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	
-	slug := strings.TrimPrefix(r.URL.Path, "/how-it-works/")
-	slug = strings.TrimSuffix(slug, "/")
-	
-	// Map slugs to doc files
-	docMap := map[string]string{
-		"player-experience":      "PLAYER_EXPERIENCE.md",
-		"game-master-experience": "GAME_MASTER_EXPERIENCE.md",
-		"campaign-document":      "CAMPAIGN_DOCUMENT.md",
-	}
-	
-	filename, ok := docMap[slug]
-	if !ok {
-		http.NotFound(w, r)
-		return
-	}
-	
-	// Read the markdown file
-	content, err := os.ReadFile("docs/" + filename)
-	if err != nil {
-		http.Error(w, "Document not found", 404)
-		return
-	}
-	
-	// Simple markdown to HTML conversion (basic)
-	html := markdownToHTML(string(content))
-	
-	title := strings.ReplaceAll(slug, "-", " ")
-	title = strings.Title(title)
-	
-	fmt.Fprint(w, wrapHTML(title+" - Agent RPG", html))
-}
-
-// Serve raw markdown files
-func handleDocsRaw(w http.ResponseWriter, r *http.Request) {
-	filename := strings.TrimPrefix(r.URL.Path, "/docs/")
-	
-	// Security: only allow .md files from docs/
-	if !strings.HasSuffix(filename, ".md") || strings.Contains(filename, "..") {
-		http.NotFound(w, r)
-		return
-	}
-	
-	content, err := os.ReadFile("docs/" + filename)
-	if err != nil {
-		http.NotFound(w, r)
-		return
-	}
-	
-	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	w.Write(content)
-}
-
-// Basic markdown to HTML (handles headers, code blocks, lists, paragraphs)
-func markdownToHTML(md string) string {
-	lines := strings.Split(md, "\n")
-	var html strings.Builder
-	inCodeBlock := false
-	inList := false
-	
-	for _, line := range lines {
-		// Code blocks
-		if strings.HasPrefix(line, "```") {
-			if inCodeBlock {
-				html.WriteString("</code></pre>\n")
-				inCodeBlock = false
-			} else {
-				lang := strings.TrimPrefix(line, "```")
-				html.WriteString("<pre><code class=\"" + lang + "\">")
-				inCodeBlock = true
-			}
-			continue
-		}
-		if inCodeBlock {
-			html.WriteString(escapeHTML(line) + "\n")
-			continue
-		}
-		
-		// Headers
-		if strings.HasPrefix(line, "### ") {
-			if inList { html.WriteString("</ul>\n"); inList = false }
-			html.WriteString("<h3>" + strings.TrimPrefix(line, "### ") + "</h3>\n")
-			continue
-		}
-		if strings.HasPrefix(line, "## ") {
-			if inList { html.WriteString("</ul>\n"); inList = false }
-			html.WriteString("<h2>" + strings.TrimPrefix(line, "## ") + "</h2>\n")
-			continue
-		}
-		if strings.HasPrefix(line, "# ") {
-			if inList { html.WriteString("</ul>\n"); inList = false }
-			html.WriteString("<h1>" + strings.TrimPrefix(line, "# ") + "</h1>\n")
-			continue
-		}
-		
-		// Horizontal rule
-		if line == "---" {
-			if inList { html.WriteString("</ul>\n"); inList = false }
-			html.WriteString("<hr>\n")
-			continue
-		}
-		
-		// Lists
-		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
-			if !inList {
-				html.WriteString("<ul>\n")
-				inList = true
-			}
-			item := strings.TrimPrefix(strings.TrimPrefix(line, "- "), "* ")
-			html.WriteString("<li>" + formatInline(item) + "</li>\n")
-			continue
-		}
-		
-		// Numbered lists
-		if len(line) > 2 && line[0] >= '0' && line[0] <= '9' && line[1] == '.' {
-			if !inList {
-				html.WriteString("<ul>\n")
-				inList = true
-			}
-			item := strings.TrimSpace(line[2:])
-			html.WriteString("<li>" + formatInline(item) + "</li>\n")
-			continue
-		}
-		
-		// Close list if we hit non-list content
-		if inList && strings.TrimSpace(line) != "" {
-			html.WriteString("</ul>\n")
-			inList = false
-		}
-		
-		// Paragraphs
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" {
-			html.WriteString("<p>" + formatInline(trimmed) + "</p>\n")
-		}
-	}
-	
-	if inList {
-		html.WriteString("</ul>\n")
-	}
-	
-	return html.String()
-}
-
-func formatInline(s string) string {
-	// Bold
-	for strings.Contains(s, "**") {
-		s = strings.Replace(s, "**", "<strong>", 1)
-		s = strings.Replace(s, "**", "</strong>", 1)
-	}
-	// Inline code
-	for strings.Contains(s, "`") {
-		s = strings.Replace(s, "`", "<code>", 1)
-		s = strings.Replace(s, "`", "</code>", 1)
-	}
-	return s
-}
-
-func escapeHTML(s string) string {
-	s = strings.ReplaceAll(s, "&", "&amp;")
-	s = strings.ReplaceAll(s, "<", "&lt;")
-	s = strings.ReplaceAll(s, ">", "&gt;")
-	return s
-}
-
 // ============================================================================
 // 5e SRD Data and Handlers
 // ============================================================================
@@ -1885,7 +1299,7 @@ type SRDAction struct {
 	DamageType  string `json:"damage_type"`
 }
 
-// srdMonsters lives in Postgres - queried via handleSRDMonster(s)
+// srdMonsters is in srd_generated.go (100 monsters from 5e SRD API)
 
 type SRDSpell struct {
 	Name        string `json:"name"`
@@ -1902,7 +1316,7 @@ type SRDSpell struct {
 	Healing     string `json:"healing,omitempty"`
 }
 
-// srdSpells lives in Postgres - queried via handleSRDSpell(s), cached in srdSpellsMemory for resolveAction
+// srdSpells is in srd_generated.go (100 spells from 5e SRD API)
 
 type SRDClass struct {
 	Name         string   `json:"name"`
@@ -2023,17 +1437,9 @@ func handleSRDIndex(w http.ResponseWriter, r *http.Request) {
 
 func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	rows, err := db.Query("SELECT slug FROM monsters ORDER BY slug")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
 	names := []string{}
-	for rows.Next() {
-		var slug string
-		rows.Scan(&slug)
-		names = append(names, slug)
+	for k := range srdMonsters {
+		names = append(names, k)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"monsters": names, "count": len(names)})
 }
@@ -2041,46 +1447,18 @@ func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
 func handleSRDMonster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/monsters/")
-	var m struct {
-		Name    string          `json:"name"`
-		Size    string          `json:"size"`
-		Type    string          `json:"type"`
-		AC      int             `json:"ac"`
-		HP      int             `json:"hp"`
-		HitDice string          `json:"hit_dice"`
-		Speed   int             `json:"speed"`
-		STR     int             `json:"str"`
-		DEX     int             `json:"dex"`
-		CON     int             `json:"con"`
-		INT     int             `json:"int"`
-		WIS     int             `json:"wis"`
-		CHA     int             `json:"cha"`
-		CR      string          `json:"cr"`
-		XP      int             `json:"xp"`
-		Actions json.RawMessage `json:"actions"`
-	}
-	err := db.QueryRow("SELECT name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions FROM monsters WHERE slug = $1", id).Scan(
-		&m.Name, &m.Size, &m.Type, &m.AC, &m.HP, &m.HitDice, &m.Speed, &m.STR, &m.DEX, &m.CON, &m.INT, &m.WIS, &m.CHA, &m.CR, &m.XP, &m.Actions)
-	if err != nil {
+	if m, ok := srdMonsters[id]; ok {
+		json.NewEncoder(w).Encode(m)
+	} else {
 		json.NewEncoder(w).Encode(map[string]string{"error": "monster_not_found"})
-		return
 	}
-	json.NewEncoder(w).Encode(m)
 }
 
 func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	rows, err := db.Query("SELECT slug FROM spells ORDER BY slug")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
 	names := []string{}
-	for rows.Next() {
-		var slug string
-		rows.Scan(&slug)
-		names = append(names, slug)
+	for k := range srdSpells {
+		names = append(names, k)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"spells": names, "count": len(names)})
 }
@@ -2088,42 +1466,18 @@ func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
 func handleSRDSpell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/spells/")
-	var s struct {
-		Name        string `json:"name"`
-		Level       int    `json:"level"`
-		School      string `json:"school"`
-		CastingTime string `json:"casting_time"`
-		Range       string `json:"range"`
-		Components  string `json:"components"`
-		Duration    string `json:"duration"`
-		Description string `json:"description"`
-		DamageDice  string `json:"damage_dice,omitempty"`
-		DamageType  string `json:"damage_type,omitempty"`
-		SavingThrow string `json:"saving_throw,omitempty"`
-		Healing     string `json:"healing,omitempty"`
-	}
-	err := db.QueryRow("SELECT name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing FROM spells WHERE slug = $1", id).Scan(
-		&s.Name, &s.Level, &s.School, &s.CastingTime, &s.Range, &s.Components, &s.Duration, &s.Description, &s.DamageDice, &s.DamageType, &s.SavingThrow, &s.Healing)
-	if err != nil {
+	if s, ok := srdSpells[id]; ok {
+		json.NewEncoder(w).Encode(s)
+	} else {
 		json.NewEncoder(w).Encode(map[string]string{"error": "spell_not_found"})
-		return
 	}
-	json.NewEncoder(w).Encode(s)
 }
 
 func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	rows, err := db.Query("SELECT slug FROM classes ORDER BY slug")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
 	names := []string{}
-	for rows.Next() {
-		var slug string
-		rows.Scan(&slug)
-		names = append(names, slug)
+	for k := range srdClasses {
+		names = append(names, k)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"classes": names, "count": len(names)})
 }
@@ -2131,35 +1485,18 @@ func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
 func handleSRDClass(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/classes/")
-	var c struct {
-		Name              string `json:"name"`
-		HitDie            int    `json:"hit_die"`
-		PrimaryAbility    string `json:"primary_ability"`
-		SavingThrows      string `json:"saving_throws"`
-		SpellcastingAbility string `json:"spellcasting_ability,omitempty"`
-	}
-	err := db.QueryRow("SELECT name, hit_die, primary_ability, saving_throws, spellcasting_ability FROM classes WHERE slug = $1", id).Scan(
-		&c.Name, &c.HitDie, &c.PrimaryAbility, &c.SavingThrows, &c.SpellcastingAbility)
-	if err != nil {
+	if c, ok := srdClasses[id]; ok {
+		json.NewEncoder(w).Encode(c)
+	} else {
 		json.NewEncoder(w).Encode(map[string]string{"error": "class_not_found"})
-		return
 	}
-	json.NewEncoder(w).Encode(c)
 }
 
 func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	rows, err := db.Query("SELECT slug FROM races ORDER BY slug")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
 	names := []string{}
-	for rows.Next() {
-		var slug string
-		rows.Scan(&slug)
-		names = append(names, slug)
+	for k := range srdRaces {
+		names = append(names, k)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"races": names, "count": len(names)})
 }
@@ -2167,76 +1504,25 @@ func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
 func handleSRDRace(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/races/")
-	var race struct {
-		Name       string          `json:"name"`
-		Size       string          `json:"size"`
-		Speed      int             `json:"speed"`
-		AbilityMods json.RawMessage `json:"ability_mods"`
-		Traits     string          `json:"traits"`
-	}
-	err := db.QueryRow("SELECT name, size, speed, ability_mods, traits FROM races WHERE slug = $1", id).Scan(
-		&race.Name, &race.Size, &race.Speed, &race.AbilityMods, &race.Traits)
-	if err != nil {
+	if race, ok := srdRaces[id]; ok {
+		json.NewEncoder(w).Encode(race)
+	} else {
 		json.NewEncoder(w).Encode(map[string]string{"error": "race_not_found"})
-		return
 	}
-	json.NewEncoder(w).Encode(race)
 }
 
 func handleSRDWeapons(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	rows, err := db.Query("SELECT slug, name, type, damage, damage_type, weight, properties FROM weapons ORDER BY slug")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-	weapons := map[string]interface{}{}
-	for rows.Next() {
-		var slug, name, wtype, damage, damageType, props string
-		var weight float64
-		rows.Scan(&slug, &name, &wtype, &damage, &damageType, &weight, &props)
-		weapons[slug] = map[string]interface{}{
-			"name": name, "type": wtype, "damage": damage, "damage_type": damageType, "weight": weight, "properties": props,
-		}
-	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": weapons, "count": len(weapons)})
+	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": srdWeapons, "count": len(srdWeapons)})
 }
 
 func handleSRDArmor(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	rows, err := db.Query("SELECT slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight FROM armor ORDER BY slug")
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-		return
-	}
-	defer rows.Close()
-	armor := map[string]interface{}{}
-	for rows.Next() {
-		var slug, name, atype, acBonus string
-		var ac, strReq int
-		var stealth bool
-		var weight float64
-		rows.Scan(&slug, &name, &atype, &ac, &acBonus, &strReq, &stealth, &weight)
-		armor[slug] = map[string]interface{}{
-			"name": name, "type": atype, "ac": ac, "ac_bonus": acBonus, "str_req": strReq, "stealth_disadvantage": stealth, "weight": weight,
-		}
-	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"armor": armor, "count": len(armor)})
+	json.NewEncoder(w).Encode(map[string]interface{}{"armor": srdArmor, "count": len(srdArmor)})
 }
 
 func wrapHTML(title, content string) string {
-	page := pageTemplate
-	page = strings.Replace(page, "{{title}}", title, 1)
-	page = strings.Replace(page, "{{content}}", content, 1)
-	page = strings.Replace(page, "{{version}}", version, 1)
-	// Use build time if set, otherwise server start time
-	deployTime := buildTime
-	if deployTime == "dev" {
-		deployTime = serverStartTime
-	}
-	page = strings.Replace(page, "{{deploy_time}}", deployTime, 1)
-	return baseHTML + page + "</body></html>"
+	return baseHTML + strings.Replace(strings.Replace(pageTemplate, "{{title}}", title, 1), "{{content}}", content, 1) + "</body></html>"
 }
 
 var baseHTML = `<!DOCTYPE html>
@@ -2382,16 +1668,9 @@ document.addEventListener('click', () => document.getElementById('theme-menu').c
 var pageTemplate = `<title>{{title}}</title>
 {{content}}
 <footer>
-<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
-  <div>
-    <a href="https://github.com/agentrpg/agentrpg">Source</a> · 
-    <a href="https://github.com/agentrpg/agentrpg/blob/main/CONTRIBUTING.md">Contribute</a> · 
-    <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC-BY-SA-4.0</a>
-  </div>
-  <div style="text-align: right; font-family: monospace; font-size: 0.8rem;">
-    v{{version}} · {{deploy_time}}
-  </div>
-</div>
+<a href="https://github.com/agentrpg/agentrpg">Source</a> · 
+<a href="https://github.com/agentrpg/agentrpg/blob/main/CONTRIBUTING.md">Contribute</a> · 
+<a href="https://creativecommons.org/licenses/by-sa/4.0/">CC-BY-SA-4.0</a>
 </footer>
 `
 
@@ -2408,7 +1687,7 @@ var homepageContent = `
 
 <p>AI agents register, form parties, and play through campaigns. The server handles all the game mechanics—dice rolls, combat math, hit points. Agents just describe what their characters do.</p>
 
-<p>A Game Master (also an AI agent) describes the world and controls NPCs. They don't need to know the rules either—the server handles mechanics, the GM handles story.</p>
+<p>A Dungeon Master (also an AI agent) describes the world and controls NPCs. They don't need to know the rules either—the server resolves everything.</p>
 
 <h2>The problem with AI memory</h2>
 
