@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.5.0"
+const version = "0.6.0"
 
 var db *sql.DB
 
@@ -66,6 +66,7 @@ func main() {
 			} else {
 				log.Println("Connected to Postgres")
 				initDB()
+				loadSRDFromDB()
 			}
 		}
 	} else {
@@ -197,6 +198,66 @@ func initDB() {
 		log.Println("Database schema initialized")
 	}
 }
+
+// Load SRD data from Postgres into in-memory maps for fast access
+func loadSRDFromDB() {
+	// Load classes
+	rows, err := db.Query("SELECT slug, name, hit_die, saving_throws, spellcasting_ability FROM classes")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var slug, name, saves, spellcasting string
+			var hitDie int
+			rows.Scan(&slug, &name, &hitDie, &saves, &spellcasting)
+			srdClasses[slug] = SRDClass{Name: name, HitDie: hitDie, Saves: strings.Split(saves, ", "), Spellcasting: spellcasting}
+		}
+		log.Printf("Loaded %d classes from DB", len(srdClasses))
+	}
+
+	// Load races
+	rows, err = db.Query("SELECT slug, name, size, speed, ability_mods FROM races")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var slug, name, size string
+			var speed int
+			var modsJSON []byte
+			rows.Scan(&slug, &name, &size, &speed, &modsJSON)
+			mods := map[string]int{}
+			json.Unmarshal(modsJSON, &mods)
+			srdRaces[slug] = SRDRace{Name: name, Size: size, Speed: speed, AbilityMods: mods}
+		}
+		log.Printf("Loaded %d races from DB", len(srdRaces))
+	}
+
+	// Load weapons
+	rows, err = db.Query("SELECT slug, name, type, damage, damage_type, properties FROM weapons")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var slug, name, wtype, damage, damageType, props string
+			rows.Scan(&slug, &name, &wtype, &damage, &damageType, &props)
+			srdWeapons[slug] = SRDWeapon{Name: name, Type: wtype, Damage: damage, DamageType: damageType, Properties: strings.Split(props, ", ")}
+		}
+		log.Printf("Loaded %d weapons from DB", len(srdWeapons))
+	}
+
+	// Load spells (for resolveAction)
+	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description FROM spells")
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var slug, name, school, damageDice, damageType, save, healing, desc string
+			var level int
+			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc)
+			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc}
+		}
+		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
+	}
+}
+
+// In-memory spell cache for resolveAction (separate from srdSpells which is removed)
+var srdSpellsMemory = map[string]SRDSpell{}
 
 // Dice rolling with crypto/rand
 func rollDie(sides int) int {
@@ -1012,7 +1073,7 @@ func resolveAction(action, description string, charID int) string {
 	case "cast":
 		// Parse spell from description
 		spellKey := parseSpellFromDescription(description)
-		spell, hasSpell := srdSpells[spellKey]
+		spell, hasSpell := srdSpellsMemory[spellKey]
 		
 		// Get spellcasting ability modifier
 		classKey := strings.ToLower(class)
@@ -1299,7 +1360,7 @@ type SRDAction struct {
 	DamageType  string `json:"damage_type"`
 }
 
-// srdMonsters is in srd_generated.go (100 monsters from 5e SRD API)
+// srdMonsters lives in Postgres - queried via handleSRDMonster(s)
 
 type SRDSpell struct {
 	Name        string `json:"name"`
@@ -1316,7 +1377,7 @@ type SRDSpell struct {
 	Healing     string `json:"healing,omitempty"`
 }
 
-// srdSpells is in srd_generated.go (100 spells from 5e SRD API)
+// srdSpells lives in Postgres - queried via handleSRDSpell(s), cached in srdSpellsMemory for resolveAction
 
 type SRDClass struct {
 	Name         string   `json:"name"`
@@ -1437,9 +1498,17 @@ func handleSRDIndex(w http.ResponseWriter, r *http.Request) {
 
 func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	rows, err := db.Query("SELECT slug FROM monsters ORDER BY slug")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
 	names := []string{}
-	for k := range srdMonsters {
-		names = append(names, k)
+	for rows.Next() {
+		var slug string
+		rows.Scan(&slug)
+		names = append(names, slug)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"monsters": names, "count": len(names)})
 }
@@ -1447,18 +1516,46 @@ func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
 func handleSRDMonster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/monsters/")
-	if m, ok := srdMonsters[id]; ok {
-		json.NewEncoder(w).Encode(m)
-	} else {
-		json.NewEncoder(w).Encode(map[string]string{"error": "monster_not_found"})
+	var m struct {
+		Name    string          `json:"name"`
+		Size    string          `json:"size"`
+		Type    string          `json:"type"`
+		AC      int             `json:"ac"`
+		HP      int             `json:"hp"`
+		HitDice string          `json:"hit_dice"`
+		Speed   int             `json:"speed"`
+		STR     int             `json:"str"`
+		DEX     int             `json:"dex"`
+		CON     int             `json:"con"`
+		INT     int             `json:"int"`
+		WIS     int             `json:"wis"`
+		CHA     int             `json:"cha"`
+		CR      string          `json:"cr"`
+		XP      int             `json:"xp"`
+		Actions json.RawMessage `json:"actions"`
 	}
+	err := db.QueryRow("SELECT name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions FROM monsters WHERE slug = $1", id).Scan(
+		&m.Name, &m.Size, &m.Type, &m.AC, &m.HP, &m.HitDice, &m.Speed, &m.STR, &m.DEX, &m.CON, &m.INT, &m.WIS, &m.CHA, &m.CR, &m.XP, &m.Actions)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "monster_not_found"})
+		return
+	}
+	json.NewEncoder(w).Encode(m)
 }
 
 func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	rows, err := db.Query("SELECT slug FROM spells ORDER BY slug")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
 	names := []string{}
-	for k := range srdSpells {
-		names = append(names, k)
+	for rows.Next() {
+		var slug string
+		rows.Scan(&slug)
+		names = append(names, slug)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"spells": names, "count": len(names)})
 }
@@ -1466,18 +1563,42 @@ func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
 func handleSRDSpell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/spells/")
-	if s, ok := srdSpells[id]; ok {
-		json.NewEncoder(w).Encode(s)
-	} else {
-		json.NewEncoder(w).Encode(map[string]string{"error": "spell_not_found"})
+	var s struct {
+		Name        string `json:"name"`
+		Level       int    `json:"level"`
+		School      string `json:"school"`
+		CastingTime string `json:"casting_time"`
+		Range       string `json:"range"`
+		Components  string `json:"components"`
+		Duration    string `json:"duration"`
+		Description string `json:"description"`
+		DamageDice  string `json:"damage_dice,omitempty"`
+		DamageType  string `json:"damage_type,omitempty"`
+		SavingThrow string `json:"saving_throw,omitempty"`
+		Healing     string `json:"healing,omitempty"`
 	}
+	err := db.QueryRow("SELECT name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing FROM spells WHERE slug = $1", id).Scan(
+		&s.Name, &s.Level, &s.School, &s.CastingTime, &s.Range, &s.Components, &s.Duration, &s.Description, &s.DamageDice, &s.DamageType, &s.SavingThrow, &s.Healing)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "spell_not_found"})
+		return
+	}
+	json.NewEncoder(w).Encode(s)
 }
 
 func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	rows, err := db.Query("SELECT slug FROM classes ORDER BY slug")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
 	names := []string{}
-	for k := range srdClasses {
-		names = append(names, k)
+	for rows.Next() {
+		var slug string
+		rows.Scan(&slug)
+		names = append(names, slug)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"classes": names, "count": len(names)})
 }
@@ -1485,18 +1606,35 @@ func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
 func handleSRDClass(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/classes/")
-	if c, ok := srdClasses[id]; ok {
-		json.NewEncoder(w).Encode(c)
-	} else {
-		json.NewEncoder(w).Encode(map[string]string{"error": "class_not_found"})
+	var c struct {
+		Name              string `json:"name"`
+		HitDie            int    `json:"hit_die"`
+		PrimaryAbility    string `json:"primary_ability"`
+		SavingThrows      string `json:"saving_throws"`
+		SpellcastingAbility string `json:"spellcasting_ability,omitempty"`
 	}
+	err := db.QueryRow("SELECT name, hit_die, primary_ability, saving_throws, spellcasting_ability FROM classes WHERE slug = $1", id).Scan(
+		&c.Name, &c.HitDie, &c.PrimaryAbility, &c.SavingThrows, &c.SpellcastingAbility)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "class_not_found"})
+		return
+	}
+	json.NewEncoder(w).Encode(c)
 }
 
 func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	rows, err := db.Query("SELECT slug FROM races ORDER BY slug")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
 	names := []string{}
-	for k := range srdRaces {
-		names = append(names, k)
+	for rows.Next() {
+		var slug string
+		rows.Scan(&slug)
+		names = append(names, slug)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"races": names, "count": len(names)})
 }
@@ -1504,21 +1642,62 @@ func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
 func handleSRDRace(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/races/")
-	if race, ok := srdRaces[id]; ok {
-		json.NewEncoder(w).Encode(race)
-	} else {
-		json.NewEncoder(w).Encode(map[string]string{"error": "race_not_found"})
+	var race struct {
+		Name       string          `json:"name"`
+		Size       string          `json:"size"`
+		Speed      int             `json:"speed"`
+		AbilityMods json.RawMessage `json:"ability_mods"`
+		Traits     string          `json:"traits"`
 	}
+	err := db.QueryRow("SELECT name, size, speed, ability_mods, traits FROM races WHERE slug = $1", id).Scan(
+		&race.Name, &race.Size, &race.Speed, &race.AbilityMods, &race.Traits)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": "race_not_found"})
+		return
+	}
+	json.NewEncoder(w).Encode(race)
 }
 
 func handleSRDWeapons(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": srdWeapons, "count": len(srdWeapons)})
+	rows, err := db.Query("SELECT slug, name, type, damage, damage_type, weight, properties FROM weapons ORDER BY slug")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	weapons := map[string]interface{}{}
+	for rows.Next() {
+		var slug, name, wtype, damage, damageType, props string
+		var weight float64
+		rows.Scan(&slug, &name, &wtype, &damage, &damageType, &weight, &props)
+		weapons[slug] = map[string]interface{}{
+			"name": name, "type": wtype, "damage": damage, "damage_type": damageType, "weight": weight, "properties": props,
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": weapons, "count": len(weapons)})
 }
 
 func handleSRDArmor(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{"armor": srdArmor, "count": len(srdArmor)})
+	rows, err := db.Query("SELECT slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight FROM armor ORDER BY slug")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	armor := map[string]interface{}{}
+	for rows.Next() {
+		var slug, name, atype, acBonus string
+		var ac, strReq int
+		var stealth bool
+		var weight float64
+		rows.Scan(&slug, &name, &atype, &ac, &acBonus, &strReq, &stealth, &weight)
+		armor[slug] = map[string]interface{}{
+			"name": name, "type": atype, "ac": ac, "ac_bonus": acBonus, "str_req": strReq, "stealth_disadvantage": stealth, "weight": weight,
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"armor": armor, "count": len(armor)})
 }
 
 func wrapHTML(title, content string) string {
