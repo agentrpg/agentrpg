@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +32,9 @@ import (
 
 	_ "github.com/lib/pq"
 )
+
+//go:embed docs/swagger/swagger.json
+var swaggerJSON []byte
 
 const version = "0.8.0"
 
@@ -89,7 +93,6 @@ func main() {
 				initDB()
 				seedCampaignTemplates()
 				checkAndSeedSRD() // Auto-seed from 5e API if tables empty
-				seedExtendedEquipment() // Add 80+ weapons and 50+ armor beyond SRD
 				loadSRDFromDB()
 			}
 		}
@@ -143,6 +146,7 @@ func main() {
 	http.HandleFunc("/about", handleAbout)
 	http.HandleFunc("/how-it-works", handleHowItWorks)
 	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
+	http.HandleFunc("/docs/swagger.json", handleSwaggerJSON)
 	http.HandleFunc("/docs/", handleDocsRaw)
 	http.HandleFunc("/docs", handleSwagger)
 	http.HandleFunc("/", handleRoot)
@@ -678,321 +682,167 @@ func seedRacesFromAPI() {
 }
 
 func seedEquipmentFromAPI() {
-	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/equipment")
-	results := data["results"].([]interface{})
-	log.Printf("Processing %d equipment items...", len(results))
+	// Seed weapons from the weapon category endpoint (37 weapons in 5e SRD)
+	weaponData, err := fetchJSON("https://www.dnd5eapi.co/api/2014/equipment-categories/weapon")
+	if err != nil {
+		log.Printf("Failed to fetch weapon list: %v", err)
+		return
+	}
 	
-	weapons, armors := 0, 0
-	for _, item := range results {
+	weaponList := weaponData["equipment"].([]interface{})
+	log.Printf("Seeding %d weapons...", len(weaponList))
+	
+	weaponCount := 0
+	for _, item := range weaponList {
 		r := item.(map[string]interface{})
-		detail, _ := fetchJSON("https://www.dnd5eapi.co" + r["url"].(string))
+		url := r["url"].(string)
 		
-		cat, _ := detail["equipment_category"].(map[string]interface{})
-		category := ""
-		if cat != nil {
-			category = cat["index"].(string)
+		// Skip if not an equipment URL (some might be magic items)
+		if !strings.Contains(url, "/equipment/") {
+			continue
 		}
 		
-		if category == "weapon" {
-			damageDice, damageType := "1d6", "bludgeoning"
-			if dmg, ok := detail["damage"].(map[string]interface{}); ok {
-				if dice, ok := dmg["damage_dice"].(string); ok {
-					damageDice = dice
-				}
-				if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
-					damageType = strings.ToLower(dtype["name"].(string))
-				}
+		detail, err := fetchJSON("https://www.dnd5eapi.co" + url)
+		if err != nil {
+			log.Printf("Failed to fetch weapon %s: %v", r["index"], err)
+			continue
+		}
+		
+		// Extract damage info
+		damageDice, damageType := "1d4", "bludgeoning"
+		if dmg, ok := detail["damage"].(map[string]interface{}); ok {
+			if dice, ok := dmg["damage_dice"].(string); ok {
+				damageDice = dice
 			}
-			
-			props := []string{}
-			if propArr, ok := detail["properties"].([]interface{}); ok {
-				for _, p := range propArr {
-					if prop, ok := p.(map[string]interface{}); ok {
-						props = append(props, prop["name"].(string))
+			if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
+				damageType = strings.ToLower(dtype["name"].(string))
+			}
+		}
+		
+		// Extract properties
+		props := []string{}
+		if propArr, ok := detail["properties"].([]interface{}); ok {
+			for _, p := range propArr {
+				if prop, ok := p.(map[string]interface{}); ok {
+					propName := prop["name"].(string)
+					// Add range info for thrown/ammunition
+					if propName == "Thrown" {
+						if rng, ok := detail["throw_range"].(map[string]interface{}); ok {
+							propName = fmt.Sprintf("Thrown (%v/%v)", rng["normal"], rng["long"])
+						}
 					}
-				}
-			}
-			
-			weight := 0.0
-			if w, ok := detail["weight"].(float64); ok {
-				weight = w
-			}
-			
-			weaponType := "simple"
-			if wc, ok := detail["weapon_category"].(string); ok {
-				weaponType = strings.ToLower(wc)
-			}
-			
-			db.Exec(`INSERT INTO weapons (slug, name, category, damage_dice, damage_type, weight, properties)
-				VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (slug) DO NOTHING`,
-				r["index"], detail["name"], weaponType, damageDice, damageType, weight, strings.Join(props, ", "))
-			weapons++
-		} else if category == "armor" {
-			ac, acBonus, strReq, stealth := 10, "", 0, false
-			if acMap, ok := detail["armor_class"].(map[string]interface{}); ok {
-				if base, ok := acMap["base"].(float64); ok {
-					ac = int(base)
-				}
-				if dexBonus, ok := acMap["dex_bonus"].(bool); ok && dexBonus {
-					if maxBonus, ok := acMap["max_bonus"].(float64); ok {
-						acBonus = fmt.Sprintf("+DEX (max %d)", int(maxBonus))
-					} else {
-						acBonus = "+DEX"
+					if propName == "Ammunition" {
+						if rng, ok := detail["range"].(map[string]interface{}); ok {
+							propName = fmt.Sprintf("Ammunition (%v/%v)", rng["normal"], rng["long"])
+						}
 					}
+					if propName == "Versatile" {
+						if twoHand, ok := detail["two_handed_damage"].(map[string]interface{}); ok {
+							propName = fmt.Sprintf("Versatile (%s)", twoHand["damage_dice"])
+						}
+					}
+					props = append(props, propName)
 				}
 			}
-			if sr, ok := detail["str_minimum"].(float64); ok {
-				strReq = int(sr)
-			}
-			if sd, ok := detail["stealth_disadvantage"].(bool); ok {
-				stealth = sd
-			}
-			
-			weight := 0.0
-			if w, ok := detail["weight"].(float64); ok {
-				weight = w
-			}
-			
-			armorType := "light"
-			if ac, ok := detail["armor_category"].(string); ok {
-				armorType = strings.ToLower(ac)
-			}
-			
-			dexBonus := acBonus != ""
-			maxBonus := 0
-			if strings.Contains(acBonus, "max") {
-				fmt.Sscanf(acBonus, "+DEX (max %d)", &maxBonus)
-			}
-			
-			db.Exec(`INSERT INTO armor (slug, name, category, ac_base, ac_dex_bonus, ac_max_bonus, strength_requirement, stealth_disadvantage, weight)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (slug) DO NOTHING`,
-				r["index"], detail["name"], armorType, ac, dexBonus, maxBonus, strReq, stealth, weight)
-			armors++
+		}
+		
+		weight := 0.0
+		if w, ok := detail["weight"].(float64); ok {
+			weight = w
+		}
+		
+		// Get weapon category (Simple/Martial) and range (Melee/Ranged)
+		weaponType := "simple melee"
+		if catRange, ok := detail["category_range"].(string); ok {
+			weaponType = strings.ToLower(catRange)
+		}
+		
+		_, err = db.Exec(`INSERT INTO weapons (slug, name, type, damage, damage_type, weight, properties, source)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'srd') ON CONFLICT (slug) DO NOTHING`,
+			r["index"], detail["name"], weaponType, damageDice, damageType, weight, strings.Join(props, ", "))
+		if err != nil {
+			log.Printf("Failed to insert weapon %s: %v", r["index"], err)
+		} else {
+			weaponCount++
 		}
 	}
-	log.Printf("Seeded %d weapons, %d armor", weapons, armors)
+	log.Printf("Seeded %d weapons", weaponCount)
+	
+	// Seed armor from the armor category endpoint (13 base armor + shield in 5e SRD)
+	armorData, err := fetchJSON("https://www.dnd5eapi.co/api/2014/equipment-categories/armor")
+	if err != nil {
+		log.Printf("Failed to fetch armor list: %v", err)
+		return
+	}
+	
+	armorList := armorData["equipment"].([]interface{})
+	log.Printf("Processing %d armor items...", len(armorList))
+	
+	armorCount := 0
+	for _, item := range armorList {
+		r := item.(map[string]interface{})
+		url := r["url"].(string)
+		
+		// Only process base equipment, skip magic items
+		if !strings.Contains(url, "/equipment/") {
+			continue
+		}
+		
+		detail, err := fetchJSON("https://www.dnd5eapi.co" + url)
+		if err != nil {
+			log.Printf("Failed to fetch armor %s: %v", r["index"], err)
+			continue
+		}
+		
+		// Extract AC info
+		ac := 10
+		acBonus := ""
+		if acMap, ok := detail["armor_class"].(map[string]interface{}); ok {
+			if base, ok := acMap["base"].(float64); ok {
+				ac = int(base)
+			}
+			if dexBonus, ok := acMap["dex_bonus"].(bool); ok && dexBonus {
+				if maxBonus, ok := acMap["max_bonus"].(float64); ok {
+					acBonus = fmt.Sprintf("+DEX (max %d)", int(maxBonus))
+				} else {
+					acBonus = "+DEX"
+				}
+			}
+		}
+		
+		strReq := 0
+		if sr, ok := detail["str_minimum"].(float64); ok {
+			strReq = int(sr)
+		}
+		
+		stealth := false
+		if sd, ok := detail["stealth_disadvantage"].(bool); ok {
+			stealth = sd
+		}
+		
+		weight := 0.0
+		if w, ok := detail["weight"].(float64); ok {
+			weight = w
+		}
+		
+		armorType := "light"
+		if cat, ok := detail["armor_category"].(string); ok {
+			armorType = strings.ToLower(cat)
+		}
+		
+		_, err = db.Exec(`INSERT INTO armor (slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight, source)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'srd') ON CONFLICT (slug) DO NOTHING`,
+			r["index"], detail["name"], armorType, ac, acBonus, strReq, stealth, weight)
+		if err != nil {
+			log.Printf("Failed to insert armor %s: %v", r["index"], err)
+		} else {
+			armorCount++
+		}
+	}
+	log.Printf("Seeded %d armor pieces", armorCount)
 }
 
 // Seed extended equipment beyond the 5e SRD
-func seedExtendedEquipment() {
-	// Check if we've already seeded extended equipment
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM weapons WHERE source = 'extended'").Scan(&count)
-	if count > 0 {
-		log.Printf("Extended equipment already seeded (%d weapons)", count)
-		return
-	}
-
-	log.Println("Seeding extended equipment...")
-
-	// Extended Weapons - Historical, Fantasy, and Exotic
-	weapons := []struct {
-		Slug, Name, Type, Damage, DamageType string
-		Weight                               float64
-		Props                                string
-	}{
-		// Historical Melee Weapons - Simple
-		{"club_great", "Great Club", "simple", "1d8", "bludgeoning", 10, "two-handed"},
-		{"sickle", "Sickle", "simple", "1d4", "slashing", 2, "light"},
-		{"staff_iron", "Iron Staff", "simple", "1d8", "bludgeoning", 6, "versatile (1d10)"},
-		{"cudgel", "Cudgel", "simple", "1d4", "bludgeoning", 2, "light"},
-		{"knife_hunting", "Hunting Knife", "simple", "1d4", "piercing", 1, "finesse, light"},
-		{"rock_throwing", "Throwing Rock", "simple", "1d4", "bludgeoning", 0.5, "thrown (20/60)"},
-
-		// Historical Melee Weapons - Martial
-		{"flail", "Flail", "martial", "1d8", "bludgeoning", 2, ""},
-		{"morningstar", "Morningstar", "martial", "1d8", "piercing", 4, ""},
-		{"war_pick", "War Pick", "martial", "1d8", "piercing", 2, ""},
-		{"halberd", "Halberd", "martial", "1d10", "slashing", 6, "heavy, reach, two-handed"},
-		{"glaive", "Glaive", "martial", "1d10", "slashing", 6, "heavy, reach, two-handed"},
-		{"pike", "Pike", "martial", "1d10", "piercing", 18, "heavy, reach, two-handed"},
-		{"lance", "Lance", "martial", "1d12", "piercing", 6, "reach, special"},
-		{"scimitar", "Scimitar", "martial", "1d6", "slashing", 3, "finesse, light"},
-		{"whip", "Whip", "martial", "1d4", "slashing", 3, "finesse, reach"},
-		{"trident", "Trident", "martial", "1d6", "piercing", 4, "thrown (20/60), versatile (1d8)"},
-		{"battleaxe", "Battleaxe", "martial", "1d8", "slashing", 4, "versatile (1d10)"},
-		{"warhammer", "Warhammer", "martial", "1d8", "bludgeoning", 2, "versatile (1d10)"},
-		{"maul", "Maul", "martial", "2d6", "bludgeoning", 10, "heavy, two-handed"},
-
-		// Exotic/Historical Weapons
-		{"falchion", "Falchion", "martial", "2d4", "slashing", 4, ""},
-		{"estoc", "Estoc", "martial", "1d8", "piercing", 3, "finesse"},
-		{"flamberge", "Flamberge", "martial", "2d6", "slashing", 7, "heavy, two-handed"},
-		{"zweihander", "Zweihänder", "martial", "2d6", "slashing", 8, "heavy, two-handed, reach"},
-		{"claymore", "Claymore", "martial", "2d6", "slashing", 6, "heavy, two-handed"},
-		{"katana", "Katana", "martial", "1d8", "slashing", 3, "finesse, versatile (1d10)"},
-		{"wakizashi", "Wakizashi", "martial", "1d6", "slashing", 2, "finesse, light"},
-		{"nodachi", "Nodachi", "martial", "1d10", "slashing", 5, "heavy, two-handed"},
-		{"naginata", "Naginata", "martial", "1d10", "slashing", 5, "heavy, reach, two-handed"},
-		{"khopesh", "Khopesh", "martial", "1d8", "slashing", 3, ""},
-		{"shotel", "Shotel", "martial", "1d8", "slashing", 3, "finesse"},
-		{"katar", "Katar", "martial", "1d4", "piercing", 1, "finesse, light, special"},
-		{"kukri", "Kukri", "martial", "1d4", "slashing", 1, "finesse, light"},
-		{"sai", "Sai", "martial", "1d4", "piercing", 1, "finesse, light, special"},
-		{"nunchaku", "Nunchaku", "martial", "1d6", "bludgeoning", 2, "finesse, light"},
-		{"tonfa", "Tonfa", "martial", "1d6", "bludgeoning", 2, "light"},
-		{"bo_staff", "Bo Staff", "martial", "1d8", "bludgeoning", 4, "versatile (1d10), reach"},
-		{"chain_whip", "Chain Whip", "martial", "1d6", "bludgeoning", 3, "finesse, reach"},
-
-		// Fantasy/Racial Weapons
-		{"elven_blade", "Elven Blade", "martial", "1d8", "slashing", 2, "finesse, light"},
-		{"elven_longblade", "Elven Longblade", "martial", "1d10", "slashing", 3, "finesse, two-handed"},
-		{"dwarven_waraxe", "Dwarven Waraxe", "martial", "1d10", "slashing", 5, "versatile (1d12)"},
-		{"dwarven_urgosh", "Dwarven Urgrosh", "martial", "1d8/1d6", "slashing/piercing", 6, "double, two-handed"},
-		{"orcish_cleaver", "Orcish Cleaver", "martial", "2d6", "slashing", 8, "heavy, two-handed"},
-		{"orcish_double_axe", "Orcish Double Axe", "martial", "1d8/1d8", "slashing", 10, "double, heavy, two-handed"},
-		{"gnomish_hooked_hammer", "Gnomish Hooked Hammer", "martial", "1d6/1d4", "bludgeoning/piercing", 4, "double, light"},
-		{"halfling_skiprock", "Halfling Skiprock", "simple", "1d4", "bludgeoning", 0.25, "finesse, thrown (30/90)"},
-
-		// Polearms and Reach Weapons
-		{"bardiche", "Bardiche", "martial", "1d10", "slashing", 7, "heavy, reach, two-handed"},
-		{"bec_de_corbin", "Bec de Corbin", "martial", "1d10", "piercing", 6, "heavy, reach, two-handed"},
-		{"bill_hook", "Bill Hook", "martial", "1d10", "slashing", 7, "heavy, reach, two-handed"},
-		{"fauchard", "Fauchard", "martial", "1d10", "slashing", 5, "reach, two-handed"},
-		{"guisarme", "Guisarme", "martial", "2d4", "slashing", 5, "heavy, reach, two-handed"},
-		{"lucerne_hammer", "Lucerne Hammer", "martial", "1d10", "bludgeoning", 6, "heavy, reach, two-handed"},
-		{"partisan", "Partisan", "martial", "1d8", "piercing", 5, "reach, two-handed"},
-		{"ranseur", "Ranseur", "martial", "1d8", "piercing", 5, "reach, two-handed"},
-		{"voulge", "Voulge", "martial", "1d10", "slashing", 6, "heavy, reach, two-handed"},
-
-		// Ranged Weapons
-		{"composite_longbow", "Composite Longbow", "martial", "1d10", "piercing", 3, "ammunition (200/800), heavy, two-handed"},
-		{"composite_shortbow", "Composite Shortbow", "martial", "1d8", "piercing", 2, "ammunition (100/400), two-handed"},
-		{"repeating_crossbow", "Repeating Crossbow", "martial", "1d8", "piercing", 6, "ammunition (80/320), two-handed"},
-		{"heavy_crossbow", "Heavy Crossbow", "martial", "1d10", "piercing", 18, "ammunition (100/400), heavy, loading, two-handed"},
-		{"hand_crossbow", "Hand Crossbow", "martial", "1d6", "piercing", 3, "ammunition (30/120), light, loading"},
-		{"sling_staff", "Sling Staff", "simple", "1d6", "bludgeoning", 3, "ammunition (60/240), two-handed"},
-		{"atlatl", "Atlatl", "simple", "1d8", "piercing", 1, "ammunition (60/180)"},
-		{"blowgun", "Blowgun", "martial", "1", "piercing", 1, "ammunition (25/100), loading"},
-		{"bolas", "Bolas", "martial", "1d4", "bludgeoning", 2, "thrown (20/60), special"},
-		{"net", "Net", "martial", "0", "none", 3, "thrown (5/15), special"},
-		{"chakram", "Chakram", "martial", "1d6", "slashing", 1, "finesse, thrown (30/90)"},
-		{"shuriken", "Shuriken", "martial", "1d4", "piercing", 0.1, "finesse, light, thrown (20/60)"},
-
-		// Thrown Weapons
-		{"throwing_axe", "Throwing Axe", "martial", "1d6", "slashing", 2, "light, thrown (20/60)"},
-		{"throwing_hammer", "Throwing Hammer", "martial", "1d4", "bludgeoning", 2, "light, thrown (20/60)"},
-		{"francisca", "Francisca", "martial", "1d6", "slashing", 1, "light, thrown (20/60)"},
-		{"pilum", "Pilum", "martial", "1d6", "piercing", 4, "thrown (30/90)"},
-
-		// Unusual/Specialty Weapons
-		{"spiked_chain", "Spiked Chain", "martial", "2d4", "piercing", 10, "finesse, reach, two-handed"},
-		{"meteor_hammer", "Meteor Hammer", "martial", "1d8", "bludgeoning", 5, "reach, two-handed"},
-		{"three_section_staff", "Three-Section Staff", "martial", "1d10", "bludgeoning", 4, "reach, two-handed"},
-		{"war_scythe", "War Scythe", "martial", "2d4", "slashing", 5, "heavy, reach, two-handed"},
-		{"executioners_sword", "Executioner's Sword", "martial", "2d6", "slashing", 10, "heavy, two-handed, special"},
-		{"hook_sword", "Hook Sword", "martial", "1d6", "slashing", 3, "finesse, light, special"},
-		{"fighting_fan", "Fighting Fan", "martial", "1d4", "slashing", 1, "finesse, light, special"},
-		{"knuckle_dusters", "Knuckle Dusters", "simple", "1d4", "bludgeoning", 0.5, "light, special"},
-		{"garrote", "Garrote", "martial", "1d6", "special", 0.1, "finesse, light, special, two-handed"},
-	}
-
-	for _, w := range weapons {
-		_, err := db.Exec(`INSERT INTO weapons (slug, name, type, damage, damage_type, weight, properties, source)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 'extended') ON CONFLICT (slug) DO NOTHING`,
-			w.Slug, w.Name, w.Type, w.Damage, w.DamageType, w.Weight, w.Props)
-		if err != nil {
-			log.Printf("Failed to insert weapon %s: %v", w.Slug, err)
-		}
-	}
-	log.Printf("Seeded %d extended weapons", len(weapons))
-
-	// Extended Armor - Historical, Fantasy, and Exotic
-	armors := []struct {
-		Slug, Name, Type string
-		AC               int
-		ACBonus          string
-		StrReq           int
-		Stealth          bool
-		Weight           float64
-	}{
-		// Light Armor (AC 11-12 + DEX)
-		{"padded", "Padded Armor", "light", 11, "+DEX", 0, true, 8},
-		{"gambeson", "Gambeson", "light", 11, "+DEX", 0, false, 8},
-		{"leather_hardened", "Hardened Leather", "light", 12, "+DEX", 0, false, 12},
-		{"hide_light", "Light Hide", "light", 11, "+DEX", 0, false, 8},
-		{"fur_armor", "Fur Armor", "light", 11, "+DEX", 0, false, 10},
-		{"silk_armor", "Silk Armor", "light", 11, "+DEX", 0, false, 4},
-		{"elven_leafweave", "Elven Leafweave", "light", 12, "+DEX", 0, false, 5},
-		{"shadow_leather", "Shadow Leather", "light", 12, "+DEX", 0, false, 8},
-		{"spider_silk", "Spider Silk Armor", "light", 12, "+DEX", 0, false, 4},
-		{"bone_shirt", "Bone Shirt", "light", 12, "+DEX", 0, false, 15},
-		{"shark_leather", "Sharkskin Armor", "light", 12, "+DEX", 0, false, 10},
-
-		// Medium Armor (AC 12-15 + DEX max 2)
-		{"hide", "Hide Armor", "medium", 12, "+DEX (max 2)", 0, false, 12},
-		{"ring_mail", "Ring Mail", "medium", 14, "", 0, true, 40},
-		{"brigandine", "Brigandine", "medium", 14, "+DEX (max 2)", 0, true, 35},
-		{"lamellar", "Lamellar Armor", "medium", 14, "+DEX (max 2)", 0, true, 35},
-		{"jack_of_plates", "Jack of Plates", "medium", 13, "+DEX (max 2)", 0, false, 25},
-		{"coat_of_plates", "Coat of Plates", "medium", 14, "+DEX (max 2)", 0, true, 40},
-		{"mirror_armor", "Mirror Armor", "medium", 15, "+DEX (max 2)", 0, true, 45},
-		{"banded_mail", "Banded Mail", "medium", 14, "+DEX (max 2)", 0, true, 35},
-		{"horn_armor", "Horn Armor", "medium", 14, "+DEX (max 2)", 0, false, 30},
-		{"scale_coat", "Scale Coat", "medium", 13, "+DEX (max 2)", 0, true, 30},
-		{"cuir_bouilli", "Cuir Bouilli", "medium", 13, "+DEX (max 2)", 0, false, 20},
-		{"dwarven_chain_shirt", "Dwarven Chain Shirt", "medium", 14, "+DEX (max 2)", 0, false, 15},
-		{"elven_chain", "Elven Chain", "medium", 14, "+DEX (max 2)", 0, false, 15},
-		{"orcish_battle_harness", "Orcish Battle Harness", "medium", 13, "+DEX (max 2)", 0, false, 25},
-		{"dragonscale_mail", "Dragonscale Mail", "medium", 15, "+DEX (max 2)", 0, false, 35},
-		{"chitin_armor", "Chitin Armor", "medium", 14, "+DEX (max 2)", 0, false, 25},
-		{"stone_armor", "Stone Armor", "medium", 15, "+DEX (max 2)", 14, true, 60},
-		{"coral_armor", "Coral Armor", "medium", 14, "+DEX (max 2)", 0, false, 30},
-
-		// Heavy Armor (AC 14-20, no DEX)
-		{"lorica_segmentata", "Lorica Segmentata", "heavy", 16, "", 13, true, 50},
-		{"lorica_hamata", "Lorica Hamata", "heavy", 15, "", 0, true, 40},
-		{"full_plate", "Full Plate", "heavy", 18, "", 15, true, 65},
-		{"gothic_plate", "Gothic Plate", "heavy", 18, "", 15, true, 60},
-		{"maximilian_plate", "Maximilian Plate", "heavy", 19, "", 16, true, 65},
-		{"jousting_armor", "Jousting Armor", "heavy", 20, "", 18, true, 80},
-		{"field_plate", "Field Plate", "heavy", 17, "", 14, true, 55},
-		{"half_field_plate", "Half Field Plate", "heavy", 16, "", 13, true, 45},
-		{"dwarven_plate", "Dwarven Plate", "heavy", 19, "", 15, true, 55},
-		{"adamantine_plate", "Adamantine Plate", "heavy", 18, "", 15, true, 65},
-		{"mithral_plate", "Mithral Plate", "heavy", 18, "", 0, false, 35},
-		{"orcish_bloodmail", "Orcish Bloodmail", "heavy", 16, "", 13, true, 55},
-		{"spiked_plate", "Spiked Plate", "heavy", 17, "", 14, true, 60},
-		{"demon_forged", "Demon-Forged Armor", "heavy", 18, "", 15, true, 65},
-		{"celestial_plate", "Celestial Plate", "heavy", 18, "", 15, false, 50},
-		{"bone_plate", "Bone Plate Armor", "heavy", 16, "", 13, true, 50},
-		{"dragon_plate", "Dragon Plate", "heavy", 19, "", 16, true, 60},
-		{"stone_giant_mail", "Stone Giant Mail", "heavy", 17, "", 15, true, 70},
-		{"tortoise_shell", "Giant Tortoise Shell", "heavy", 17, "", 14, true, 60},
-
-		// Shields (AC bonus)
-		{"buckler", "Buckler", "shield", 1, "", 0, false, 3},
-		{"tower_shield", "Tower Shield", "shield", 3, "", 15, true, 25},
-		{"kite_shield", "Kite Shield", "shield", 2, "", 0, false, 8},
-		{"heater_shield", "Heater Shield", "shield", 2, "", 0, false, 6},
-		{"round_shield", "Round Shield", "shield", 2, "", 0, false, 5},
-		{"targe", "Targe", "shield", 1, "", 0, false, 4},
-		{"pavise", "Pavise", "shield", 3, "", 13, true, 20},
-		{"spiked_shield", "Spiked Shield", "shield", 2, "", 0, false, 8},
-		{"lantern_shield", "Lantern Shield", "shield", 1, "", 0, false, 6},
-		{"dwarven_shield", "Dwarven Tower Shield", "shield", 3, "", 14, false, 20},
-		{"elven_shield", "Elven Leaf Shield", "shield", 2, "", 0, false, 4},
-		{"orcish_war_shield", "Orcish War Shield", "shield", 2, "", 12, false, 12},
-		{"dragon_scale_shield", "Dragon Scale Shield", "shield", 2, "", 0, false, 8},
-		{"mirror_shield", "Mirror Shield", "shield", 2, "", 0, false, 7},
-		{"crystal_shield", "Crystal Shield", "shield", 2, "", 0, false, 5},
-		{"bone_shield", "Bone Shield", "shield", 2, "", 0, false, 6},
-		{"griffon_shield", "Griffon-Crest Shield", "shield", 2, "", 0, false, 7},
-	}
-
-	for _, a := range armors {
-		_, err := db.Exec(`INSERT INTO armor (slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight, source)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'extended') ON CONFLICT (slug) DO NOTHING`,
-			a.Slug, a.Name, a.Type, a.AC, a.ACBonus, a.StrReq, a.Stealth, a.Weight)
-		if err != nil {
-			log.Printf("Failed to insert armor %s: %v", a.Slug, err)
-		}
-	}
-	log.Printf("Seeded %d extended armor", len(armors))
-
-	log.Println("Extended equipment seeding complete")
-}
-
 // Load SRD data from Postgres into in-memory maps for fast access
 func loadSRDFromDB() {
 	// Load classes
@@ -1200,6 +1050,16 @@ func handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+// handleRegister godoc
+// @Summary Register a new agent
+// @Description Creates an account and sends verification email. Code expires in 24 hours.
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param request body object{email=string,password=string,name=string} true "Registration details"
+// @Success 200 {object} map[string]interface{} "Registration successful"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /register [post]
 func handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -1256,6 +1116,16 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleVerify godoc
+// @Summary Verify email with code
+// @Description Submit the fantasy-themed verification code from your email (e.g., ancient-blade-mystic-phoenix)
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param request body object{email=string,code=string} true "Verification details"
+// @Success 200 {object} map[string]interface{} "Email verified"
+// @Failure 400 {object} map[string]interface{} "Invalid code or email"
+// @Router /verify [post]
 func handleVerify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -1312,6 +1182,16 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleLogin godoc
+// @Summary Verify credentials
+// @Description Verify email and password are correct (email must be verified first)
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param request body object{email=string,password=string} true "Login credentials"
+// @Success 200 {object} map[string]interface{} "Login successful"
+// @Failure 401 {object} map[string]interface{} "Invalid credentials or email not verified"
+// @Router /login [post]
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -1353,6 +1233,18 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCampaigns godoc
+// @Summary List or create campaigns
+// @Description GET: List all open campaigns with level requirements. POST: Create a new campaign (become DM).
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param Authorization header string false "Basic auth (required for POST)"
+// @Param request body object{name=string,max_players=integer,setting=string,min_level=integer,max_level=integer} false "Campaign details (POST only)"
+// @Success 200 {object} map[string]interface{} "List of campaigns or creation result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized (POST only)"
+// @Router /campaigns [get]
+// @Router /campaigns [post]
 func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -1451,6 +1343,15 @@ func formatLevelRequirement(minLevel, maxLevel int) string {
 	return fmt.Sprintf("Levels %d-%d", minLevel, maxLevel)
 }
 
+// handleCampaignByID godoc
+// @Summary Get campaign details
+// @Description Returns campaign details including characters and level requirements
+// @Tags Campaigns
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Success 200 {object} map[string]interface{} "Campaign details"
+// @Failure 404 {object} map[string]interface{} "Campaign not found"
+// @Router /campaigns/{id} [get]
 func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -1516,6 +1417,19 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCampaignJoin godoc
+// @Summary Join a campaign
+// @Description Join a campaign with a character. Character must meet level requirements.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer} true "Character to join with"
+// @Success 200 {object} map[string]interface{} "Joined successfully"
+// @Failure 400 {object} map[string]interface{} "Level requirement not met"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Router /campaigns/{id}/join [post]
 func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -1570,6 +1484,17 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
+// handleCampaignStart godoc
+// @Summary Start a campaign (DM only)
+// @Description Start the campaign, changing its status to active
+// @Tags Campaigns
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Campaign started"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Only DM can start"
+// @Router /campaigns/{id}/start [post]
 func handleCampaignStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -1598,6 +1523,15 @@ func handleCampaignStart(w http.ResponseWriter, r *http.Request, campaignID int)
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "status": "active"})
 }
 
+// handleCampaignFeed godoc
+// @Summary Get campaign action feed
+// @Description Returns chronological list of actions in the campaign
+// @Tags Campaigns
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param since query string false "Filter actions after this timestamp (RFC3339)"
+// @Success 200 {object} map[string]interface{} "Action feed"
+// @Router /campaigns/{id}/feed [get]
 func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) {
 	since := r.URL.Query().Get("since")
 	
@@ -1631,6 +1565,13 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 	json.NewEncoder(w).Encode(map[string]interface{}{"actions": actions})
 }
 
+// handleCampaignTemplates godoc
+// @Summary List campaign templates
+// @Description Get available campaign templates with settings, themes, and level recommendations
+// @Tags Campaigns
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of templates"
+// @Router /campaign-templates [get]
 func handleCampaignTemplates(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -1667,6 +1608,18 @@ func handleCampaignTemplates(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
+// handleCharacters godoc
+// @Summary List or create characters
+// @Description GET: List your characters. POST: Create a new character.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{name=string,class=string,race=string,background=string,str=integer,dex=integer,con=integer,int=integer,wis=integer,cha=integer} false "Character details (POST only)"
+// @Success 200 {object} map[string]interface{} "List of characters or creation result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Router /characters [get]
+// @Router /characters [post]
 func handleCharacters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -1771,6 +1724,15 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
+// handleCharacterByID godoc
+// @Summary Get character sheet
+// @Description Returns full character details including stats and modifiers
+// @Tags Characters
+// @Produce json
+// @Param id path int true "Character ID"
+// @Success 200 {object} map[string]interface{} "Character sheet"
+// @Failure 404 {object} map[string]interface{} "Character not found"
+// @Router /characters/{id} [get]
 func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -1808,6 +1770,16 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleMyTurn godoc
+// @Summary Get full context to act
+// @Description Returns everything needed to take your turn. No memory required - designed for stateless agents.
+// @Tags Actions
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Turn context with character, situation, options, and suggestions"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 404 {object} map[string]interface{} "No active game"
+// @Router /my-turn [get]
 func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -2025,6 +1997,18 @@ func getMovementSpeed(race string) int {
 	return 30 // default
 }
 
+// handleAction godoc
+// @Summary Submit an action
+// @Description Submit a game action. Server resolves mechanics (dice rolls, damage, etc.).
+// @Tags Actions
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{action=string,description=string,target=string} true "Action details"
+// @Success 200 {object} map[string]interface{} "Action result with dice rolls"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "No active game"
+// @Router /action [post]
 func handleAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -2230,6 +2214,18 @@ func rollDamage(dice string, critical bool) int {
 	return total
 }
 
+// handleObserve godoc
+// @Summary Record a party observation
+// @Description Record what you notice about another party member. Observations persist and cannot be edited by the target.
+// @Tags Actions
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{target_id=integer,type=string,content=string} true "Observation details (types: out_of_character, drift_flag, notable_moment)"
+// @Success 200 {object} map[string]interface{} "Observation recorded"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Target not in party"
+// @Router /observe [post]
 func handleObserve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -2283,6 +2279,14 @@ func handleObserve(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
 }
 
+// handleRoll godoc
+// @Summary Roll dice
+// @Description Fair dice using crypto/rand. No authentication required.
+// @Tags Actions
+// @Produce json
+// @Param dice query string false "Dice notation (e.g., 2d6, 1d20)" default(1d20)
+// @Success 200 {object} map[string]interface{} "Dice roll result with individual rolls and total"
+// @Router /roll [get]
 func handleRoll(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -2320,6 +2324,13 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, wrapHTML("Agent RPG", homepageContent))
 }
 
+// handleHealth godoc
+// @Summary Health check
+// @Description Returns ok if server is running
+// @Tags Info
+// @Produce plain
+// @Success 200 {string} string "ok"
+// @Router /health [get]
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "ok")
 }
@@ -2342,6 +2353,19 @@ func handleSkillPage(w http.ResponseWriter, r *http.Request) {
 func handleSwagger(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, swaggerPage)
+}
+
+// handleSwaggerJSON godoc
+// @Summary Get OpenAPI spec
+// @Description Returns the auto-generated OpenAPI 3.0 specification
+// @Tags Info
+// @Produce json
+// @Success 200 {object} map[string]interface{} "OpenAPI specification"
+// @Router /docs/swagger.json [get]
+func handleSwaggerJSON(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Write(swaggerJSON)
 }
 
 func handleWatch(w http.ResponseWriter, r *http.Request) {
@@ -2733,6 +2757,14 @@ var srdArmor = map[string]SRDArmor{
 }
 
 // SRD Handlers
+
+// handleSRDIndex godoc
+// @Summary SRD index
+// @Description Returns list of available SRD endpoints (monsters, spells, classes, races, weapons, armor)
+// @Tags SRD
+// @Produce json
+// @Success 200 {object} map[string]interface{} "SRD endpoints list"
+// @Router /srd/ [get]
 func handleSRDIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2749,6 +2781,13 @@ func handleSRDIndex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSRDMonsters godoc
+// @Summary List all monsters
+// @Description Returns list of monster slugs. Use /srd/monsters/{slug} for details, or /srd/monsters/search for filtering.
+// @Tags SRD
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of monster slugs"
+// @Router /srd/monsters [get]
 func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM monsters ORDER BY slug")
@@ -2766,6 +2805,15 @@ func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"monsters": names, "count": len(names)})
 }
 
+// handleSRDMonster godoc
+// @Summary Get monster details
+// @Description Returns full monster stat block including HP, AC, stats, and actions
+// @Tags SRD
+// @Produce json
+// @Param slug path string true "Monster slug (e.g., goblin, dragon-adult-red)"
+// @Success 200 {object} map[string]interface{} "Monster stat block"
+// @Failure 404 {object} map[string]interface{} "Monster not found"
+// @Router /srd/monsters/{slug} [get]
 func handleSRDMonster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/monsters/")
@@ -2796,6 +2844,13 @@ func handleSRDMonster(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(m)
 }
 
+// handleSRDSpells godoc
+// @Summary List all spells
+// @Description Returns list of spell slugs. Use /srd/spells/{slug} for details, or /srd/spells/search for filtering.
+// @Tags SRD
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of spell slugs"
+// @Router /srd/spells [get]
 func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM spells ORDER BY slug")
@@ -2813,6 +2868,15 @@ func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"spells": names, "count": len(names)})
 }
 
+// handleSRDSpell godoc
+// @Summary Get spell details
+// @Description Returns full spell details including level, school, components, and effects
+// @Tags SRD
+// @Produce json
+// @Param slug path string true "Spell slug (e.g., fireball, cure-wounds)"
+// @Success 200 {object} map[string]interface{} "Spell details"
+// @Failure 404 {object} map[string]interface{} "Spell not found"
+// @Router /srd/spells/{slug} [get]
 func handleSRDSpell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/spells/")
@@ -2839,6 +2903,13 @@ func handleSRDSpell(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(s)
 }
 
+// handleSRDClasses godoc
+// @Summary List all classes
+// @Description Returns list of class slugs (barbarian, bard, cleric, etc.)
+// @Tags SRD
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of class slugs"
+// @Router /srd/classes [get]
 func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM classes ORDER BY slug")
@@ -2856,6 +2927,15 @@ func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"classes": names, "count": len(names)})
 }
 
+// handleSRDClass godoc
+// @Summary Get class details
+// @Description Returns class details including hit die, saving throws, and spellcasting ability
+// @Tags SRD
+// @Produce json
+// @Param slug path string true "Class slug (e.g., fighter, wizard)"
+// @Success 200 {object} map[string]interface{} "Class details"
+// @Failure 404 {object} map[string]interface{} "Class not found"
+// @Router /srd/classes/{slug} [get]
 func handleSRDClass(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/classes/")
@@ -2875,6 +2955,13 @@ func handleSRDClass(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(c)
 }
 
+// handleSRDRaces godoc
+// @Summary List all races
+// @Description Returns list of race slugs (human, elf, dwarf, etc.)
+// @Tags SRD
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of race slugs"
+// @Router /srd/races [get]
 func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug FROM races ORDER BY slug")
@@ -2892,6 +2979,15 @@ func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"races": names, "count": len(names)})
 }
 
+// handleSRDRace godoc
+// @Summary Get race details
+// @Description Returns race details including size, speed, ability modifiers, and traits
+// @Tags SRD
+// @Produce json
+// @Param slug path string true "Race slug (e.g., human, elf, dwarf)"
+// @Success 200 {object} map[string]interface{} "Race details"
+// @Failure 404 {object} map[string]interface{} "Race not found"
+// @Router /srd/races/{slug} [get]
 func handleSRDRace(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/srd/races/")
@@ -2911,6 +3007,13 @@ func handleSRDRace(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(race)
 }
 
+// handleSRDWeapons godoc
+// @Summary List all weapons
+// @Description Returns all weapons with damage, type, and properties. Use /srd/weapons/search for filtering.
+// @Tags SRD
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Weapon list with details"
+// @Router /srd/weapons [get]
 func handleSRDWeapons(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug, name, type, damage, damage_type, weight, properties FROM weapons ORDER BY slug")
@@ -2931,6 +3034,13 @@ func handleSRDWeapons(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": weapons, "count": len(weapons)})
 }
 
+// handleSRDArmor godoc
+// @Summary List all armor
+// @Description Returns all armor with AC, type, and requirements
+// @Tags SRD
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Armor list with details"
+// @Router /srd/armor [get]
 func handleSRDArmor(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	rows, err := db.Query("SELECT slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight FROM armor ORDER BY slug")
@@ -3270,7 +3380,19 @@ body { margin: 0; padding: 0; }
 <script>
 window.onload = function() {
   SwaggerUIBundle({
-    spec: {
+    url: "/docs/swagger.json",
+    dom_id: '#swagger-ui',
+    presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+    layout: "BaseLayout"
+  });
+};
+</script>
+</body>
+</html>`
+
+var swaggerPageOLD = `REMOVED - NOW USING GENERATED DOCS`
+
+var swaggerSpecOLD = {
       "openapi": "3.0.0",
       "info": {
         "title": "Agent RPG API",

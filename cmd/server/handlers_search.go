@@ -35,8 +35,22 @@ func getPagination(r *http.Request) (page, perPage int) {
 	return
 }
 
-// GET /api/srd/monsters/search
-// ?type=dragon&cr_min=5&cr_max=15&hp_min=50&hp_max=200&size=large&environment=forest&page=1&per_page=20
+// handleMonsterSearch godoc
+// @Summary Search monsters
+// @Description Search and filter monsters with pagination
+// @Tags SRD
+// @Produce json
+// @Param type query string false "Monster type (e.g., dragon, undead, humanoid)"
+// @Param size query string false "Size (tiny, small, medium, large, huge, gargantuan)"
+// @Param cr query string false "Challenge rating (e.g., 1, 1/4, 5)"
+// @Param hp_min query int false "Minimum HP"
+// @Param hp_max query int false "Maximum HP"
+// @Param name query string false "Name search (partial match)"
+// @Param sort query string false "Sort field (hp, hp_desc, cr, name)"
+// @Param page query int false "Page number" default(1)
+// @Param per_page query int false "Results per page (max 100)" default(20)
+// @Success 200 {object} PaginatedResponse "Paginated monster list"
+// @Router /srd/monsters/search [get]
 func handleMonsterSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -160,8 +174,25 @@ func handleMonsterSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/srd/spells/search
-// ?level=3&school=evocation&class=wizard&concentration=true&ritual=false&damage_type=fire&page=1
+// handleSpellSearch godoc
+// @Summary Search spells
+// @Description Search and filter spells with pagination
+// @Tags SRD
+// @Produce json
+// @Param level query int false "Exact spell level (0-9)"
+// @Param level_min query int false "Minimum spell level"
+// @Param level_max query int false "Maximum spell level"
+// @Param school query string false "School of magic (evocation, abjuration, etc.)"
+// @Param damage_type query string false "Damage type (fire, cold, lightning, etc.)"
+// @Param concentration query bool false "Requires concentration"
+// @Param ritual query bool false "Can be cast as ritual"
+// @Param class query string false "Available to class (wizard, cleric, etc.)"
+// @Param name query string false "Name search (partial match)"
+// @Param sort query string false "Sort field (level, level_desc, school)"
+// @Param page query int false "Page number" default(1)
+// @Param per_page query int false "Results per page (max 100)" default(20)
+// @Success 200 {object} PaginatedResponse "Paginated spell list"
+// @Router /srd/spells/search [get]
 func handleSpellSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -304,8 +335,19 @@ func handleSpellSearch(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /api/srd/weapons/search
-// ?type=martial&range=melee&damage_type=slashing
+// handleWeaponSearch godoc
+// @Summary Search weapons
+// @Description Search and filter weapons with pagination
+// @Tags SRD
+// @Produce json
+// @Param type query string false "Weapon type (simple, martial)"
+// @Param range query string false "Weapon range (melee, ranged)"
+// @Param damage_type query string false "Damage type (slashing, piercing, bludgeoning)"
+// @Param name query string false "Name search (partial match)"
+// @Param page query int false "Page number" default(1)
+// @Param per_page query int false "Results per page (max 100)" default(20)
+// @Success 200 {object} PaginatedResponse "Paginated weapon list"
+// @Router /srd/weapons/search [get]
 func handleWeaponSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
