@@ -1943,6 +1943,12 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 				case "next":
 					handleCombatNext(w, r, campaignID)
 					return
+				case "add":
+					handleCombatAdd(w, r, campaignID)
+					return
+				case "remove":
+					handleCombatRemove(w, r, campaignID)
+					return
 				}
 			}
 			handleCombatStatus(w, r, campaignID)
@@ -6444,6 +6450,374 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 		"round":        round,
 		"current_turn": entries[turnIndex].Name,
 		"turn_index":   turnIndex,
+	})
+}
+
+// handleCombatAdd godoc
+// @Summary Add combatants to combat (GM only)
+// @Description Add monsters or NPCs to an active combat encounter
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{combatants=[]object} true "Combatants to add (name, monster_key, initiative, hp, ac)"
+// @Success 200 {object} map[string]interface{} "Combatants added"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Only GM can add combatants"
+// @Router /campaigns/{id}/combat/add [post]
+func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_add_combatants"})
+		return
+	}
+	
+	// Check combat is active
+	var round, turnIndex int
+	var turnOrderJSON []byte
+	var active bool
+	err = db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active 
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&round, &turnIndex, &turnOrderJSON, &active)
+	
+	if err != nil || !active {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_active_combat", "hint": "Start combat first with POST /api/campaigns/{id}/combat/start"})
+		return
+	}
+	
+	// Parse request
+	var req struct {
+		Combatants []struct {
+			Name       string `json:"name"`
+			MonsterKey string `json:"monster_key"` // SRD monster slug (e.g., "goblin")
+			Initiative int    `json:"initiative"`  // Optional: roll if not provided
+			HP         int    `json:"hp"`          // Optional: use monster default
+			AC         int    `json:"ac"`          // Optional: use monster default
+		} `json:"combatants"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if len(req.Combatants) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants_provided"})
+		return
+	}
+	
+	// Parse current turn order
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+		DexScore   int    `json:"dex_score"`
+		IsMonster  bool   `json:"is_monster"`
+		MonsterKey string `json:"monster_key"`
+		HP         int    `json:"hp"`
+		MaxHP      int    `json:"max_hp"`
+		AC         int    `json:"ac"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	// Track who was current before adding
+	var currentTurnName string
+	if len(entries) > turnIndex && turnIndex >= 0 {
+		currentTurnName = entries[turnIndex].Name
+	}
+	
+	// Find highest existing monster ID (monsters use negative IDs)
+	minID := 0
+	for _, e := range entries {
+		if e.ID < minID {
+			minID = e.ID
+		}
+	}
+	
+	added := []map[string]interface{}{}
+	
+	for _, c := range req.Combatants {
+		if c.Name == "" {
+			continue
+		}
+		
+		entry := InitEntry{
+			ID:         minID - 1, // Decrement for each new monster
+			Name:       c.Name,
+			IsMonster:  true,
+			MonsterKey: c.MonsterKey,
+		}
+		minID--
+		
+		// Look up monster stats if key provided
+		if c.MonsterKey != "" {
+			var dex, hp, ac int
+			err := db.QueryRow(`
+				SELECT COALESCE(dex, 10), COALESCE(hp, 10), COALESCE(ac, 10) 
+				FROM monsters WHERE slug = $1
+			`, c.MonsterKey).Scan(&dex, &hp, &ac)
+			if err == nil {
+				// Roll initiative based on monster DEX if not provided
+				if c.Initiative == 0 {
+					entry.Initiative = rollInitiative(modifier(dex), 0)
+				} else {
+					entry.Initiative = c.Initiative
+				}
+				entry.DexScore = dex
+				
+				// Use provided HP/AC or monster defaults
+				if c.HP > 0 {
+					entry.HP = c.HP
+					entry.MaxHP = c.HP
+				} else {
+					entry.HP = hp
+					entry.MaxHP = hp
+				}
+				if c.AC > 0 {
+					entry.AC = c.AC
+				} else {
+					entry.AC = ac
+				}
+			} else {
+				// Monster not found, use provided or defaults
+				if c.Initiative == 0 {
+					entry.Initiative = rollDie(20)
+				} else {
+					entry.Initiative = c.Initiative
+				}
+				entry.HP = 10
+				entry.MaxHP = 10
+				entry.AC = 10
+				if c.HP > 0 {
+					entry.HP = c.HP
+					entry.MaxHP = c.HP
+				}
+				if c.AC > 0 {
+					entry.AC = c.AC
+				}
+			}
+		} else {
+			// No monster key, use provided values or defaults
+			if c.Initiative == 0 {
+				entry.Initiative = rollDie(20)
+			} else {
+				entry.Initiative = c.Initiative
+			}
+			entry.HP = 10
+			entry.MaxHP = 10
+			entry.AC = 10
+			if c.HP > 0 {
+				entry.HP = c.HP
+				entry.MaxHP = c.HP
+			}
+			if c.AC > 0 {
+				entry.AC = c.AC
+			}
+		}
+		
+		entries = append(entries, entry)
+		added = append(added, map[string]interface{}{
+			"id":         entry.ID,
+			"name":       entry.Name,
+			"initiative": entry.Initiative,
+			"hp":         entry.HP,
+			"ac":         entry.AC,
+		})
+	}
+	
+	// Re-sort by initiative (highest first), then by DEX (highest first)
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Initiative != entries[j].Initiative {
+			return entries[i].Initiative > entries[j].Initiative
+		}
+		return entries[i].DexScore > entries[j].DexScore
+	})
+	
+	// Find where the current turn holder ended up after re-sort
+	newTurnIndex := 0
+	for i, e := range entries {
+		if e.Name == currentTurnName {
+			newTurnIndex = i
+			break
+		}
+	}
+	
+	// Update combat state
+	updatedJSON, _ := json.Marshal(entries)
+	db.Exec(`
+		UPDATE combat_state SET turn_order = $1, current_turn_index = $2 WHERE lobby_id = $3
+	`, updatedJSON, newTurnIndex, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":          true,
+		"added_count":      len(added),
+		"combatants_added": added,
+		"turn_order":       entries,
+		"current_turn":     entries[newTurnIndex].Name,
+	})
+}
+
+// handleCombatRemove godoc
+// @Summary Remove combatant from combat (GM only)
+// @Description Remove a monster or NPC from combat (for death, flee, etc.)
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{combatant_id=integer,combatant_name=string} true "ID or name of combatant to remove"
+// @Success 200 {object} map[string]interface{} "Combatant removed"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Only GM can remove combatants"
+// @Router /campaigns/{id}/combat/remove [post]
+func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_remove_combatants"})
+		return
+	}
+	
+	// Check combat is active
+	var round, turnIndex int
+	var turnOrderJSON []byte
+	var active bool
+	err = db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active 
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&round, &turnIndex, &turnOrderJSON, &active)
+	
+	if err != nil || !active {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_active_combat"})
+		return
+	}
+	
+	// Parse request
+	var req struct {
+		CombatantID   int    `json:"combatant_id"`
+		CombatantName string `json:"combatant_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CombatantID == 0 && req.CombatantName == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "must_provide_combatant_id_or_name"})
+		return
+	}
+	
+	// Parse turn order
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+		DexScore   int    `json:"dex_score"`
+		IsMonster  bool   `json:"is_monster"`
+		MonsterKey string `json:"monster_key"`
+		HP         int    `json:"hp"`
+		MaxHP      int    `json:"max_hp"`
+		AC         int    `json:"ac"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	// Find and remove the combatant
+	var removed *InitEntry
+	var removedIdx int
+	newEntries := []InitEntry{}
+	for i, e := range entries {
+		match := false
+		if req.CombatantID != 0 && e.ID == req.CombatantID {
+			match = true
+		} else if req.CombatantName != "" && strings.EqualFold(e.Name, req.CombatantName) {
+			match = true
+		}
+		
+		if match && removed == nil {
+			removed = &e
+			removedIdx = i
+		} else {
+			newEntries = append(newEntries, e)
+		}
+	}
+	
+	if removed == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "combatant_not_found"})
+		return
+	}
+	
+	// Adjust turn index if needed
+	newTurnIndex := turnIndex
+	if removedIdx < turnIndex {
+		newTurnIndex-- // Removed someone before current turn
+	} else if removedIdx == turnIndex {
+		// Removed current turn holder - stay at same index (next in line becomes current)
+		if newTurnIndex >= len(newEntries) && len(newEntries) > 0 {
+			newTurnIndex = 0
+			round++ // Wrapped around
+		}
+	}
+	
+	if len(newEntries) == 0 {
+		// No combatants left, end combat
+		db.Exec("UPDATE combat_state SET active = false WHERE lobby_id = $1", campaignID)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":     true,
+			"removed":     removed.Name,
+			"combat_ended": true,
+			"message":     "All combatants removed, combat ended",
+		})
+		return
+	}
+	
+	// Update combat state
+	updatedJSON, _ := json.Marshal(newEntries)
+	db.Exec(`
+		UPDATE combat_state SET turn_order = $1, current_turn_index = $2, round_number = $3 WHERE lobby_id = $4
+	`, updatedJSON, newTurnIndex, round, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"removed":      removed.Name,
+		"removed_id":   removed.ID,
+		"turn_order":   newEntries,
+		"current_turn": newEntries[newTurnIndex].Name,
 	})
 }
 

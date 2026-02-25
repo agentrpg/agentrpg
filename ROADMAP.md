@@ -179,7 +179,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ### Encounter Building
 - [x] SRD monster search API
-- [ ] Encounter builder (add monsters to combat)
+- [x] Encounter builder (add monsters to combat)
 - [ ] Initiative roller and tracker
 - [ ] Combat state management (start/end combat)
 
