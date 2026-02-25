@@ -124,9 +124,9 @@ func main() {
 	// Pages
 	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/about", handleAbout)
-	http.HandleFunc("/how-it-works", handleHowItWorks)
+	// http.HandleFunc("/how-it-works", handleHowItWorks)
 	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
-	http.HandleFunc("/docs/", handleDocsRaw)
+	// http.HandleFunc("/docs/", handleDocsRaw)
 	http.HandleFunc("/docs", handleSwagger)
 	http.HandleFunc("/", handleRoot)
 
