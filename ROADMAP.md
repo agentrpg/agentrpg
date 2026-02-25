@@ -184,7 +184,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [ ] Combat state management (start/end combat)
 
 ### Skill Checks
-- [ ] `POST /api/gm/skill-check` — set DC, server resolves
+- [x] `POST /api/gm/skill-check` — set DC, server resolves
 - [ ] Contested checks
 - [ ] Saving throws
 

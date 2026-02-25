@@ -124,6 +124,7 @@ func main() {
 	http.HandleFunc("/api/gm/status", handleGMStatus)
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
+	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
@@ -4309,6 +4310,236 @@ func sendNudgeEmail(toEmail, charName, campaignName, body string) error {
 	
 	log.Printf("Nudge email sent to %s for character %s", toEmail, charName)
 	return nil
+}
+
+// Skill to ability mapping (D&D 5e)
+var skillAbilityMap = map[string]string{
+	// STR
+	"athletics": "str",
+	// DEX
+	"acrobatics": "dex", "sleight_of_hand": "dex", "stealth": "dex",
+	// INT
+	"arcana": "int", "history": "int", "investigation": "int", "nature": "int", "religion": "int",
+	// WIS
+	"animal_handling": "wis", "insight": "wis", "medicine": "wis", "perception": "wis", "survival": "wis",
+	// CHA
+	"deception": "cha", "intimidation": "cha", "performance": "cha", "persuasion": "cha",
+}
+
+// handleGMSkillCheck godoc
+// @Summary Call for a skill check
+// @Description GM calls for a skill check. Server rolls d20 + modifier and compares to DC.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,skill=string,ability=string,dc=integer,advantage=boolean,disadvantage=boolean} true "Skill check parameters"
+// @Success 200 {object} map[string]interface{} "Skill check result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/skill-check [post]
+func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID  int    `json:"character_id"`
+		Skill        string `json:"skill"`        // e.g., "perception", "athletics"
+		Ability      string `json:"ability"`      // e.g., "str", "dex" - used if no skill
+		DC           int    `json:"dc"`           // Difficulty Class
+		Advantage    bool   `json:"advantage"`
+		Disadvantage bool   `json:"disadvantage"`
+		Description  string `json:"description"`  // Optional context
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	if req.DC == 0 {
+		req.DC = 10 // Default DC
+	}
+	
+	// Get character stats
+	var charName string
+	var str, dex, con, intl, wis, cha, level int
+	var charLobbyID int
+	err = db.QueryRow(`
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify character is in this campaign
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Determine which ability to use
+	abilityUsed := strings.ToLower(req.Ability)
+	skillUsed := strings.ToLower(strings.ReplaceAll(req.Skill, " ", "_"))
+	
+	// If skill provided, map to ability
+	if skillUsed != "" {
+		if mapped, ok := skillAbilityMap[skillUsed]; ok {
+			abilityUsed = mapped
+		}
+	}
+	
+	// Get the modifier for the ability
+	var abilityMod int
+	var abilityName string
+	switch abilityUsed {
+	case "str", "strength":
+		abilityMod = modifier(str)
+		abilityName = "Strength"
+	case "dex", "dexterity":
+		abilityMod = modifier(dex)
+		abilityName = "Dexterity"
+	case "con", "constitution":
+		abilityMod = modifier(con)
+		abilityName = "Constitution"
+	case "int", "intelligence":
+		abilityMod = modifier(intl)
+		abilityName = "Intelligence"
+	case "wis", "wisdom":
+		abilityMod = modifier(wis)
+		abilityName = "Wisdom"
+	case "cha", "charisma":
+		abilityMod = modifier(cha)
+		abilityName = "Charisma"
+	default:
+		// Default to wisdom for unknown skills
+		abilityMod = modifier(wis)
+		abilityName = "Wisdom"
+	}
+	
+	// Add proficiency bonus if proficient (simplified: assume proficient in class skills)
+	// TODO: Track actual skill proficiencies per character
+	totalMod := abilityMod
+	
+	// Roll the die
+	var roll1, roll2, finalRoll int
+	rollType := "normal"
+	
+	if req.Advantage && !req.Disadvantage {
+		roll1, roll2, finalRoll = rollWithAdvantage()
+		rollType = "advantage"
+	} else if req.Disadvantage && !req.Advantage {
+		roll1, roll2, finalRoll = rollWithDisadvantage()
+		rollType = "disadvantage"
+	} else {
+		finalRoll = rollDie(20)
+		roll1 = finalRoll
+		roll2 = 0
+	}
+	
+	total := finalRoll + totalMod
+	success := total >= req.DC
+	
+	// Format check name
+	checkName := skillUsed
+	if checkName == "" {
+		checkName = strings.ToLower(abilityName)
+	}
+	
+	// Build result description
+	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
+	if rollType == "advantage" {
+		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+	} else if rollType == "disadvantage" {
+		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+	}
+	
+	modStr := ""
+	if totalMod >= 0 {
+		modStr = fmt.Sprintf("+%d", totalMod)
+	} else {
+		modStr = fmt.Sprintf("%d", totalMod)
+	}
+	
+	outcomeStr := "FAILURE"
+	if success {
+		outcomeStr = "SUCCESS"
+	}
+	
+	// Check for natural 20 or 1 (optional rule flavor)
+	if finalRoll == 20 {
+		outcomeStr = "CRITICAL SUCCESS"
+	} else if finalRoll == 1 {
+		outcomeStr = "CRITICAL FAILURE"
+	}
+	
+	fullResult := fmt.Sprintf("%s check: %s%s = %d vs DC %d → %s",
+		strings.Title(checkName), resultStr, modStr, total, req.DC, outcomeStr)
+	
+	// Record the skill check
+	desc := fmt.Sprintf("%s: %s check (DC %d)", charName, strings.Title(checkName), req.DC)
+	if req.Description != "" {
+		desc = fmt.Sprintf("%s: %s - %s check (DC %d)", charName, req.Description, strings.Title(checkName), req.DC)
+	}
+	
+	_, _ = db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'skill_check', $3, $4)
+	`, campaignID, req.CharacterID, desc, fullResult)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      success,
+		"character":    charName,
+		"check":        checkName,
+		"ability":      abilityName,
+		"roll":         finalRoll,
+		"roll_type":    rollType,
+		"modifier":     totalMod,
+		"total":        total,
+		"dc":           req.DC,
+		"outcome":      outcomeStr,
+		"result":       fullResult,
+		"rolls_detail": map[string]interface{}{
+			"die1": roll1,
+			"die2": roll2,
+		},
+	})
 }
 
 // handleAction godoc
