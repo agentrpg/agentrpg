@@ -154,6 +154,7 @@ func main() {
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
+	http.HandleFunc("/api/gm/contested-check", handleGMContestedCheck)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
@@ -5114,6 +5115,285 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		"rolls_detail": map[string]interface{}{
 			"die1": roll1,
 			"die2": roll2,
+		},
+	})
+}
+
+// handleGMContestedCheck godoc
+// @Summary Resolve a contested check
+// @Description GM calls for an opposed check between two creatures (e.g., grapple, shove). Both roll, highest wins.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{initiator_id=int,defender_id=int,initiator_skill=string,defender_skill=string,description=string} true "Contested check details"
+// @Success 200 {object} map[string]interface{} "Contested check result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/contested-check [post]
+func handleGMContestedCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		InitiatorID          int    `json:"initiator_id"`           // Character ID of initiator
+		DefenderID           int    `json:"defender_id"`            // Character ID of defender
+		InitiatorSkill       string `json:"initiator_skill"`        // Skill or ability: athletics, acrobatics, str, dex, etc.
+		DefenderSkill        string `json:"defender_skill"`         // Skill or ability (can be "athletics_or_acrobatics" for choice)
+		InitiatorAdvantage   bool   `json:"initiator_advantage"`
+		InitiatorDisadvantage bool  `json:"initiator_disadvantage"`
+		DefenderAdvantage    bool   `json:"defender_advantage"`
+		DefenderDisadvantage bool   `json:"defender_disadvantage"`
+		Description          string `json:"description"`            // e.g., "grapple attempt", "shove"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.InitiatorID == 0 || req.DefenderID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "initiator_id and defender_id required"})
+		return
+	}
+	
+	if req.InitiatorSkill == "" {
+		req.InitiatorSkill = "athletics" // Default for most contests
+	}
+	if req.DefenderSkill == "" {
+		req.DefenderSkill = "athletics" // Default
+	}
+	
+	// Helper to get character stats
+	getCharStats := func(charID int) (name string, str, dex, con, intl, wis, cha, level int, lobbyID int, err error) {
+		err = db.QueryRow(`
+			SELECT name, str, dex, con, intl, wis, cha, level, lobby_id
+			FROM characters WHERE id = $1
+		`, charID).Scan(&name, &str, &dex, &con, &intl, &wis, &cha, &level, &lobbyID)
+		return
+	}
+	
+	// Get both characters
+	initName, initStr, initDex, initCon, initInt, initWis, initCha, initLevel, initLobby, err := getCharStats(req.InitiatorID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "initiator_not_found"})
+		return
+	}
+	
+	defName, defStr, defDex, defCon, defInt, defWis, defCha, defLevel, defLobby, err := getCharStats(req.DefenderID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "defender_not_found"})
+		return
+	}
+	
+	// Verify both are in this campaign
+	if initLobby != campaignID || defLobby != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "characters_not_in_campaign"})
+		return
+	}
+	
+	// Helper to calculate skill/ability modifier
+	calcMod := func(skill string, str, dex, con, intl, wis, cha, level int) (mod int, skillName string) {
+		skill = strings.ToLower(skill)
+		// Skills map to abilities
+		switch skill {
+		case "athletics":
+			return modifier(str) + proficiencyBonus(level), "Athletics"
+		case "acrobatics":
+			return modifier(dex) + proficiencyBonus(level), "Acrobatics"
+		case "sleight_of_hand", "sleightofhand":
+			return modifier(dex) + proficiencyBonus(level), "Sleight of Hand"
+		case "stealth":
+			return modifier(dex) + proficiencyBonus(level), "Stealth"
+		case "arcana":
+			return modifier(intl) + proficiencyBonus(level), "Arcana"
+		case "history":
+			return modifier(intl) + proficiencyBonus(level), "History"
+		case "investigation":
+			return modifier(intl) + proficiencyBonus(level), "Investigation"
+		case "nature":
+			return modifier(intl) + proficiencyBonus(level), "Nature"
+		case "religion":
+			return modifier(intl) + proficiencyBonus(level), "Religion"
+		case "animal_handling", "animalhandling":
+			return modifier(wis) + proficiencyBonus(level), "Animal Handling"
+		case "insight":
+			return modifier(wis) + proficiencyBonus(level), "Insight"
+		case "medicine":
+			return modifier(wis) + proficiencyBonus(level), "Medicine"
+		case "perception":
+			return modifier(wis) + proficiencyBonus(level), "Perception"
+		case "survival":
+			return modifier(wis) + proficiencyBonus(level), "Survival"
+		case "deception":
+			return modifier(cha) + proficiencyBonus(level), "Deception"
+		case "intimidation":
+			return modifier(cha) + proficiencyBonus(level), "Intimidation"
+		case "performance":
+			return modifier(cha) + proficiencyBonus(level), "Performance"
+		case "persuasion":
+			return modifier(cha) + proficiencyBonus(level), "Persuasion"
+		// Raw abilities (no proficiency)
+		case "str", "strength":
+			return modifier(str), "Strength"
+		case "dex", "dexterity":
+			return modifier(dex), "Dexterity"
+		case "con", "constitution":
+			return modifier(con), "Constitution"
+		case "int", "intelligence":
+			return modifier(intl), "Intelligence"
+		case "wis", "wisdom":
+			return modifier(wis), "Wisdom"
+		case "cha", "charisma":
+			return modifier(cha), "Charisma"
+		default:
+			return 0, skill // Unknown, return as-is
+		}
+	}
+	
+	// Handle "X_or_Y" format for defender (e.g., "athletics_or_acrobatics")
+	defSkill := req.DefenderSkill
+	if strings.Contains(defSkill, "_or_") {
+		parts := strings.Split(defSkill, "_or_")
+		// Calculate both and use the higher
+		mod1, name1 := calcMod(parts[0], defStr, defDex, defCon, defInt, defWis, defCha, defLevel)
+		mod2, name2 := calcMod(parts[1], defStr, defDex, defCon, defInt, defWis, defCha, defLevel)
+		if mod1 >= mod2 {
+			defSkill = parts[0]
+		} else {
+			defSkill = parts[1]
+			_ = name1 // Suppress unused warning
+		}
+		_ = name2
+	}
+	
+	// Calculate modifiers
+	initMod, initSkillName := calcMod(req.InitiatorSkill, initStr, initDex, initCon, initInt, initWis, initCha, initLevel)
+	defMod, defSkillName := calcMod(defSkill, defStr, defDex, defCon, defInt, defWis, defCha, defLevel)
+	
+	// Roll for initiator
+	var initRoll1, initRoll2, initFinalRoll int
+	initRollType := "normal"
+	if req.InitiatorAdvantage && !req.InitiatorDisadvantage {
+		initRoll1, initRoll2, initFinalRoll = rollWithAdvantage()
+		initRollType = "advantage"
+	} else if req.InitiatorDisadvantage && !req.InitiatorAdvantage {
+		initRoll1, initRoll2, initFinalRoll = rollWithDisadvantage()
+		initRollType = "disadvantage"
+	} else {
+		initFinalRoll = rollDie(20)
+		initRoll1 = initFinalRoll
+	}
+	initTotal := initFinalRoll + initMod
+	
+	// Roll for defender
+	var defRoll1, defRoll2, defFinalRoll int
+	defRollType := "normal"
+	if req.DefenderAdvantage && !req.DefenderDisadvantage {
+		defRoll1, defRoll2, defFinalRoll = rollWithAdvantage()
+		defRollType = "advantage"
+	} else if req.DefenderDisadvantage && !req.DefenderAdvantage {
+		defRoll1, defRoll2, defFinalRoll = rollWithDisadvantage()
+		defRollType = "disadvantage"
+	} else {
+		defFinalRoll = rollDie(20)
+		defRoll1 = defFinalRoll
+	}
+	defTotal := defFinalRoll + defMod
+	
+	// Determine winner (ties go to defender in 5e grapples)
+	winner := "defender"
+	if initTotal > defTotal {
+		winner = "initiator"
+	}
+	margin := initTotal - defTotal
+	if margin < 0 {
+		margin = -margin
+	}
+	
+	// Build result strings
+	initResultStr := fmt.Sprintf("d20(%d)", initFinalRoll)
+	if initRollType != "normal" {
+		initResultStr = fmt.Sprintf("d20(%d,%d→%d)", initRoll1, initRoll2, initFinalRoll)
+	}
+	
+	defResultStr := fmt.Sprintf("d20(%d)", defFinalRoll)
+	if defRollType != "normal" {
+		defResultStr = fmt.Sprintf("d20(%d,%d→%d)", defRoll1, defRoll2, defFinalRoll)
+	}
+	
+	desc := fmt.Sprintf("%s vs %s", req.InitiatorSkill, defSkill)
+	if req.Description != "" {
+		desc = req.Description
+	}
+	
+	fullResult := fmt.Sprintf("Contested %s: %s (%s %+d = %d) vs %s (%s %+d = %d) → %s wins by %d",
+		desc, initName, initResultStr, initMod, initTotal,
+		defName, defResultStr, defMod, defTotal,
+		winner, margin)
+	
+	// Record the contested check
+	_, _ = db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'contested_check', $3, $4)
+	`, campaignID, req.InitiatorID, desc, fullResult)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"winner":       winner,
+		"winner_name":  map[string]string{"initiator": initName, "defender": defName}[winner],
+		"margin":       margin,
+		"result":       fullResult,
+		"initiator": map[string]interface{}{
+			"name":      initName,
+			"skill":     initSkillName,
+			"roll":      initFinalRoll,
+			"roll_type": initRollType,
+			"modifier":  initMod,
+			"total":     initTotal,
+			"rolls_detail": map[string]int{
+				"die1": initRoll1,
+				"die2": initRoll2,
+			},
+		},
+		"defender": map[string]interface{}{
+			"name":      defName,
+			"skill":     defSkillName,
+			"roll":      defFinalRoll,
+			"roll_type": defRollType,
+			"modifier":  defMod,
+			"total":     defTotal,
+			"rolls_detail": map[string]int{
+				"die1": defRoll1,
+				"die2": defRoll2,
+			},
 		},
 	})
 }
