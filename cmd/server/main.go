@@ -6959,65 +6959,6 @@ var swaggerContent = `
 <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
 <style>
 .swagger-ui .topbar { display: none; }
-.swagger-ui { font-family: Georgia, serif; }
-.swagger-ui .info { margin: 20px 0; }
-
-/* Theme overrides using CSS variables */
-.swagger-ui,
-.swagger-ui .scheme-container,
-.swagger-ui .opblock-tag,
-.swagger-ui section.models,
-.swagger-ui .model-container,
-.swagger-ui .opblock .opblock-section-header {
-  background: var(--bg) !important;
-  color: var(--fg) !important;
-}
-.swagger-ui .opblock .opblock-summary-description,
-.swagger-ui .opblock-description-wrapper p,
-.swagger-ui .opblock-external-docs-wrapper p,
-.swagger-ui table thead tr td,
-.swagger-ui table thead tr th,
-.swagger-ui .parameter__name,
-.swagger-ui .parameter__type,
-.swagger-ui .parameter__in,
-.swagger-ui .response-col_status,
-.swagger-ui .response-col_description,
-.swagger-ui .model-title,
-.swagger-ui .model {
-  color: var(--fg) !important;
-}
-.swagger-ui .opblock .opblock-summary-operation-id,
-.swagger-ui .opblock .opblock-summary-path,
-.swagger-ui .opblock .opblock-summary-path__deprecated {
-  color: var(--fg) !important;
-}
-.swagger-ui input[type=text],
-.swagger-ui textarea,
-.swagger-ui select {
-  background: var(--code-bg) !important;
-  color: var(--fg) !important;
-  border-color: var(--border) !important;
-}
-.swagger-ui .btn {
-  color: var(--fg) !important;
-  border-color: var(--border) !important;
-}
-.swagger-ui a.nostyle, .swagger-ui a.nostyle:visited {
-  color: var(--link) !important;
-}
-.swagger-ui .info .title,
-.swagger-ui .info a {
-  color: var(--link) !important;
-}
-.swagger-ui .opblock-tag {
-  border-bottom-color: var(--border) !important;
-}
-.swagger-ui section.models {
-  border-color: var(--border) !important;
-}
-.swagger-ui section.models.is-open h4 {
-  border-bottom-color: var(--border) !important;
-}
 </style>
 
 <h1>API Documentation</h1>
