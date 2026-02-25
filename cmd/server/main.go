@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.7.1"
+const version = "0.8.0"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -121,6 +121,8 @@ func main() {
 	http.HandleFunc("/api/characters", handleCharacters)
 	http.HandleFunc("/api/characters/", handleCharacterByID)
 	http.HandleFunc("/api/my-turn", handleMyTurn)
+	http.HandleFunc("/api/gm/status", handleGMStatus)
+	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
@@ -3016,6 +3018,540 @@ func getMovementSpeed(race string) int {
 		return r.Speed
 	}
 	return 30 // default
+}
+
+// handleGMStatus godoc
+// @Summary Get GM status and guidance
+// @Description Returns everything the GM needs to know: what happened, who's waiting, what to do next, monster tactics.
+// @Tags GM
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "GM status with guidance"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM of any active campaign"
+// @Router /gm/status [get]
+func handleGMStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	var campaignName, campaignStatus string
+	var campaignSetting sql.NullString
+	var campaignDocRaw []byte
+	err = db.QueryRow(`
+		SELECT id, name, status, COALESCE(setting, ''), COALESCE(campaign_document, '{}')
+		FROM lobbies 
+		WHERE dm_id = $1 AND status = 'active'
+		LIMIT 1
+	`, agentID).Scan(&campaignID, &campaignName, &campaignStatus, &campaignSetting, &campaignDocRaw)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"needs_attention": false,
+			"error":           "not_gm",
+			"message":         "You are not the GM of any active campaign.",
+			"how_to_create": map[string]interface{}{
+				"endpoint": "POST /api/campaigns",
+				"example": map[string]interface{}{
+					"name":     "My Adventure",
+					"setting":  "A dark forest...",
+					"min_level": 1,
+					"max_level": 5,
+				},
+			},
+		})
+		return
+	}
+	
+	// Get combat state
+	var combatRound, turnIndex int
+	var turnOrderJSON []byte
+	var combatActive bool
+	inCombat := false
+	
+	err = db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active 
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&combatRound, &turnIndex, &turnOrderJSON, &combatActive)
+	
+	if err == nil && combatActive {
+		inCombat = true
+	}
+	
+	gameState := "exploration"
+	if inCombat {
+		gameState = "combat"
+	}
+	
+	// Get the last action
+	var lastActionID, lastCharID int
+	var lastActionType, lastDesc, lastResult string
+	var lastActionTime time.Time
+	var lastCharName string
+	err = db.QueryRow(`
+		SELECT a.id, a.character_id, COALESCE(c.name, 'Unknown'), a.action_type, a.description, a.result, a.created_at
+		FROM actions a
+		LEFT JOIN characters c ON a.character_id = c.id
+		WHERE a.lobby_id = $1
+		ORDER BY a.created_at DESC
+		LIMIT 1
+	`, campaignID).Scan(&lastActionID, &lastCharID, &lastCharName, &lastActionType, &lastDesc, &lastResult, &lastActionTime)
+	
+	var lastAction map[string]interface{}
+	timeSinceAction := ""
+	if err == nil {
+		duration := time.Since(lastActionTime)
+		if duration < time.Minute {
+			timeSinceAction = "just now"
+		} else if duration < time.Hour {
+			timeSinceAction = fmt.Sprintf("%d minutes ago", int(duration.Minutes()))
+		} else {
+			timeSinceAction = fmt.Sprintf("%d hours ago", int(duration.Hours()))
+		}
+		
+		lastAction = map[string]interface{}{
+			"character": lastCharName,
+			"action":    fmt.Sprintf("%s: %s", lastActionType, lastDesc),
+			"result":    lastResult,
+			"timestamp": timeSinceAction,
+		}
+	}
+	
+	// Get party status
+	rows, _ := db.Query(`
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
+			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, '')
+		FROM characters c
+		WHERE c.lobby_id = $1
+	`, campaignID)
+	defer rows.Close()
+	
+	partyStatus := []map[string]interface{}{}
+	var waitingFor *string
+	
+	for rows.Next() {
+		var id, level, hp, maxHP, ac int
+		var name, class, race, concentrating string
+		var conditionsJSON []byte
+		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating)
+		
+		var conditions []string
+		json.Unmarshal(conditionsJSON, &conditions)
+		
+		status := "healthy"
+		if hp == 0 {
+			status = "dying"
+		} else if hp <= maxHP/4 {
+			status = "critical"
+		} else if hp <= maxHP/2 {
+			status = "wounded"
+		}
+		
+		charInfo := map[string]interface{}{
+			"id":     id,
+			"name":   name,
+			"class":  class,
+			"hp":     fmt.Sprintf("%d/%d", hp, maxHP),
+			"ac":     ac,
+			"status": status,
+		}
+		if len(conditions) > 0 {
+			charInfo["conditions"] = conditions
+		}
+		if concentrating != "" {
+			charInfo["concentrating_on"] = concentrating
+		}
+		partyStatus = append(partyStatus, charInfo)
+	}
+	
+	// Determine what GM needs to do
+	needsAttention := false
+	whatToDoNext := map[string]interface{}{}
+	
+	if inCombat {
+		// Parse turn order
+		type InitEntry struct {
+			ID         int    `json:"id"`
+			Name       string `json:"name"`
+			Initiative int    `json:"initiative"`
+			IsMonster  bool   `json:"is_monster"`
+		}
+		var entries []InitEntry
+		json.Unmarshal(turnOrderJSON, &entries)
+		
+		currentTurnName := ""
+		isMonsterTurn := false
+		if len(entries) > turnIndex {
+			currentTurnName = entries[turnIndex].Name
+			isMonsterTurn = entries[turnIndex].IsMonster
+		}
+		
+		if isMonsterTurn {
+			needsAttention = true
+			whatToDoNext = map[string]interface{}{
+				"instruction":        fmt.Sprintf("It's %s's turn. Run the monster's action.", currentTurnName),
+				"narrative_suggestion": "Describe the monster's action dramatically before resolving mechanics.",
+				"next_in_initiative":   currentTurnName,
+			}
+		} else if lastAction != nil {
+			needsAttention = true
+			whatToDoNext = map[string]interface{}{
+				"instruction":        fmt.Sprintf("Narrate %s's action, then check if it's a monster's turn.", lastCharName),
+				"narrative_suggestion": "Make the result feel impactful. Describe the environment reacting.",
+				"next_in_initiative":   currentTurnName,
+			}
+			waitingFor = &currentTurnName
+		}
+	} else {
+		// Exploration mode
+		if lastAction != nil {
+			needsAttention = true
+			whatToDoNext = map[string]interface{}{
+				"instruction":        fmt.Sprintf("Narrate the result of %s's action.", lastCharName),
+				"narrative_suggestion": "Advance the scene. What do they discover? What happens next?",
+			}
+		} else {
+			whatToDoNext = map[string]interface{}{
+				"instruction":        "Set the scene. Describe what the party sees.",
+				"narrative_suggestion": "Engage the senses: sight, sound, smell. Give them something to interact with.",
+			}
+		}
+	}
+	
+	// Build monster guidance (if in combat and monsters present)
+	monsterGuidance := map[string]interface{}{}
+	if inCombat {
+		type InitEntry struct {
+			ID         int    `json:"id"`
+			Name       string `json:"name"`
+			Initiative int    `json:"initiative"`
+			IsMonster  bool   `json:"is_monster"`
+			MonsterKey string `json:"monster_key"`
+			HP         int    `json:"hp"`
+			MaxHP      int    `json:"max_hp"`
+		}
+		var entries []InitEntry
+		json.Unmarshal(turnOrderJSON, &entries)
+		
+		for _, e := range entries {
+			if e.IsMonster {
+				guidance := map[string]interface{}{
+					"hp": fmt.Sprintf("%d/%d", e.HP, e.MaxHP),
+				}
+				
+				// Look up monster in SRD for tactics
+				if e.MonsterKey != "" {
+					var mType string
+					var mAC, mHP int
+					var actionsJSON []byte
+					err := db.QueryRow(`
+						SELECT type, ac, hp, actions FROM monsters WHERE slug = $1
+					`, e.MonsterKey).Scan(&mType, &mAC, &mHP, &actionsJSON)
+					
+					if err == nil {
+						var actions []map[string]interface{}
+						json.Unmarshal(actionsJSON, &actions)
+						
+						actionNames := []string{}
+						for _, a := range actions {
+							if name, ok := a["name"].(string); ok {
+								actionNames = append(actionNames, name)
+							}
+						}
+						
+						guidance["type"] = mType
+						guidance["ac"] = mAC
+						guidance["abilities"] = actionNames
+						guidance["behavior"] = getMonsterBehavior(mType)
+						
+						// Tactical suggestions based on HP
+						if e.HP <= e.MaxHP/4 {
+							guidance["tactical_options"] = []string{
+								"Flee if intelligent",
+								"Fight desperately",
+								"Surrender if capable of speech",
+							}
+						} else {
+							guidance["tactical_options"] = []string{
+								"Attack the nearest threat",
+								"Focus on the spellcaster",
+								"Use special abilities",
+							}
+						}
+					}
+				}
+				monsterGuidance[e.Name] = guidance
+			}
+		}
+	}
+	
+	// GM tasks / maintenance reminders
+	gmTasks := []string{}
+	
+	// Check if campaign document needs updating
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	if _, hasStory := campaignDoc["story_so_far"]; !hasStory {
+		gmTasks = append(gmTasks, "Consider adding a 'story_so_far' section to the campaign document")
+	}
+	
+	// Count observations that could be promoted
+	var unpromotedCount int
+	db.QueryRow(`
+		SELECT COUNT(*) FROM observations 
+		WHERE lobby_id = $1 AND (promoted = false OR promoted IS NULL)
+	`, campaignID).Scan(&unpromotedCount)
+	if unpromotedCount > 5 {
+		gmTasks = append(gmTasks, fmt.Sprintf("%d observations pending review - consider promoting good ones to the campaign document", unpromotedCount))
+	}
+	
+	// Build response
+	response := map[string]interface{}{
+		"needs_attention": needsAttention,
+		"game_state":      gameState,
+		"campaign": map[string]interface{}{
+			"id":      campaignID,
+			"name":    campaignName,
+			"status":  campaignStatus,
+			"setting": campaignSetting.String,
+		},
+		"party_status":  partyStatus,
+		"what_to_do_next": whatToDoNext,
+	}
+	
+	if waitingFor != nil {
+		response["waiting_for"] = *waitingFor
+	}
+	
+	if lastAction != nil {
+		response["last_action"] = lastAction
+	}
+	
+	if len(monsterGuidance) > 0 {
+		response["monster_guidance"] = monsterGuidance
+	}
+	
+	if len(gmTasks) > 0 {
+		response["gm_tasks"] = gmTasks
+	}
+	
+	// Add combat info if in combat
+	if inCombat {
+		type InitEntry struct {
+			ID         int    `json:"id"`
+			Name       string `json:"name"`
+			Initiative int    `json:"initiative"`
+		}
+		var entries []InitEntry
+		json.Unmarshal(turnOrderJSON, &entries)
+		
+		response["combat"] = map[string]interface{}{
+			"round":       combatRound,
+			"turn_order":  entries,
+			"current_turn_index": turnIndex,
+		}
+	}
+	
+	// Add how_to_narrate instructions
+	response["how_to_narrate"] = map[string]interface{}{
+		"endpoint": "POST /api/gm/narrate",
+		"headers":  "Authorization: Basic <base64(email:password)>",
+		"example": map[string]interface{}{
+			"narration": "The goblin's blade scrapes against stone as it lunges forward...",
+			"monster_action": map[string]interface{}{
+				"monster":     "goblin_a",
+				"action":      "attack",
+				"target":      "Thorgrim",
+				"description": "The goblin lunges at Thorgrim with its rusty scimitar",
+			},
+		},
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// getMonsterBehavior returns behavioral notes for a monster type
+func getMonsterBehavior(monsterType string) string {
+	behaviors := map[string]string{
+		"beast":       "Instinctual. Fight or flight based on HP. Protect territory or young.",
+		"humanoid":    "Varied intelligence. May flee, surrender, or call for help.",
+		"undead":      "Fearless. Attack nearest living creature. No self-preservation.",
+		"fiend":       "Cruel and tactical. Toy with weak prey. Respect strength.",
+		"dragon":      "Highly intelligent. Use terrain and flight. Protect hoard.",
+		"aberration":  "Alien logic. Unpredictable but purposeful.",
+		"construct":   "Follow directives literally. No morale, no fear.",
+		"elemental":   "Single-minded. Embodiment of their element.",
+		"fey":         "Capricious. May help or hinder based on whim or bargain.",
+		"giant":       "Proud and territorial. May parley if shown respect.",
+		"monstrosity": "Predatory instincts. Hunt prey, avoid larger threats.",
+		"ooze":        "Mindless. Engulf and digest. No tactics.",
+		"plant":       "Territorial. Ambush predators. Patient.",
+		"celestial":   "Righteous purpose. May show mercy to the redeemable.",
+	}
+	
+	if behavior, ok := behaviors[strings.ToLower(monsterType)]; ok {
+		return behavior
+	}
+	return "Unknown creature type. Use your judgment."
+}
+
+// handleGMNarrate godoc
+// @Summary Submit GM narration and monster actions
+// @Description GM submits narrative text and optionally runs a monster's action. Server resolves monster attacks.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{narration=string,monster_action=object} true "Narration and optional monster action"
+// @Success 200 {object} map[string]interface{} "Narration recorded, action resolved"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Router /gm/narrate [post]
+func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_gm"})
+		return
+	}
+	
+	var req struct {
+		Narration     string `json:"narration"`
+		MonsterAction *struct {
+			Monster     string `json:"monster"`
+			Action      string `json:"action"`
+			Target      string `json:"target"`
+			Description string `json:"description"`
+		} `json:"monster_action"`
+		AdvanceTurn bool `json:"advance_turn"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	response := map[string]interface{}{"success": true}
+	
+	// Record narration as an action from the GM
+	if req.Narration != "" {
+		_, err = db.Exec(`
+			INSERT INTO actions (lobby_id, action_type, description, result)
+			VALUES ($1, 'narration', $2, '')
+		`, campaignID, req.Narration)
+		response["narration_recorded"] = true
+	}
+	
+	// Handle monster action
+	if req.MonsterAction != nil {
+		// Look up monster stats
+		monsterKey := strings.ToLower(strings.ReplaceAll(req.MonsterAction.Monster, " ", "-"))
+		
+		var mStr, mDex int
+		var actionsJSON []byte
+		err := db.QueryRow(`
+			SELECT str, dex, actions FROM monsters WHERE slug = $1
+		`, monsterKey).Scan(&mStr, &mDex, &actionsJSON)
+		
+		result := ""
+		if err == nil {
+			// Monster found, resolve attack
+			attackMod := modifier(mStr) + 2 // Simplified proficiency
+			
+			// Check for specific action bonus
+			var actions []map[string]interface{}
+			json.Unmarshal(actionsJSON, &actions)
+			
+			for _, a := range actions {
+				if name, ok := a["name"].(string); ok && strings.EqualFold(name, req.MonsterAction.Action) {
+					if bonus, ok := a["attack_bonus"].(float64); ok {
+						attackMod = int(bonus)
+					}
+				}
+			}
+			
+			attackRoll := rollDie(20)
+			totalAttack := attackRoll + attackMod
+			
+			if attackRoll == 20 {
+				damage := rollDie(6) + rollDie(6) + modifier(mStr) // Crit damage
+				result = fmt.Sprintf("Attack: %d (CRITICAL!) - %d damage", totalAttack, damage)
+			} else if attackRoll == 1 {
+				result = fmt.Sprintf("Attack: %d (Critical Miss!)", totalAttack)
+			} else {
+				damage := rollDie(6) + modifier(mStr)
+				result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", totalAttack, damage)
+			}
+		} else {
+			// Generic monster attack
+			attackRoll := rollDie(20)
+			damage := rollDie(6) + 2
+			result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", attackRoll+4, damage)
+		}
+		
+		// Record monster action
+		_, err = db.Exec(`
+			INSERT INTO actions (lobby_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4)
+		`, campaignID, "monster_"+req.MonsterAction.Action, 
+			fmt.Sprintf("%s: %s", req.MonsterAction.Monster, req.MonsterAction.Description), 
+			result)
+		
+		response["monster_action_result"] = result
+	}
+	
+	// Advance turn if requested
+	if req.AdvanceTurn {
+		_, err = db.Exec(`
+			UPDATE combat_state 
+			SET current_turn_index = current_turn_index + 1
+			WHERE lobby_id = $1
+		`, campaignID)
+		
+		// Check if we need to wrap around and increment round
+		var turnIndex int
+		var turnOrderJSON []byte
+		db.QueryRow(`
+			SELECT current_turn_index, turn_order FROM combat_state WHERE lobby_id = $1
+		`, campaignID).Scan(&turnIndex, &turnOrderJSON)
+		
+		var turnOrder []interface{}
+		json.Unmarshal(turnOrderJSON, &turnOrder)
+		
+		if turnIndex >= len(turnOrder) {
+			// New round
+			db.Exec(`
+				UPDATE combat_state 
+				SET current_turn_index = 0, round_number = round_number + 1
+				WHERE lobby_id = $1
+			`, campaignID)
+			response["new_round"] = true
+		}
+		
+		response["turn_advanced"] = true
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleAction godoc

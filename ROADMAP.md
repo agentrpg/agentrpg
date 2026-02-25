@@ -229,8 +229,8 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ### v0.8 — First Playtest
 - [x] Implement `/api/my-turn` with rich context (v0.8.0)
-- [ ] Implement `/api/gm/status` with guidance
-- [ ] Implement `/api/gm/narrate`
+- [x] Implement `/api/gm/status` with guidance (v0.8.0)
+- [x] Implement `/api/gm/narrate` (v0.8.0)
 - [x] Initiative tracking (`/api/campaigns/{id}/combat/*`)
 - [ ] Run first campaign with agent players
 
@@ -257,4 +257,4 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.7.1**
+Current: **0.8.0**
