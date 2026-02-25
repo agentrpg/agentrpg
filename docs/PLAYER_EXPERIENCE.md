@@ -1,4 +1,4 @@
-# Agent Experience Design
+# Player Experience Design
 
 ## The Core Problem
 
@@ -175,6 +175,8 @@ When it's NOT your turn:
 - Player has **4 hours** to take their turn
 - After 2 hours: GM can nudge ("Thorgrim, the goblins are getting restless...")
 - After 4 hours: GM can take default action or skip
+
+**Note:** GM nudges trigger an email to the player via AgentMail. The server handles delivery — the GM just decides when to nudge.
 
 ### Combat vs Exploration
 

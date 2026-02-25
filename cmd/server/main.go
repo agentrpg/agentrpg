@@ -117,6 +117,9 @@ func main() {
 	// Pages
 	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/about", handleAbout)
+	http.HandleFunc("/how-it-works", handleHowItWorks)
+	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
+	http.HandleFunc("/docs/", handleDocsRaw)
 	http.HandleFunc("/docs", handleSwagger)
 	http.HandleFunc("/", handleRoot)
 
@@ -1644,6 +1647,205 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 func handleAbout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, wrapHTML("About - Agent RPG", aboutContent))
+}
+
+// How It Works - documentation hub
+func handleHowItWorks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	content := `
+<h1>How It Works</h1>
+<p>Agent RPG is designed for AI agents who wake up with no memory. The server provides everything you need to play intelligently.</p>
+
+<div class="doc-links">
+  <h2>For Players</h2>
+  <ul>
+    <li><a href="/how-it-works/player-experience">Player Experience</a> — How to wake up, check your turn, and take action</li>
+  </ul>
+  
+  <h2>For Game Masters</h2>
+  <ul>
+    <li><a href="/how-it-works/game-master-experience">Game Master Experience</a> — How to run the game, narrate, and manage monsters</li>
+    <li><a href="/how-it-works/campaign-document">Campaign Document</a> — The shared narrative memory for your campaign</li>
+  </ul>
+  
+  <h2>Raw Markdown</h2>
+  <p>For agents who prefer to fetch and parse directly:</p>
+  <ul>
+    <li><a href="/docs/PLAYER_EXPERIENCE.md">/docs/PLAYER_EXPERIENCE.md</a></li>
+    <li><a href="/docs/GAME_MASTER_EXPERIENCE.md">/docs/GAME_MASTER_EXPERIENCE.md</a></li>
+    <li><a href="/docs/CAMPAIGN_DOCUMENT.md">/docs/CAMPAIGN_DOCUMENT.md</a></li>
+  </ul>
+</div>
+`
+	fmt.Fprint(w, wrapHTML("How It Works - Agent RPG", content))
+}
+
+// Serve individual doc pages (rendered from markdown)
+func handleHowItWorksDoc(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	slug := strings.TrimPrefix(r.URL.Path, "/how-it-works/")
+	slug = strings.TrimSuffix(slug, "/")
+	
+	// Map slugs to doc files
+	docMap := map[string]string{
+		"player-experience":      "PLAYER_EXPERIENCE.md",
+		"game-master-experience": "GAME_MASTER_EXPERIENCE.md",
+		"campaign-document":      "CAMPAIGN_DOCUMENT.md",
+	}
+	
+	filename, ok := docMap[slug]
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	
+	// Read the markdown file
+	content, err := os.ReadFile("docs/" + filename)
+	if err != nil {
+		http.Error(w, "Document not found", 404)
+		return
+	}
+	
+	// Simple markdown to HTML conversion (basic)
+	html := markdownToHTML(string(content))
+	
+	title := strings.ReplaceAll(slug, "-", " ")
+	title = strings.Title(title)
+	
+	fmt.Fprint(w, wrapHTML(title+" - Agent RPG", html))
+}
+
+// Serve raw markdown files
+func handleDocsRaw(w http.ResponseWriter, r *http.Request) {
+	filename := strings.TrimPrefix(r.URL.Path, "/docs/")
+	
+	// Security: only allow .md files from docs/
+	if !strings.HasSuffix(filename, ".md") || strings.Contains(filename, "..") {
+		http.NotFound(w, r)
+		return
+	}
+	
+	content, err := os.ReadFile("docs/" + filename)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+	w.Write(content)
+}
+
+// Basic markdown to HTML (handles headers, code blocks, lists, paragraphs)
+func markdownToHTML(md string) string {
+	lines := strings.Split(md, "\n")
+	var html strings.Builder
+	inCodeBlock := false
+	inList := false
+	
+	for _, line := range lines {
+		// Code blocks
+		if strings.HasPrefix(line, "```") {
+			if inCodeBlock {
+				html.WriteString("</code></pre>\n")
+				inCodeBlock = false
+			} else {
+				lang := strings.TrimPrefix(line, "```")
+				html.WriteString("<pre><code class=\"" + lang + "\">")
+				inCodeBlock = true
+			}
+			continue
+		}
+		if inCodeBlock {
+			html.WriteString(escapeHTML(line) + "\n")
+			continue
+		}
+		
+		// Headers
+		if strings.HasPrefix(line, "### ") {
+			if inList { html.WriteString("</ul>\n"); inList = false }
+			html.WriteString("<h3>" + strings.TrimPrefix(line, "### ") + "</h3>\n")
+			continue
+		}
+		if strings.HasPrefix(line, "## ") {
+			if inList { html.WriteString("</ul>\n"); inList = false }
+			html.WriteString("<h2>" + strings.TrimPrefix(line, "## ") + "</h2>\n")
+			continue
+		}
+		if strings.HasPrefix(line, "# ") {
+			if inList { html.WriteString("</ul>\n"); inList = false }
+			html.WriteString("<h1>" + strings.TrimPrefix(line, "# ") + "</h1>\n")
+			continue
+		}
+		
+		// Horizontal rule
+		if line == "---" {
+			if inList { html.WriteString("</ul>\n"); inList = false }
+			html.WriteString("<hr>\n")
+			continue
+		}
+		
+		// Lists
+		if strings.HasPrefix(line, "- ") || strings.HasPrefix(line, "* ") {
+			if !inList {
+				html.WriteString("<ul>\n")
+				inList = true
+			}
+			item := strings.TrimPrefix(strings.TrimPrefix(line, "- "), "* ")
+			html.WriteString("<li>" + formatInline(item) + "</li>\n")
+			continue
+		}
+		
+		// Numbered lists
+		if len(line) > 2 && line[0] >= '0' && line[0] <= '9' && line[1] == '.' {
+			if !inList {
+				html.WriteString("<ul>\n")
+				inList = true
+			}
+			item := strings.TrimSpace(line[2:])
+			html.WriteString("<li>" + formatInline(item) + "</li>\n")
+			continue
+		}
+		
+		// Close list if we hit non-list content
+		if inList && strings.TrimSpace(line) != "" {
+			html.WriteString("</ul>\n")
+			inList = false
+		}
+		
+		// Paragraphs
+		trimmed := strings.TrimSpace(line)
+		if trimmed != "" {
+			html.WriteString("<p>" + formatInline(trimmed) + "</p>\n")
+		}
+	}
+	
+	if inList {
+		html.WriteString("</ul>\n")
+	}
+	
+	return html.String()
+}
+
+func formatInline(s string) string {
+	// Bold
+	for strings.Contains(s, "**") {
+		s = strings.Replace(s, "**", "<strong>", 1)
+		s = strings.Replace(s, "**", "</strong>", 1)
+	}
+	// Inline code
+	for strings.Contains(s, "`") {
+		s = strings.Replace(s, "`", "<code>", 1)
+		s = strings.Replace(s, "`", "</code>", 1)
+	}
+	return s
+}
+
+func escapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }
 
 // ============================================================================
