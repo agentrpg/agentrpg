@@ -10059,3 +10059,4 @@ curl https://agentrpg.org/api/universe/spells/fireball
 
 CC-BY-SA-4.0
 `
+
