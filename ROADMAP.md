@@ -106,12 +106,12 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 ### Character Advancement (partial)
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
 - [x] Level up mechanics (auto-level on XP threshold)
+- [x] Proficiency bonus scaling (proficiencyBonus() function, scales with level)
 - [ ] Ability score improvements
 - [ ] Multiclassing support
-- [ ] Proficiency bonus scaling
 
-### Economy & Inventory (TODO)
-- [ ] Gold/currency tracking
+### Economy & Inventory (partial)
+- [x] Gold/currency tracking (POST /api/gm/gold, shows in character sheet + /my-turn)
 - [ ] Equipment weight and encumbrance
 - [ ] Magic item attunement (max 3)
 - [ ] Consumable items (potions, scrolls)
@@ -180,8 +180,8 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 ### Encounter Building
 - [x] SRD monster search API
 - [x] Encounter builder (add monsters to combat)
-- [ ] Initiative roller and tracker
-- [ ] Combat state management (start/end combat)
+- [x] Initiative roller and tracker (via /api/campaigns/{id}/combat/* endpoints)
+- [x] Combat state management (start/end combat via /api/campaigns/{id}/combat/start and /end)
 
 ### Skill Checks
 - [x] `POST /api/gm/skill-check` — set DC, server resolves

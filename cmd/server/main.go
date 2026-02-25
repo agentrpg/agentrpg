@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.7.123"
+const version = "0.8.1"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -162,6 +162,7 @@ func main() {
 	http.HandleFunc("/api/gm/contested-check", handleGMContestedCheck)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
+	http.HandleFunc("/api/gm/gold", handleGMGold)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
@@ -375,6 +376,10 @@ func initDB() {
 		
 		-- XP tracking (Character Advancement - roadmap item)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS xp INTEGER DEFAULT 0;
+		
+		-- Gold/Currency tracking (Economy & Inventory - roadmap item)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS gold INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS inventory JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -3347,11 +3352,14 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 		hp := hitDie + modifier(req.Con) // Level 1: max hit die + CON mod
 		ac := 10 + modifier(req.Dex)
 		
+		// Starting gold (simplified: 10gp for all classes)
+		startingGold := 10
+		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -3418,6 +3426,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var isStable, isDead bool
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
+	var gold int
+	var inventoryJSON []byte
 	
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
@@ -3425,12 +3435,14 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(temp_hp, 0), COALESCE(death_save_successes, 0), COALESCE(death_save_failures, 0),
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
-			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0)
+			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
+			COALESCE(gold, 0), COALESCE(inventory, '[]')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
-		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp)
+		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
+		&gold, &inventoryJSON)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -3442,6 +3454,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	
 	var slotsUsed map[string]int
 	json.Unmarshal(slotsUsedJSON, &slotsUsed)
+	
+	var inventory []interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
 	
 	// Get total spell slots for class/level
 	totalSlots := getSpellSlots(class, level)
@@ -3490,6 +3505,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		"xp":                  xp,
 		"xp_to_next_level":    xpToNextLevel - xp,
 		"xp_threshold":        xpToNextLevel,
+		"gold":                gold,
+		"inventory":           inventory,
 	}
 	
 	if coverBonus > 0 {
@@ -3553,7 +3570,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get character and campaign info
-	var charID, lobbyID, hp, maxHP, ac, level, tempHP, charXP int
+	var charID, lobbyID, hp, maxHP, ac, level, tempHP, charXP, charGold int
 	var str, dex, con, intl, wis, cha int
 	var charName, class, race, lobbyName, setting, lobbyStatus string
 	var conditionsJSON, slotsUsedJSON []byte
@@ -3567,7 +3584,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.temp_hp, 0), COALESCE(c.conditions, '[]'), COALESCE(c.spell_slots_used, '{}'),
 			COALESCE(c.concentrating_on, ''), COALESCE(c.death_save_successes, 0), COALESCE(c.death_save_failures, 0),
 			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false),
-			COALESCE(c.xp, 0)
+			COALESCE(c.xp, 0), COALESCE(c.gold, 0)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -3576,7 +3593,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&str, &dex, &con, &intl, &wis, &cha,
 		&lobbyID, &lobbyName, &setting, &lobbyStatus,
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
-		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP)
+		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3791,6 +3808,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"proficiency_bonus": proficiencyBonus(level),
 		"xp":                charXP,
 		"xp_to_next_level":  xpToNext,
+		"gold":              charGold,
 		"stats": map[string]int{
 			"str": str, "dex": dex, "con": con,
 			"int": intl, "wis": wis, "cha": cha,
@@ -5779,6 +5797,151 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMGold godoc
+// @Summary Award or deduct gold from characters
+// @Description GM adjusts gold for one or more characters. Use positive amount to award, negative to deduct.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_ids=[]integer,amount=integer,reason=string} true "Gold adjustment"
+// @Success 200 {object} map[string]interface{} "Gold adjusted"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/gold [post]
+func handleGMGold(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterIDs []int  `json:"character_ids"`
+		Amount       int    `json:"amount"`
+		Reason       string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if len(req.CharacterIDs) == 0 || req.Amount == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_ids and non-zero amount required",
+		})
+		return
+	}
+	
+	// Verify this agent is the GM of all these characters' campaigns
+	for _, charID := range req.CharacterIDs {
+		var dmID int
+		err = db.QueryRow(`
+			SELECT l.dm_id FROM characters c 
+			JOIN lobbies l ON c.lobby_id = l.id 
+			WHERE c.id = $1
+		`, charID).Scan(&dmID)
+		
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if dmID != agentID {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_gm",
+				"message": fmt.Sprintf("You are not the GM for character %d's campaign", charID),
+			})
+			return
+		}
+	}
+	
+	// Adjust gold for each character
+	results := []map[string]interface{}{}
+	
+	for _, charID := range req.CharacterIDs {
+		var name string
+		var currentGold int
+		err = db.QueryRow(`
+			SELECT name, COALESCE(gold, 0) FROM characters WHERE id = $1
+		`, charID).Scan(&name, &currentGold)
+		
+		if err != nil {
+			continue
+		}
+		
+		newGold := currentGold + req.Amount
+		if newGold < 0 {
+			newGold = 0 // Don't allow negative gold
+		}
+		
+		_, err = db.Exec(`UPDATE characters SET gold = $1 WHERE id = $2`, newGold, charID)
+		if err != nil {
+			continue
+		}
+		
+		result := map[string]interface{}{
+			"character_id":   charID,
+			"character_name": name,
+			"gold_change":    req.Amount,
+			"previous_gold":  currentGold,
+			"current_gold":   newGold,
+		}
+		
+		results = append(results, result)
+	}
+	
+	// Log gold change as an action
+	reason := req.Reason
+	if reason == "" {
+		if req.Amount > 0 {
+			reason = fmt.Sprintf("Gold award: %d gp", req.Amount)
+		} else {
+			reason = fmt.Sprintf("Gold deduction: %d gp", -req.Amount)
+		}
+	}
+	
+	if len(req.CharacterIDs) > 0 {
+		var lobbyID int
+		db.QueryRow(`SELECT lobby_id FROM characters WHERE id = $1`, req.CharacterIDs[0]).Scan(&lobbyID)
+		
+		if lobbyID > 0 {
+			charNames := []string{}
+			for _, r := range results {
+				if name, ok := r["character_name"].(string); ok {
+					charNames = append(charNames, name)
+				}
+			}
+			
+			_, err = db.Exec(`
+				INSERT INTO actions (lobby_id, action_type, description, result)
+				VALUES ($1, 'gold_change', $2, $3)
+			`, lobbyID, reason, fmt.Sprintf("%d gp to: %s", req.Amount, strings.Join(charNames, ", ")))
+		}
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"adjustments": results,
+	})
 }
 
 // handleCampaignMessages godoc
