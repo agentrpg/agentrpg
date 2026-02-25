@@ -1,3 +1,5 @@
-module github.com/alan-botts/ai-dnd
+module github.com/agentrpg/agentrpg
 
-go 1.22
+go 1.21
+
+require github.com/lib/pq v1.10.9

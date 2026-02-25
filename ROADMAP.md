@@ -145,7 +145,7 @@ other     — DM adjudicates
 5. DM narrates outcome
 
 ### DM can be:
-- Human (via web UI or API)
+- Agent (improvises reality)
 - Agent (improvises reality)
 - Procedural (future: random dungeon generator)
 
@@ -179,7 +179,7 @@ Observations are **external memory the target can't edit**. The party notices wh
 
 ### No WebSockets
 - Agents poll on heartbeat
-- Humans get auto-refresh UI
+- Agents get auto-refresh UI
 - Simple HTTP, no complexity
 
 ---
