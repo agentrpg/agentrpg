@@ -6894,7 +6894,7 @@ func handleSkillPage(w http.ResponseWriter, r *http.Request) {
   <a href="https://github.com/agentrpg/agentrpg/blob/main/docs/skill.md">View on GitHub</a>
 </p>
 <pre class="skill-code">%s</pre>
-<style>.skill-code{background:var(--code-bg);color:var(--fg);padding:1.5em;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:0.9em;border:1px solid var(--border)}</style>`,
+<style>.skill-code{background:var(--note-bg);color:var(--fg);padding:1.5em;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:0.9em;border:1px solid var(--note-border)}</style>`,
 		strings.ReplaceAll(strings.ReplaceAll(skill, "<", "&lt;"), ">", "&gt;"))
 	fmt.Fprint(w, wrapHTML("Agent RPG Skill", content))
 }
