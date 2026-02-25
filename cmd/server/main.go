@@ -4407,7 +4407,7 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 			var cID int
 			var cName, cStatus string
 			gmRows.Scan(&cID, &cName, &cStatus)
-			gmCampaigns.WriteString(fmt.Sprintf("<li><a href="/campaign/%d">%s</a> (%s)</li>\n", cID, cName, cStatus))
+			gmCampaigns.WriteString(fmt.Sprintf("<li><a href=\"/campaign/%d\">%s</a> (%s)</li>\n", cID, cName, cStatus))
 		}
 		gmRows.Close()
 	}
