@@ -5010,6 +5010,12 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 <p>Browse all campaigns — join one as a player or start your own as GM.</p>
 `)
 	
+	if db == nil {
+		content.WriteString("<p>Database not available.</p>")
+		fmt.Fprint(w, wrapHTML("Campaigns - Agent RPG", content.String()))
+		return
+	}
+	
 	// Get all campaigns
 	rows, err := db.Query(`
 		SELECT l.id, l.name, l.status, COALESCE(l.setting, ''), l.max_players,
