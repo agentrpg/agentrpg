@@ -151,6 +151,7 @@ func main() {
 	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/profile/", handleProfile)
 	http.HandleFunc("/character/", handleCharacterSheet)
+	http.HandleFunc("/campaigns", handleCampaignsPage)
 	http.HandleFunc("/campaign/", handleCampaignPage)
 	http.HandleFunc("/about", handleAbout)
 	http.HandleFunc("/how-it-works", handleHowItWorks)
@@ -2632,20 +2633,29 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get character and campaign info
-	var charID, lobbyID, hp, maxHP, ac, level int
+	var charID, lobbyID, hp, maxHP, ac, level, tempHP int
 	var str, dex, con, intl, wis, cha int
 	var charName, class, race, lobbyName, setting, lobbyStatus string
+	var conditionsJSON, slotsUsedJSON []byte
+	var concentratingOn string
+	var deathSuccesses, deathFailures int
+	var isStable, isDead, reactionUsed bool
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
-			l.id, l.name, COALESCE(l.setting, ''), l.status
+			l.id, l.name, COALESCE(l.setting, ''), l.status,
+			COALESCE(c.temp_hp, 0), COALESCE(c.conditions, '[]'), COALESCE(c.spell_slots_used, '{}'),
+			COALESCE(c.concentrating_on, ''), COALESCE(c.death_save_successes, 0), COALESCE(c.death_save_failures, 0),
+			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
 		LIMIT 1
 	`, agentID).Scan(&charID, &charName, &class, &race, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
-		&lobbyID, &lobbyName, &setting, &lobbyStatus)
+		&lobbyID, &lobbyName, &setting, &lobbyStatus,
+		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
+		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2770,45 +2780,170 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		rulesReminder["reckless_attack"] = "You can attack recklessly for advantage, but attacks against you also have advantage until your next turn."
 	}
 	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
-		rulesReminder["spellcasting"] = fmt.Sprintf("Your spellcasting ability is %s. Spell save DC = 8 + proficiency + %s modifier.", c.Spellcasting, c.Spellcasting)
+		spellMod := 0
+		switch c.Spellcasting {
+		case "INT":
+			spellMod = modifier(intl)
+		case "WIS":
+			spellMod = modifier(wis)
+		case "CHA":
+			spellMod = modifier(cha)
+		}
+		saveDC := spellSaveDC(level, spellMod)
+		rulesReminder["spellcasting"] = fmt.Sprintf("Your spellcasting ability is %s. Spell save DC: %d. Spell attack bonus: +%d.", c.Spellcasting, saveDC, spellMod+proficiencyBonus(level))
+	}
+	
+	// Parse conditions from JSON
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Parse spell slots
+	var slotsUsed map[string]int
+	json.Unmarshal(slotsUsedJSON, &slotsUsed)
+	totalSlots := getSpellSlots(class, level)
+	
+	// Check combat state for initiative-based turn tracking
+	isMyTurn := true
+	inCombat := false
+	var combatInfo map[string]interface{}
+	
+	var combatRound, turnIndex int
+	var turnOrderJSON []byte
+	var combatActive bool
+	err = db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active 
+		FROM combat_state WHERE lobby_id = $1
+	`, lobbyID).Scan(&combatRound, &turnIndex, &turnOrderJSON, &combatActive)
+	
+	if err == nil && combatActive {
+		inCombat = true
+		
+		type InitEntry struct {
+			ID         int    `json:"id"`
+			Name       string `json:"name"`
+			Initiative int    `json:"initiative"`
+		}
+		var entries []InitEntry
+		json.Unmarshal(turnOrderJSON, &entries)
+		
+		currentTurnID := 0
+		currentTurnName := ""
+		if len(entries) > turnIndex {
+			currentTurnID = entries[turnIndex].ID
+			currentTurnName = entries[turnIndex].Name
+		}
+		
+		// Check if it's this character's turn
+		isMyTurn = currentTurnID == charID
+		
+		combatInfo = map[string]interface{}{
+			"round":        combatRound,
+			"turn_order":   entries,
+			"current_turn": currentTurnName,
+			"your_position": -1,
+		}
+		
+		// Find this character's position in initiative
+		for i, e := range entries {
+			if e.ID == charID {
+				combatInfo["your_position"] = i + 1 // 1-indexed
+				combatInfo["your_initiative"] = e.Initiative
+				break
+			}
+		}
+	}
+	
+	// Build character info
+	characterInfo := map[string]interface{}{
+		"id":                charID,
+		"name":              charName,
+		"class":             class,
+		"race":              race,
+		"level":             level,
+		"hp":                hp,
+		"max_hp":            maxHP,
+		"temp_hp":           tempHP,
+		"ac":                ac,
+		"status":            charStatus,
+		"conditions":        conditions,
+		"proficiency_bonus": proficiencyBonus(level),
+		"stats": map[string]int{
+			"str": str, "dex": dex, "con": con,
+			"int": intl, "wis": wis, "cha": cha,
+		},
+		"modifiers": map[string]int{
+			"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
+			"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
+		},
+	}
+	
+	// Add concentration if active
+	if concentratingOn != "" {
+		characterInfo["concentrating_on"] = concentratingOn
+	}
+	
+	// Add death saves if at 0 HP
+	if hp == 0 && !isDead {
+		characterInfo["death_saves"] = map[string]interface{}{
+			"successes": deathSuccesses,
+			"failures":  deathFailures,
+			"stable":    isStable,
+		}
+		charStatus = "dying"
+		if isStable {
+			charStatus = "stable"
+		}
+		characterInfo["status"] = charStatus
+		
+		// If dying, main action should be death save
+		suggestions = []string{"You are dying! Make a death save with action: death_save"}
+		actions = []map[string]interface{}{
+			{"name": "death_save", "description": "Roll a d20. 10+ = success, <10 = failure. 3 successes = stable. 3 failures = death. Nat 20 = regain 1 HP. Nat 1 = 2 failures."},
+		}
+	}
+	
+	if isDead {
+		characterInfo["is_dead"] = true
+		charStatus = "dead"
+		characterInfo["status"] = charStatus
+	}
+	
+	// Add spell slots if caster
+	if len(totalSlots) > 0 {
+		remainingSlots := map[string]int{}
+		for lvl, total := range totalSlots {
+			key := fmt.Sprintf("%d", lvl)
+			used := slotsUsed[key]
+			remainingSlots[key] = total - used
+		}
+		characterInfo["spell_slots"] = map[string]interface{}{
+			"total":     totalSlots,
+			"remaining": remainingSlots,
+		}
+	}
+	
+	// Reaction status
+	reactionStatus := "You have your reaction available."
+	if reactionUsed {
+		reactionStatus = "Your reaction has been used this round."
 	}
 	
 	// Build response
-	// For now, is_my_turn is always true in active games (no initiative tracking yet)
-	// This will be enhanced when initiative tracking is added
 	response := map[string]interface{}{
-		"is_my_turn": true,
-		"character": map[string]interface{}{
-			"id":         charID,
-			"name":       charName,
-			"class":      class,
-			"race":       race,
-			"level":      level,
-			"hp":         hp,
-			"max_hp":     maxHP,
-			"ac":         ac,
-			"status":     charStatus,
-			"conditions": []string{}, // TODO: track conditions in DB
-			"stats": map[string]int{
-				"str": str, "dex": dex, "con": con,
-				"int": intl, "wis": wis, "cha": cha,
-			},
-			"modifiers": map[string]int{
-				"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
-				"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
-			},
-		},
+		"is_my_turn": isMyTurn,
+		"character":  characterInfo,
 		"situation": map[string]interface{}{
-			"summary":  fmt.Sprintf("You are in %s. %s", lobbyName, setting),
-			"allies":   allies,
-			"enemies":  []string{}, // TODO: track enemies when encounter system is built
-			"terrain":  "", // TODO: track terrain
+			"summary":   fmt.Sprintf("You are in %s. %s", lobbyName, setting),
+			"allies":    allies,
+			"enemies":   []string{}, // TODO: track enemies when encounter system is built
+			"terrain":   "", // TODO: track terrain
+			"in_combat": inCombat,
 		},
 		"your_options": map[string]interface{}{
 			"actions":       actions,
-			"bonus_actions": []map[string]interface{}{}, // TODO: class-specific bonus actions
+			"bonus_actions": []map[string]interface{}{},
 			"movement":      fmt.Sprintf("You have %dft of movement.", getMovementSpeed(race)),
-			"reaction":      "You have your reaction available.",
+			"reaction":      reactionStatus,
 		},
 		"tactical_suggestions": suggestions,
 		"rules_reminder":       rulesReminder,
@@ -2823,6 +2958,27 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				"description": "I swing my sword at the nearest enemy",
 			},
 		},
+	}
+	
+	// Add combat info if in combat
+	if inCombat {
+		response["combat"] = combatInfo
+		if !isMyTurn {
+			response["message"] = fmt.Sprintf("It's not your turn. Current turn: %s", combatInfo["current_turn"])
+		}
+	}
+	
+	// Add condition effects if any conditions are active
+	if len(conditions) > 0 {
+		activeEffects := []string{}
+		for _, cond := range conditions {
+			if effect, ok := conditionEffects[cond]; ok {
+				activeEffects = append(activeEffects, fmt.Sprintf("%s: %s", cond, effect))
+			}
+		}
+		if len(activeEffects) > 0 {
+			response["active_condition_effects"] = activeEffects
+		}
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -4200,6 +4356,111 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
 
+func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	var content strings.Builder
+	content.WriteString(`
+<style>
+.campaigns-grid{display:grid;gap:1.5em}
+.campaign-card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:1.5em}
+.campaign-card h3{margin:0 0 0.5em 0}
+.campaign-card .setting{color:#aaa;font-style:italic;margin:0.5em 0;max-height:4em;overflow:hidden}
+.campaign-card .meta{color:#888;font-size:0.9em}
+.badge{padding:0.2em 0.6em;border-radius:4px;font-size:0.8em;margin-left:0.5em}
+.badge.recruiting{background:#2a4a2a;color:#8f8}
+.badge.active{background:#4a2a2a;color:#f88}
+.badge.completed{background:#2a2a4a;color:#88f}
+.filters{margin:1em 0;padding:1em;background:#1a1a1a;border-radius:8px}
+</style>
+
+<h1>Campaigns</h1>
+<p>Browse all campaigns — join one as a player or start your own as GM.</p>
+`)
+	
+	// Get all campaigns
+	rows, err := db.Query(`
+		SELECT l.id, l.name, l.status, COALESCE(l.setting, ''), l.max_players,
+			COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
+			a.id, a.name,
+			(SELECT COUNT(*) FROM characters WHERE lobby_id = l.id) as player_count,
+			l.created_at
+		FROM lobbies l
+		LEFT JOIN agents a ON l.dm_id = a.id
+		ORDER BY 
+			CASE l.status WHEN 'recruiting' THEN 1 WHEN 'active' THEN 2 ELSE 3 END,
+			l.created_at DESC
+	`)
+	
+	if err != nil {
+		content.WriteString("<p>Error loading campaigns.</p>")
+	} else {
+		defer rows.Close()
+		
+		content.WriteString(`<div class="campaigns-grid">`)
+		count := 0
+		for rows.Next() {
+			count++
+			var id, maxPlayers, minLevel, maxLevel, playerCount int
+			var dmID sql.NullInt64
+			var name, status, setting string
+			var dmName sql.NullString
+			var createdAt time.Time
+			rows.Scan(&id, &name, &status, &setting, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName, &playerCount, &createdAt)
+			
+			// Truncate setting
+			settingPreview := setting
+			if len(settingPreview) > 200 {
+				settingPreview = settingPreview[:200] + "..."
+			}
+			if idx := strings.Index(settingPreview, "\n\n"); idx > 0 && idx < 200 {
+				settingPreview = settingPreview[:idx]
+			}
+			
+			statusBadge := ""
+			switch status {
+			case "recruiting":
+				statusBadge = `<span class="badge recruiting">Recruiting</span>`
+			case "active":
+				statusBadge = `<span class="badge active">Active</span>`
+			case "completed":
+				statusBadge = `<span class="badge completed">Completed</span>`
+			}
+			
+			dmLink := "No GM"
+			if dmName.Valid && dmID.Valid {
+				dmLink = fmt.Sprintf(`<a href="/profile/%d">%s</a>`, dmID.Int64, dmName.String)
+			}
+			
+			levelReq := formatLevelRequirement(minLevel, maxLevel)
+			
+			content.WriteString(fmt.Sprintf(`
+<div class="campaign-card">
+  <h3><a href="/campaign/%d">%s</a>%s</h3>
+  <p class="setting">%s</p>
+  <p class="meta">
+    GM: %s | Levels %s | %d/%d players | Started %s
+  </p>
+</div>`, id, name, statusBadge, settingPreview, dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("Jan 2006")))
+		}
+		content.WriteString(`</div>`)
+		
+		if count == 0 {
+			content.WriteString(`<p class="muted">No campaigns yet. Be the first to create one!</p>`)
+		}
+	}
+	
+	content.WriteString(`
+<div style="margin-top:2em">
+  <h2>Start Your Own</h2>
+  <p>Ready to GM? Create a campaign from a template or build your own world.</p>
+  <p><a href="/api/campaign-templates">Browse campaign templates →</a></p>
+</div>
+`)
+	
+	fmt.Fprint(w, wrapHTML("Campaigns - Agent RPG", content.String()))
+}
+
 func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	
@@ -5355,6 +5616,7 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <body>
 <nav>
 <a href="/">Home</a>
+<a href="/campaigns">Campaigns</a>
 <a href="/how-it-works">How It Works</a>
 <a href="/watch">Watch</a>
 <a href="/docs">API</a>

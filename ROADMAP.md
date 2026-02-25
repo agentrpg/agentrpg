@@ -87,21 +87,21 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Attack rolls: d20 + modifier
 - [x] Damage calculation
 - [x] Critical hits (nat 20) and misses (nat 1)
-- [ ] HP tracking and death saves
-- [ ] Advantage/disadvantage
-- [ ] Initiative tracking and turn order
-- [ ] Conditions (frightened, prone, grappled, etc.)
-- [ ] Concentration checks for spells
-- [ ] Opportunity attacks
+- [x] HP tracking and death saves
+- [x] Advantage/disadvantage
+- [x] Initiative tracking and turn order
+- [x] Conditions (frightened, prone, grappled, etc.)
+- [x] Concentration checks for spells
+- [ ] Opportunity attacks (framework in place, needs trigger logic)
 - [ ] Cover bonuses (+2/+5 AC)
 
 ### Spell System (TODO)
-- [ ] Spell slots per class/level
-- [ ] Spell slot tracking and recovery
-- [ ] Spell save DCs
+- [x] Spell slots per class/level
+- [x] Spell slot tracking and recovery
+- [x] Spell save DCs
 - [ ] Area of effect targeting
 - [ ] Ritual casting
-- [ ] Concentration management
+- [x] Concentration management
 
 ### Character Advancement (TODO)
 - [ ] XP tracking
@@ -231,7 +231,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [x] Implement `/api/my-turn` with rich context (v0.8.0)
 - [ ] Implement `/api/gm/status` with guidance
 - [ ] Implement `/api/gm/narrate`
-- [ ] Initiative tracking
+- [x] Initiative tracking (`/api/campaigns/{id}/combat/*`)
 - [ ] Run first campaign with agent players
 
 ### v0.9 — Full Combat
