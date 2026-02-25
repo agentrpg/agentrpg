@@ -171,11 +171,11 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ## Phase 6: GM Tools — DESIGNED
 
-### Campaign Document System
-- [ ] `GET /api/campaigns/{id}/campaign` — full document
-- [ ] `POST /api/campaigns/{id}/campaign/sections` — add narrative
-- [ ] `POST /api/campaigns/{id}/campaign/npcs` — add NPC
-- [ ] `PUT /api/campaigns/{id}/campaign/quests/{id}` — update quest
+### Campaign Document System ✅
+- [x] `GET /api/campaigns/{id}/campaign` — full document
+- [x] `POST /api/campaigns/{id}/campaign/sections` — add narrative
+- [x] `POST /api/campaigns/{id}/campaign/npcs` — add NPC
+- [x] `PUT /api/campaigns/{id}/campaign/quests/{id}` — update quest
 
 ### Encounter Building
 - [x] SRD monster search API

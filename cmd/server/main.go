@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.0"
+const version = "0.8.1"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1808,6 +1808,28 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 			}
 			handleCampaignItems(w, r, campaignID)
 			return
+		case "campaign":
+			// Campaign document management (GM only for writes)
+			if len(parts) > 2 {
+				switch parts[2] {
+				case "sections":
+					handleCampaignSections(w, r, campaignID)
+					return
+				case "npcs":
+					handleCampaignNPCs(w, r, campaignID)
+					return
+				case "quests":
+					if len(parts) > 3 {
+						questID := parts[3]
+						handleCampaignQuestUpdate(w, r, campaignID, questID)
+						return
+					}
+					handleCampaignQuests(w, r, campaignID)
+					return
+				}
+			}
+			handleCampaignDocument(w, r, campaignID)
+			return
 		}
 	}
 	
@@ -2093,6 +2115,525 @@ func filterMapFields(m map[string]interface{}, excludeFields []string) map[strin
 		}
 	}
 	return result
+}
+
+// ====== Campaign Document System ======
+
+// handleCampaignDocument godoc
+// @Summary Get campaign document
+// @Description Get the full campaign document. GM sees all content, players see filtered version.
+// @Tags Campaigns
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string false "Basic auth (optional, determines what you see)"
+// @Success 200 {object} map[string]interface{} "Campaign document"
+// @Router /campaigns/{id}/campaign [get]
+func handleCampaignDocument(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "GET" {
+		http.Error(w, "GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	var campaignDocRaw []byte
+	var dmID int
+	err := db.QueryRow(`
+		SELECT COALESCE(campaign_document, '{}'), COALESCE(dm_id, 0)
+		FROM lobbies WHERE id = $1
+	`, campaignID).Scan(&campaignDocRaw, &dmID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_not_found"})
+		return
+	}
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	// Check if requester is the GM
+	agentID, _ := getAgentFromAuth(r)
+	isGM := agentID == dmID && dmID != 0
+	
+	if !isGM {
+		campaignDoc = filterCampaignDocForPlayer(campaignDoc)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"campaign_id": campaignID,
+		"is_gm":       isGM,
+		"document":    campaignDoc,
+	})
+}
+
+// handleCampaignSections godoc
+// @Summary Add narrative section to campaign document
+// @Description Add a new section (narrative, notes, etc.) to the campaign document. GM only.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{type=string,title=string,content=string} true "Section to add"
+// @Success 200 {object} map[string]interface{} "Section added"
+// @Failure 401 {object} map[string]interface{} "Unauthorized or not GM"
+// @Router /campaigns/{id}/campaign/sections [post]
+func handleCampaignSections(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "gm_only", "message": "Only the GM can add sections"})
+		return
+	}
+	
+	var req struct {
+		Type    string `json:"type"`    // narrative, notes, lore, etc.
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	if req.Content == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "content_required"})
+		return
+	}
+	
+	if req.Type == "" {
+		req.Type = "narrative"
+	}
+	
+	// Get current campaign document
+	var campaignDocRaw []byte
+	db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	// Get or create sections array
+	sections, ok := campaignDoc["sections"].([]interface{})
+	if !ok {
+		sections = []interface{}{}
+	}
+	
+	// Add new section
+	newSection := map[string]interface{}{
+		"id":         fmt.Sprintf("sec-%d", time.Now().UnixNano()),
+		"type":       req.Type,
+		"title":      req.Title,
+		"content":    req.Content,
+		"created_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	sections = append(sections, newSection)
+	campaignDoc["sections"] = sections
+	
+	// Also append to story_so_far if it's a narrative section
+	if req.Type == "narrative" {
+		existingStory := ""
+		if s, ok := campaignDoc["story_so_far"].(string); ok {
+			existingStory = s
+		}
+		if existingStory != "" {
+			campaignDoc["story_so_far"] = existingStory + "\n\n" + req.Content
+		} else {
+			campaignDoc["story_so_far"] = req.Content
+		}
+	}
+	
+	// Save updated document
+	updatedDoc, _ := json.Marshal(campaignDoc)
+	db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"section": newSection,
+	})
+}
+
+// handleCampaignNPCs godoc
+// @Summary Add NPC to campaign document
+// @Description Add a new NPC to the campaign's NPC directory. GM only.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{name=string,title=string,disposition=string,notes=string,gm_only=boolean,gm_notes=string} true "NPC to add"
+// @Success 200 {object} map[string]interface{} "NPC added"
+// @Failure 401 {object} map[string]interface{} "Unauthorized or not GM"
+// @Router /campaigns/{id}/campaign/npcs [post]
+func handleCampaignNPCs(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		// Allow reading NPCs
+		handleCampaignNPCsList(w, r, campaignID)
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "gm_only", "message": "Only the GM can add NPCs"})
+		return
+	}
+	
+	var req struct {
+		Name        string `json:"name"`
+		Title       string `json:"title"`
+		Disposition string `json:"disposition"` // friendly, neutral, hostile, unknown
+		Notes       string `json:"notes"`
+		GMOnly      bool   `json:"gm_only"`
+		GMNotes     string `json:"gm_notes"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	if req.Name == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_required"})
+		return
+	}
+	
+	if req.Disposition == "" {
+		req.Disposition = "unknown"
+	}
+	
+	// Get current campaign document
+	var campaignDocRaw []byte
+	db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	// Get or create NPCs array
+	npcs, ok := campaignDoc["npcs"].([]interface{})
+	if !ok {
+		npcs = []interface{}{}
+	}
+	
+	// Add new NPC
+	newNPC := map[string]interface{}{
+		"id":          fmt.Sprintf("npc-%d", time.Now().UnixNano()),
+		"name":        req.Name,
+		"title":       req.Title,
+		"disposition": req.Disposition,
+		"notes":       req.Notes,
+		"gm_only":     req.GMOnly,
+		"gm_notes":    req.GMNotes,
+		"created_at":  time.Now().UTC().Format(time.RFC3339),
+	}
+	npcs = append(npcs, newNPC)
+	campaignDoc["npcs"] = npcs
+	
+	// Save updated document
+	updatedDoc, _ := json.Marshal(campaignDoc)
+	db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"npc":     newNPC,
+	})
+}
+
+// handleCampaignNPCsList returns NPCs (filtered for players)
+func handleCampaignNPCsList(w http.ResponseWriter, r *http.Request, campaignID int) {
+	var campaignDocRaw []byte
+	var dmID int
+	db.QueryRow(`
+		SELECT COALESCE(campaign_document, '{}'), COALESCE(dm_id, 0)
+		FROM lobbies WHERE id = $1
+	`, campaignID).Scan(&campaignDocRaw, &dmID)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	agentID, _ := getAgentFromAuth(r)
+	isGM := agentID == dmID && dmID != 0
+	
+	npcs, _ := campaignDoc["npcs"].([]interface{})
+	if npcs == nil {
+		npcs = []interface{}{}
+	}
+	
+	// Filter for players
+	if !isGM {
+		filteredNPCs := []interface{}{}
+		for _, npc := range npcs {
+			if npcMap, ok := npc.(map[string]interface{}); ok {
+				if gmOnly, ok := npcMap["gm_only"].(bool); !ok || !gmOnly {
+					// Remove gm_notes field
+					filtered := filterMapFields(npcMap, []string{"gm_notes", "gm_only"})
+					filteredNPCs = append(filteredNPCs, filtered)
+				}
+			}
+		}
+		npcs = filteredNPCs
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"npcs":  npcs,
+		"count": len(npcs),
+		"is_gm": isGM,
+	})
+}
+
+// handleCampaignQuests godoc
+// @Summary List or add quests
+// @Description GET: List quests (filtered for players). POST: Add a new quest (GM only).
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string false "Basic auth"
+// @Success 200 {object} map[string]interface{} "Quest list or creation result"
+// @Router /campaigns/{id}/campaign/quests [get]
+// @Router /campaigns/{id}/campaign/quests [post]
+func handleCampaignQuests(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		handleCampaignQuestsList(w, r, campaignID)
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "gm_only", "message": "Only the GM can add quests"})
+		return
+	}
+	
+	var req struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		Status      string `json:"status"` // hidden, active, completed, failed
+		GMNotes     string `json:"gm_notes"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	if req.Title == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "title_required"})
+		return
+	}
+	
+	if req.Status == "" {
+		req.Status = "active"
+	}
+	
+	// Get current campaign document
+	var campaignDocRaw []byte
+	db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	// Get or create quests array
+	quests, ok := campaignDoc["quests"].([]interface{})
+	if !ok {
+		quests = []interface{}{}
+	}
+	
+	// Add new quest
+	newQuest := map[string]interface{}{
+		"id":          fmt.Sprintf("quest-%d", time.Now().UnixNano()),
+		"title":       req.Title,
+		"description": req.Description,
+		"status":      req.Status,
+		"gm_notes":    req.GMNotes,
+		"created_at":  time.Now().UTC().Format(time.RFC3339),
+	}
+	quests = append(quests, newQuest)
+	campaignDoc["quests"] = quests
+	
+	// Save updated document
+	updatedDoc, _ := json.Marshal(campaignDoc)
+	db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"quest":   newQuest,
+	})
+}
+
+// handleCampaignQuestsList returns quests (filtered for players)
+func handleCampaignQuestsList(w http.ResponseWriter, r *http.Request, campaignID int) {
+	var campaignDocRaw []byte
+	var dmID int
+	db.QueryRow(`
+		SELECT COALESCE(campaign_document, '{}'), COALESCE(dm_id, 0)
+		FROM lobbies WHERE id = $1
+	`, campaignID).Scan(&campaignDocRaw, &dmID)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	agentID, _ := getAgentFromAuth(r)
+	isGM := agentID == dmID && dmID != 0
+	
+	quests, _ := campaignDoc["quests"].([]interface{})
+	if quests == nil {
+		quests = []interface{}{}
+	}
+	
+	// Filter for players
+	if !isGM {
+		filteredQuests := []interface{}{}
+		for _, quest := range quests {
+			if questMap, ok := quest.(map[string]interface{}); ok {
+				if status, ok := questMap["status"].(string); !ok || status != "hidden" {
+					// Remove gm_notes field
+					filtered := filterMapFields(questMap, []string{"gm_notes"})
+					filteredQuests = append(filteredQuests, filtered)
+				}
+			}
+		}
+		quests = filteredQuests
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"quests": quests,
+		"count":  len(quests),
+		"is_gm":  isGM,
+	})
+}
+
+// handleCampaignQuestUpdate godoc
+// @Summary Update a quest
+// @Description Update quest status, description, or resolution. GM only.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param quest_id path string true "Quest ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{status=string,resolution=string,description=string} true "Fields to update"
+// @Success 200 {object} map[string]interface{} "Quest updated"
+// @Failure 401 {object} map[string]interface{} "Unauthorized or not GM"
+// @Failure 404 {object} map[string]interface{} "Quest not found"
+// @Router /campaigns/{id}/campaign/quests/{quest_id} [put]
+func handleCampaignQuestUpdate(w http.ResponseWriter, r *http.Request, campaignID int, questID string) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "PUT" && r.Method != "PATCH" {
+		http.Error(w, "PUT or PATCH required", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "gm_only", "message": "Only the GM can update quests"})
+		return
+	}
+	
+	var req struct {
+		Status      *string `json:"status"`
+		Resolution  *string `json:"resolution"`
+		Description *string `json:"description"`
+		GMNotes     *string `json:"gm_notes"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	// Get current campaign document
+	var campaignDocRaw []byte
+	db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	quests, ok := campaignDoc["quests"].([]interface{})
+	if !ok {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "quest_not_found"})
+		return
+	}
+	
+	// Find and update the quest
+	found := false
+	for i, quest := range quests {
+		if questMap, ok := quest.(map[string]interface{}); ok {
+			if id, ok := questMap["id"].(string); ok && id == questID {
+				if req.Status != nil {
+					questMap["status"] = *req.Status
+				}
+				if req.Resolution != nil {
+					questMap["resolution"] = *req.Resolution
+				}
+				if req.Description != nil {
+					questMap["description"] = *req.Description
+				}
+				if req.GMNotes != nil {
+					questMap["gm_notes"] = *req.GMNotes
+				}
+				questMap["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+				quests[i] = questMap
+				found = true
+				break
+			}
+		}
+	}
+	
+	if !found {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "quest_not_found"})
+		return
+	}
+	
+	campaignDoc["quests"] = quests
+	
+	// Save updated document
+	updatedDoc, _ := json.Marshal(campaignDoc)
+	db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":  true,
+		"quest_id": questID,
+	})
 }
 
 // handleCampaignObserve godoc
