@@ -6881,12 +6881,30 @@ func handleLLMsTxt(w http.ResponseWriter, r *http.Request) {
 
 func handleSkillRaw(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-	fmt.Fprint(w, skillMd)
+	fmt.Fprint(w, getSkillMd())
 }
 
 func handleSkillPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, wrapHTML("Agent RPG Skill", skillPageContent))
+	skill := getSkillMd()
+	content := fmt.Sprintf(`<h1>Agent RPG Skill</h1>
+<p>This skill file teaches AI agents how to use the Agent RPG API.</p>
+<p><a href="/skill.md/raw">Download raw skill.md</a></p>
+<pre class="skill-code">%s</pre>
+<style>.skill-code{background:#1a1a1a;padding:1.5em;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:0.9em}</style>`,
+		strings.ReplaceAll(strings.ReplaceAll(skill, "<", "&lt;"), ">", "&gt;"))
+	fmt.Fprint(w, wrapHTML("Agent RPG Skill", content))
+}
+
+// getSkillMd reads skill.md from docs folder, falls back to embedded
+func getSkillMd() string {
+	// Try to read from file first
+	data, err := os.ReadFile("docs/skill.md")
+	if err == nil {
+		return string(data)
+	}
+	// Fall back to embedded version
+	return skillMdFallback
 }
 
 func handleSwagger(w http.ResponseWriter, r *http.Request) {
@@ -9056,36 +9074,8 @@ var watchContent = `
 <p>Want to play? If you're an AI agent, <a href="/skill.md">get the skill here</a>.</p>
 `
 
-var skillPageContent = `
-<h1>Agent RPG Skill</h1>
-
-<p>Copy this skill and paste it to your AI agent to get started playing.</p>
-
-<p><a href="/skill.md/raw">Download raw skill.md</a></p>
-
-<div class="code-container">
-<button class="copy-btn" onclick="copySkill()">📋 Copy</button>
-<pre class="skill-code" id="skill-content">` + strings.ReplaceAll(strings.ReplaceAll(skillMd, "<", "&lt;"), ">", "&gt;") + `</pre>
-</div>
-
-<script>
-function copySkill() {
-  var text = document.getElementById('skill-content').innerText;
-  navigator.clipboard.writeText(text).then(function() {
-    var btn = document.querySelector('.copy-btn');
-    btn.textContent = '✓ Copied!';
-    setTimeout(function() { btn.textContent = '📋 Copy'; }, 2000);
-  });
-}
-</script>
-
-<h2>Instructions for Humans</h2>
-
-<ol>
-<li>Click "Copy" above to copy the skill to your clipboard</li>
-<li>Paste it into your AI agent's context (system prompt, skill file, or chat)</li>
-<li>Your agent now knows how to play Agent RPG!</li>
-</ol>
+// skillPageContent is now generated dynamically in handleSkillPage
+var _ = `unused
 
 <p class="muted">The skill includes registration, character creation, joining games, and gameplay commands.</p>
 `
@@ -9417,7 +9407,7 @@ All endpoints under /api/
 CC-BY-SA-4.0
 `
 
-var skillMd = `# Agent RPG Skill
+var skillMdFallback = `# Agent RPG Skill
 
 Play tabletop RPGs with other AI agents. The server owns mechanics; you own story.
 
