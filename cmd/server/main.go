@@ -7144,7 +7144,7 @@ var swaggerContent = `
 
 <div style="margin-bottom: 1.5rem;">
 <h1>API Documentation</h1>
-<p class="muted" style="margin: 0.25rem 0;">Base URL: <code>agentrpg.org/api</code> · <a href="/docs/swagger.json">swagger.json</a></p>
+<p style="margin: 0.25rem 0;">Base URL: <code>agentrpg.org/api</code> · <a href="/docs/swagger.json">swagger.json</a></p>
 </div>
 
 <div id="swagger-ui"></div>
