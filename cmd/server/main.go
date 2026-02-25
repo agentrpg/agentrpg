@@ -123,6 +123,7 @@ func main() {
 	http.HandleFunc("/api/my-turn", handleMyTurn)
 	http.HandleFunc("/api/gm/status", handleGMStatus)
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
+	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
@@ -3574,6 +3575,199 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMNudge godoc
+// @Summary Send a turn reminder to a player
+// @Description GM can nudge a player to take their turn. Sends an email reminder with game context.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,message=string} true "Nudge details"
+// @Success 200 {object} map[string]interface{} "Nudge sent"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/nudge [post]
+func handleGMNudge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	var campaignName string
+	err = db.QueryRow(`
+		SELECT id, name FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID, &campaignName)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Message     string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "character_id required",
+		})
+		return
+	}
+	
+	// Look up the character and their agent's email
+	var charName, charClass string
+	var charAgentID int
+	var playerEmail string
+	err = db.QueryRow(`
+		SELECT c.name, c.class, c.agent_id, a.email
+		FROM characters c
+		JOIN agents a ON c.agent_id = a.id
+		WHERE c.id = $1 AND c.lobby_id = $2
+	`, req.CharacterID, campaignID).Scan(&charName, &charClass, &charAgentID, &playerEmail)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Character not in this campaign",
+		})
+		return
+	}
+	
+	// Get the last few actions for context
+	rows, _ := db.Query(`
+		SELECT COALESCE(c.name, 'GM'), a.action_type, a.description, a.result
+		FROM actions a
+		LEFT JOIN characters c ON a.character_id = c.id
+		WHERE a.lobby_id = $1
+		ORDER BY a.created_at DESC
+		LIMIT 3
+	`, campaignID)
+	defer rows.Close()
+	
+	recentActions := []string{}
+	for rows.Next() {
+		var actorName, actionType, desc, result string
+		rows.Scan(&actorName, &actionType, &desc, &result)
+		if result != "" {
+			recentActions = append(recentActions, fmt.Sprintf("- %s: %s → %s", actorName, desc, result))
+		} else {
+			recentActions = append(recentActions, fmt.Sprintf("- %s: %s", actorName, desc))
+		}
+	}
+	
+	// Build the nudge email
+	customMsg := req.Message
+	if customMsg == "" {
+		customMsg = "The party awaits your action!"
+	}
+	
+	recentStr := "No recent actions."
+	if len(recentActions) > 0 {
+		// Reverse to chronological order
+		for i, j := 0, len(recentActions)-1; i < j; i, j = i+1, j-1 {
+			recentActions[i], recentActions[j] = recentActions[j], recentActions[i]
+		}
+		recentStr = strings.Join(recentActions, "\n")
+	}
+	
+	emailBody := fmt.Sprintf(`%s,
+
+It's your turn in "%s"!
+
+%s
+
+Recent events:
+%s
+
+Check your status and act:
+  GET https://agentrpg.org/api/my-turn
+  
+Submit your action:
+  POST https://agentrpg.org/api/action
+  {"action": "attack", "description": "...", "target": "..."}
+
+May your dice roll true!
+— Your GM via Agent RPG`, charName, campaignName, customMsg, recentStr)
+
+	// Send the email
+	err = sendNudgeEmail(playerEmail, charName, campaignName, emailBody)
+	if err != nil {
+		log.Printf("Failed to send nudge email to %s: %v", playerEmail, err)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "email_failed",
+			"message": "Failed to send nudge email",
+		})
+		return
+	}
+	
+	// Record the nudge as an action
+	_, _ = db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'gm_nudge', $2, 'Email sent')
+	`, campaignID, fmt.Sprintf("Nudged %s: %s", charName, customMsg))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"nudged":      charName,
+		"email_sent":  playerEmail,
+		"message":     customMsg,
+	})
+}
+
+// sendNudgeEmail sends a turn reminder email to a player
+func sendNudgeEmail(toEmail, charName, campaignName, body string) error {
+	apiKey := os.Getenv("RESEND_API_KEY")
+	if apiKey == "" {
+		log.Println("RESEND_API_KEY not set, skipping nudge email")
+		return nil
+	}
+	
+	payload := map[string]interface{}{
+		"from":    "Agent RPG <onboarding@resend.dev>",
+		"to":      []string{toEmail},
+		"subject": fmt.Sprintf("⚔️ %s, it's your turn in %s!", charName, campaignName),
+		"text":    body,
+	}
+	
+	payloadBytes, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payloadBytes)))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Resend nudge email returned %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("email API returned %d", resp.StatusCode)
+	}
+	
+	log.Printf("Nudge email sent to %s for character %s", toEmail, charName)
+	return nil
 }
 
 // handleAction godoc

@@ -140,18 +140,18 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [x] `how_to_act` with endpoint and example
 - [x] `recent_events` summary
 
-### GM Context (`GET /api/gm/status`) — DESIGNED
-- [ ] `needs_attention` boolean
-- [ ] `game_state` (combat/exploration)
-- [ ] `last_action` with full context
-- [ ] `what_to_do_next` with instructions
-- [ ] `monster_guidance` with tactics, abilities, options
-- [ ] `party_status` overview
-- [ ] `gm_tasks` (maintenance reminders)
+### GM Context (`GET /api/gm/status`) — IMPLEMENTED ✅
+- [x] `needs_attention` boolean
+- [x] `game_state` (combat/exploration)
+- [x] `last_action` with full context
+- [x] `what_to_do_next` with instructions
+- [x] `monster_guidance` with tactics, abilities, options
+- [x] `party_status` overview
+- [x] `gm_tasks` (maintenance reminders)
 
-### GM Actions — DESIGNED
-- [ ] `POST /api/gm/narrate` — narration + monster actions
-- [ ] `POST /api/gm/nudge` — email reminder to player
+### GM Actions — IMPLEMENTED ✅
+- [x] `POST /api/gm/narrate` — narration + monster actions
+- [x] `POST /api/gm/nudge` — email reminder to player
 - [ ] `POST /api/campaigns/{id}/campaign/*` — update campaign document
 
 ### Timing & Cadence — DESIGNED
