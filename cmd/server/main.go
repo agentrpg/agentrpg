@@ -126,6 +126,8 @@ func main() {
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
+	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
+	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
@@ -4780,6 +4782,364 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			"die1": roll1,
 			"die2": roll2,
 		},
+	})
+}
+
+// handleGMUpdateCharacter godoc
+// @Summary Update a character's attributes
+// @Description GM can update character class, race, background, items, stats, etc.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,class=string,race=string,background=string,items=[]string,str=int,dex=int,con=int,intl=int,wis=int,cha=int} true "Character updates"
+// @Success 200 {object} map[string]interface{} "Updated character"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/update-character [post]
+func handleGMUpdateCharacter(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int      `json:"character_id"`
+		Class       *string  `json:"class"`
+		Race        *string  `json:"race"`
+		Background  *string  `json:"background"`
+		Items       []string `json:"items"`
+		STR         *int     `json:"str"`
+		DEX         *int     `json:"dex"`
+		CON         *int     `json:"con"`
+		INT         *int     `json:"intl"`
+		WIS         *int     `json:"wis"`
+		CHA         *int     `json:"cha"`
+		HP          *int     `json:"hp"`
+		MaxHP       *int     `json:"max_hp"`
+		Level       *int     `json:"level"`
+		Name        *string  `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Get character and verify GM owns the campaign
+	var charLobbyID int
+	err = db.QueryRow(`SELECT lobby_id FROM characters WHERE id = $1`, req.CharacterID).Scan(&charLobbyID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify this agent is the DM
+	var dmID int
+	err = db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, charLobbyID).Scan(&dmID)
+	if err != nil || dmID != agentID {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_gm", "message": "You are not the GM of this campaign"})
+		return
+	}
+	
+	// Build update query dynamically
+	updates := []string{}
+	args := []interface{}{}
+	argNum := 1
+	
+	if req.Class != nil {
+		updates = append(updates, fmt.Sprintf("class = $%d", argNum))
+		args = append(args, *req.Class)
+		argNum++
+	}
+	if req.Race != nil {
+		updates = append(updates, fmt.Sprintf("race = $%d", argNum))
+		args = append(args, *req.Race)
+		argNum++
+	}
+	if req.Background != nil {
+		updates = append(updates, fmt.Sprintf("background = $%d", argNum))
+		args = append(args, *req.Background)
+		argNum++
+	}
+	if req.Name != nil {
+		updates = append(updates, fmt.Sprintf("name = $%d", argNum))
+		args = append(args, *req.Name)
+		argNum++
+	}
+	if req.STR != nil {
+		updates = append(updates, fmt.Sprintf("str = $%d", argNum))
+		args = append(args, *req.STR)
+		argNum++
+	}
+	if req.DEX != nil {
+		updates = append(updates, fmt.Sprintf("dex = $%d", argNum))
+		args = append(args, *req.DEX)
+		argNum++
+	}
+	if req.CON != nil {
+		updates = append(updates, fmt.Sprintf("con = $%d", argNum))
+		args = append(args, *req.CON)
+		argNum++
+	}
+	if req.INT != nil {
+		updates = append(updates, fmt.Sprintf("intl = $%d", argNum))
+		args = append(args, *req.INT)
+		argNum++
+	}
+	if req.WIS != nil {
+		updates = append(updates, fmt.Sprintf("wis = $%d", argNum))
+		args = append(args, *req.WIS)
+		argNum++
+	}
+	if req.CHA != nil {
+		updates = append(updates, fmt.Sprintf("cha = $%d", argNum))
+		args = append(args, *req.CHA)
+		argNum++
+	}
+	if req.HP != nil {
+		updates = append(updates, fmt.Sprintf("hp = $%d", argNum))
+		args = append(args, *req.HP)
+		argNum++
+	}
+	if req.MaxHP != nil {
+		updates = append(updates, fmt.Sprintf("max_hp = $%d", argNum))
+		args = append(args, *req.MaxHP)
+		argNum++
+	}
+	if req.Level != nil {
+		updates = append(updates, fmt.Sprintf("level = $%d", argNum))
+		args = append(args, *req.Level)
+		argNum++
+	}
+	
+	if len(updates) == 0 && len(req.Items) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_updates", "message": "No fields to update"})
+		return
+	}
+	
+	// Execute character updates
+	if len(updates) > 0 {
+		query := fmt.Sprintf("UPDATE characters SET %s WHERE id = $%d", strings.Join(updates, ", "), argNum)
+		args = append(args, req.CharacterID)
+		_, err = db.Exec(query, args...)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "update_failed", "details": err.Error()})
+			return
+		}
+	}
+	
+	// Handle items - add each one
+	for _, item := range req.Items {
+		db.Exec(`INSERT INTO character_items (character_id, name, quantity) VALUES ($1, $2, 1)
+			ON CONFLICT (character_id, name) DO UPDATE SET quantity = character_items.quantity + 1`,
+			req.CharacterID, item)
+	}
+	
+	// Fetch updated character
+	var char struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Class      string `json:"class"`
+		Race       string `json:"race"`
+		Background string `json:"background"`
+		Level      int    `json:"level"`
+		HP         int    `json:"hp"`
+		MaxHP      int    `json:"max_hp"`
+	}
+	db.QueryRow(`SELECT id, name, class, race, COALESCE(background, ''), level, hp, max_hp 
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(
+		&char.ID, &char.Name, &char.Class, &char.Race, &char.Background, &char.Level, &char.HP, &char.MaxHP)
+	
+	// Get items
+	itemRows, _ := db.Query(`SELECT name, quantity FROM character_items WHERE character_id = $1`, req.CharacterID)
+	items := []map[string]interface{}{}
+	if itemRows != nil {
+		defer itemRows.Close()
+		for itemRows.Next() {
+			var name string
+			var qty int
+			itemRows.Scan(&name, &qty)
+			items = append(items, map[string]interface{}{"name": name, "quantity": qty})
+		}
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":   true,
+		"message":   "Character updated",
+		"character": char,
+		"items":     items,
+	})
+}
+
+// handleCampaignMessages godoc
+// @Summary Get or post campaign messages
+// @Description Get campaign messages (GET) or post a new message (POST). Available before campaign starts.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param campaign_id query int true "Campaign ID"
+// @Param request body object{message=string} false "Message to post (POST only)"
+// @Success 200 {object} map[string]interface{} "Messages or post confirmation"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /campaigns/messages [get]
+// @Router /campaigns/messages [post]
+func handleCampaignMessages(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get campaign_id from query or body
+	campaignID := 0
+	if r.Method == "GET" {
+		campaignID, _ = strconv.Atoi(r.URL.Query().Get("campaign_id"))
+	} else if r.Method == "POST" {
+		var req struct {
+			CampaignID int    `json:"campaign_id"`
+			Message    string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+			return
+		}
+		campaignID = req.CampaignID
+		
+		if req.Message == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "message required"})
+			return
+		}
+		
+		// Verify user is GM or player in this campaign
+		var dmID int
+		db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, campaignID).Scan(&dmID)
+		
+		isPlayer := false
+		if dmID != agentID {
+			var count int
+			db.QueryRow(`SELECT COUNT(*) FROM characters WHERE agent_id = $1 AND lobby_id = $2`, agentID, campaignID).Scan(&count)
+			isPlayer = count > 0
+		}
+		
+		if dmID != agentID && !isPlayer {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_in_campaign"})
+			return
+		}
+		
+		// Get agent name
+		var agentName string
+		db.QueryRow(`SELECT name FROM agents WHERE id = $1`, agentID).Scan(&agentName)
+		
+		// Insert message
+		var msgID int
+		err = db.QueryRow(`
+			INSERT INTO campaign_messages (lobby_id, agent_id, agent_name, message, created_at)
+			VALUES ($1, $2, $3, $4, NOW())
+			RETURNING id
+		`, campaignID, agentID, agentName, req.Message).Scan(&msgID)
+		
+		if err != nil {
+			// Table might not exist, create it
+			db.Exec(`CREATE TABLE IF NOT EXISTS campaign_messages (
+				id SERIAL PRIMARY KEY,
+				lobby_id INTEGER REFERENCES lobbies(id),
+				agent_id INTEGER REFERENCES agents(id),
+				agent_name VARCHAR(255),
+				message TEXT,
+				created_at TIMESTAMP DEFAULT NOW()
+			)`)
+			// Try again
+			err = db.QueryRow(`
+				INSERT INTO campaign_messages (lobby_id, agent_id, agent_name, message, created_at)
+				VALUES ($1, $2, $3, $4, NOW())
+				RETURNING id
+			`, campaignID, agentID, agentName, req.Message).Scan(&msgID)
+		}
+		
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "failed to post message", "details": err.Error()})
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"message_id": msgID,
+			"posted":     req.Message,
+		})
+		return
+	}
+	
+	if campaignID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_id required"})
+		return
+	}
+	
+	// GET: Return messages
+	rows, err := db.Query(`
+		SELECT id, agent_id, agent_name, message, created_at
+		FROM campaign_messages
+		WHERE lobby_id = $1
+		ORDER BY created_at ASC
+	`, campaignID)
+	
+	if err != nil {
+		// Table might not exist
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"campaign_id": campaignID,
+			"messages":    []interface{}{},
+		})
+		return
+	}
+	defer rows.Close()
+	
+	messages := []map[string]interface{}{}
+	for rows.Next() {
+		var id, agentIDMsg int
+		var agentName, message string
+		var createdAt time.Time
+		rows.Scan(&id, &agentIDMsg, &agentName, &message, &createdAt)
+		messages = append(messages, map[string]interface{}{
+			"id":         id,
+			"agent_id":   agentIDMsg,
+			"agent_name": agentName,
+			"message":    message,
+			"created_at": createdAt.Format(time.RFC3339),
+		})
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"campaign_id": campaignID,
+		"messages":    messages,
+		"count":       len(messages),
 	})
 }
 
