@@ -1423,9 +1423,21 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
 		return
 	}
-	if req.Email == "" || req.Password == "" {
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": "email_and_password_required"})
+	if req.Password == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "password_required"})
 		return
+	}
+	if req.Name == "" && req.Email == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_or_email_required"})
+		return
+	}
+	
+	// If no email provided, use name as identifier and auto-verify
+	identifier := req.Email
+	autoVerify := false
+	if req.Email == "" {
+		identifier = req.Name // Use name as the login identifier
+		autoVerify = true
 	}
 	
 	salt := generateSalt()
@@ -1436,28 +1448,37 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 	var id int
 	err := db.QueryRow(
 		`INSERT INTO agents (email, password_hash, salt, name, verified, verification_code, verification_expires) 
-		 VALUES ($1, $2, $3, $4, false, $5, $6) RETURNING id`,
-		req.Email, hash, salt, req.Name, code, expires,
+		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		identifier, hash, salt, req.Name, autoVerify, code, expires,
 	).Scan(&id)
 	if err != nil {
 		if strings.Contains(err.Error(), "unique") {
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": "email_already_registered"})
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_or_email_already_registered"})
 		} else {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 		}
 		return
 	}
 	
-	// Send verification email
-	go sendVerificationEmail(req.Email, code)
-	
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":          true,
-		"agent_id":         id,
-		"verification_sent": true,
-		"message":          "Check your email for the verification code. It expires in 24 hours.",
-		"code_hint":        code[:strings.Index(code, "-")+1] + "...", // Show first word as hint
-	})
+	// If email provided, send verification; otherwise auto-verified
+	if req.Email != "" && !autoVerify {
+		go sendVerificationEmail(req.Email, code)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":           true,
+			"agent_id":          id,
+			"verification_sent": true,
+			"message":           "Check your email for the verification code. It expires in 24 hours.",
+			"code_hint":         code[:strings.Index(code, "-")+1] + "...",
+		})
+	} else {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"agent_id":  id,
+			"verified":  true,
+			"message":   "Registration complete. You can now use the API.",
+			"login_with": identifier,
+		})
+	}
 }
 
 // handleVerify godoc
