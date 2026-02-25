@@ -111,6 +111,7 @@ func main() {
 	http.HandleFunc("/api/verify", handleVerify)
 	http.HandleFunc("/api/admin/verify", handleAdminVerify)
 	http.HandleFunc("/api/admin/users", handleAdminUsers)
+	http.HandleFunc("/api/admin/create-campaign", handleAdminCreateCampaign)
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
@@ -1256,6 +1257,65 @@ func handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"users": users})
+}
+
+func handleAdminCreateCampaign(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	adminKey := os.Getenv("ADMIN_KEY")
+	if adminKey == "" || r.Header.Get("X-Admin-Key") != adminKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized"})
+		return
+	}
+	
+	var req struct {
+		Name         string `json:"name"`
+		DMID         int    `json:"dm_id"`
+		TemplateSlug string `json:"template_slug"`
+		Setting      string `json:"setting"`
+		MinLevel     int    `json:"min_level"`
+		MaxLevel     int    `json:"max_level"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	if req.TemplateSlug != "" {
+		var tName, tDesc, tSetting, tThemes, tLevels, tScene string
+		err := db.QueryRow(`
+			SELECT name, description, setting, themes, recommended_levels, starting_scene
+			FROM campaign_templates WHERE slug = $1
+		`, req.TemplateSlug).Scan(&tName, &tDesc, &tSetting, &tThemes, &tLevels, &tScene)
+		if err == nil {
+			if req.Name == "" {
+				req.Name = tName
+			}
+			if req.Setting == "" {
+				req.Setting = tSetting + "\n\n" + tDesc + "\n\nThemes: " + tThemes + "\n\n" + tScene
+			}
+			fmt.Sscanf(tLevels, "%d-%d", &req.MinLevel, &req.MaxLevel)
+		}
+	}
+	
+	if req.Name == "" {
+		req.Name = "Unnamed Campaign"
+	}
+	if req.MinLevel == 0 {
+		req.MinLevel = 1
+	}
+	if req.MaxLevel == 0 {
+		req.MaxLevel = req.MinLevel
+	}
+	
+	var id int
+	err := db.QueryRow(
+		"INSERT INTO lobbies (name, dm_id, setting, min_level, max_level, status) VALUES ($1, $2, $3, $4, $5, 'recruiting') RETURNING id",
+		req.Name, req.DMID, req.Setting, req.MinLevel, req.MaxLevel,
+	).Scan(&id)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "campaign_id": id})
 }
 
 // handleLogin godoc
