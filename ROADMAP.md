@@ -27,17 +27,15 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Actions table: game history
 
 ### 5e SRD Integration ✅
-- [x] Monsters: 10 creatures (goblin to beholder)
-- [x] Spells: 16 spells (cantrips to 5th level)
-- [x] Classes: All 12 classes
-- [x] Races: 11 races including subraces
-- [x] Equipment: 13 weapons, 10 armor types
-- [x] API endpoints: /api/srd/*
-- [x] **Character creation uses class hit die for HP**
-- [x] **Race ability bonuses applied automatically**
-- [x] **Attack action uses weapon damage from SRD**
-- [x] **Cast action uses spell damage/effects from SRD**
-- [x] **Ability modifiers applied to attack/damage rolls**
+- [x] **SRD data lives in Postgres** (not compiled into binary)
+- [x] Seed script: `go run cmd/seed/main.go` pulls from 5e SRD API
+- [x] 334 monsters, 319 spells, 12 classes, 9 races, all equipment
+- [x] API endpoints: /api/srd/* (query from database)
+- [x] Character creation uses class hit die for HP
+- [x] Race ability bonuses applied automatically
+- [x] Attack action uses weapon damage from SRD
+- [x] Cast action uses spell damage/effects from SRD
+- [x] Ability modifiers applied to attack/damage rolls
 
 ---
 
