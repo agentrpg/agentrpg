@@ -6688,10 +6688,10 @@ var baseHTML = `<!DOCTYPE html>
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #1a1b26; --fg: #c0caf5; --muted: #565f89;
-    --link: #7aa2f7; --link-visited: #bb9af7;
-    --border: #3b4261; --code-bg: #24283b;
-    --note-bg: #1f2335; --note-border: #3b4261;
+    --bg: #111111; --fg: #dddddd; --muted: #888888;
+    --link: #6699ff; --link-visited: #cc99ff;
+    --border: #444444; --code-bg: #1a1a1a;
+    --note-bg: #1a1a1a; --note-border: #444444;
   }
 }
 [data-theme="light"] {
@@ -6701,10 +6701,10 @@ var baseHTML = `<!DOCTYPE html>
   --note-bg: #fffbdd; --note-border: #e6d9a6;
 }
 [data-theme="dark"] {
-  --bg: #1a1b26; --fg: #c0caf5; --muted: #565f89;
-  --link: #7aa2f7; --link-visited: #bb9af7;
-  --border: #3b4261; --code-bg: #24283b;
-  --note-bg: #1f2335; --note-border: #3b4261;
+  --bg: #111111; --fg: #dddddd; --muted: #888888;
+  --link: #6699ff; --link-visited: #cc99ff;
+  --border: #444444; --code-bg: #1a1a1a;
+  --note-bg: #1a1a1a; --note-border: #444444;
 }
 [data-theme="catppuccin-latte"] {
   --bg: #eff1f5; --fg: #4c4f69; --muted: #8c8fa1;
@@ -6790,7 +6790,7 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7z"/></svg>
 <div class="theme-menu" id="theme-menu">
 <div class="theme-row" onclick="setTheme('light')" style="background:#ffffff;color:#222222"><span class="theme-name">Light</span><span class="theme-swatches"><span class="theme-swatch" style="background:#0645ad"></span><span class="theme-swatch" style="background:#0b0080"></span><span class="theme-swatch" style="background:#666666"></span></span></div>
-<div class="theme-row" onclick="setTheme('dark')" style="background:#1a1b26;color:#c0caf5"><span class="theme-name">Dark</span><span class="theme-swatches"><span class="theme-swatch" style="background:#7aa2f7"></span><span class="theme-swatch" style="background:#bb9af7"></span><span class="theme-swatch" style="background:#565f89"></span></span></div>
+<div class="theme-row" onclick="setTheme('dark')" style="background:#111111;color:#dddddd"><span class="theme-name">Dark</span><span class="theme-swatches"><span class="theme-swatch" style="background:#6699ff"></span><span class="theme-swatch" style="background:#cc99ff"></span><span class="theme-swatch" style="background:#888888"></span></span></div>
 <div class="theme-row" onclick="setTheme('tokyonight')" style="background:#1a1b26;color:#c0caf5"><span class="theme-name">Tokyo Night</span><span class="theme-swatches"><span class="theme-swatch" style="background:#7aa2f7"></span><span class="theme-swatch" style="background:#bb9af7"></span><span class="theme-swatch" style="background:#565f89"></span></span></div>
 <div class="theme-row" onclick="setTheme('tokyonight-day')" style="background:#e1e2e7;color:#3760bf"><span class="theme-name">Tokyo Night Day</span><span class="theme-swatches"><span class="theme-swatch" style="background:#2e7de9"></span><span class="theme-swatch" style="background:#9854f1"></span><span class="theme-swatch" style="background:#6172b0"></span></span></div>
 <div class="theme-row" onclick="setTheme('catppuccin-latte')" style="background:#eff1f5;color:#4c4f69"><span class="theme-name">Catppuccin Latte</span><span class="theme-swatches"><span class="theme-swatch" style="background:#1e66f5"></span><span class="theme-swatch" style="background:#8839ef"></span><span class="theme-swatch" style="background:#8c8fa1"></span></span></div>
