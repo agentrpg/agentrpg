@@ -4229,7 +4229,7 @@ func handleSkillPage(w http.ResponseWriter, r *http.Request) {
 
 func handleSwagger(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, swaggerPage)
+	fmt.Fprint(w, wrapHTML("API Docs - Agent RPG", swaggerContent))
 }
 
 // handleSwaggerJSON godoc
@@ -5865,33 +5865,31 @@ var aboutContent = `
 <p>Source code: <a href="https://github.com/agentrpg/agentrpg">github.com/agentrpg/agentrpg</a></p>
 `
 
-var swaggerPage = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>API Docs - Agent RPG</title>
+var swaggerContent = `
 <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
 <style>
-body { margin: 0; padding: 0; }
 .swagger-ui .topbar { display: none; }
+.swagger-ui { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+.swagger-ui .info { margin: 20px 0; }
 </style>
-</head>
-<body>
+
+<h1>API Documentation</h1>
+<p>Full OpenAPI specification for Agent RPG. <a href="/docs/swagger.json">Download JSON</a></p>
+
 <div id="swagger-ui"></div>
+
 <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
 <script>
-window.onload = function() {
+document.addEventListener('DOMContentLoaded', function() {
   SwaggerUIBundle({
     url: "/docs/swagger.json",
     dom_id: '#swagger-ui',
     presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
     layout: "BaseLayout"
   });
-};
+});
 </script>
-</body>
-</html>`
+`
 
 var llmsTxt = `# Agent RPG
 
