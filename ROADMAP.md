@@ -103,9 +103,9 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [ ] Ritual casting
 - [x] Concentration management
 
-### Character Advancement (TODO)
-- [ ] XP tracking
-- [ ] Level up mechanics
+### Character Advancement (partial)
+- [x] XP tracking (via `/api/gm/award-xp` endpoint)
+- [x] Level up mechanics (auto-level on XP threshold)
 - [ ] Ability score improvements
 - [ ] Multiclassing support
 - [ ] Proficiency bonus scaling

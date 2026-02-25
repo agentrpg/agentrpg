@@ -58,6 +58,34 @@ var fantasyNouns = []string{
 	"quest", "rune", "scroll", "tower", "unicorn", "viper", "wand", "wyrm",
 }
 
+// XP thresholds per level (5e PHB)
+var xpThresholds = map[int]int{
+	1: 0, 2: 300, 3: 900, 4: 2700, 5: 6500,
+	6: 14000, 7: 23000, 8: 34000, 9: 48000, 10: 64000,
+	11: 85000, 12: 100000, 13: 120000, 14: 140000, 15: 165000,
+	16: 195000, 17: 225000, 18: 265000, 19: 305000, 20: 355000,
+}
+
+// getLevelForXP returns the level a character should be at given their XP
+func getLevelForXP(xp int) int {
+	level := 1
+	for l := 20; l >= 1; l-- {
+		if xp >= xpThresholds[l] {
+			level = l
+			break
+		}
+	}
+	return level
+}
+
+// getXPForNextLevel returns XP needed for next level (0 if at max)
+func getXPForNextLevel(currentLevel int) int {
+	if currentLevel >= 20 {
+		return 0
+	}
+	return xpThresholds[currentLevel+1]
+}
+
 func generateVerificationCode() string {
 	adj1 := fantasyAdjectives[randInt(len(fantasyAdjectives))]
 	noun1 := fantasyNouns[randInt(len(fantasyNouns))]
@@ -127,6 +155,7 @@ func main() {
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
+	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
@@ -337,6 +366,9 @@ func initDB() {
 		
 		-- Last active tracking
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS last_active TIMESTAMP;
+		
+		-- XP tracking (Character Advancement - roadmap item)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS xp INTEGER DEFAULT 0;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -3371,7 +3403,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	
 	var name, class, race, background string
 	var level, hp, maxHP, ac, str, dex, con, intl, wis, cha int
-	var tempHP, deathSuccesses, deathFailures, coverBonus int
+	var tempHP, deathSuccesses, deathFailures, coverBonus, xp int
 	var isStable, isDead bool
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
@@ -3382,12 +3414,12 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(temp_hp, 0), COALESCE(death_save_successes, 0), COALESCE(death_save_failures, 0),
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
-			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0)
+			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0)
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
-		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus)
+		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -3428,6 +3460,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	effectiveAC := ac + coverBonus
+	xpToNextLevel := getXPForNextLevel(level)
 	response := map[string]interface{}{
 		"id": charID, "name": name, "class": class, "race": race,
 		"background": background, "level": level,
@@ -3443,6 +3476,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		},
 		"conditions":          conditions,
 		"proficiency_bonus":   proficiencyBonus(level),
+		"xp":                  xp,
+		"xp_to_next_level":    xpToNextLevel - xp,
+		"xp_threshold":        xpToNextLevel,
 	}
 	
 	if coverBonus > 0 {
@@ -3506,7 +3542,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get character and campaign info
-	var charID, lobbyID, hp, maxHP, ac, level, tempHP int
+	var charID, lobbyID, hp, maxHP, ac, level, tempHP, charXP int
 	var str, dex, con, intl, wis, cha int
 	var charName, class, race, lobbyName, setting, lobbyStatus string
 	var conditionsJSON, slotsUsedJSON []byte
@@ -3519,7 +3555,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			l.id, l.name, COALESCE(l.setting, ''), l.status,
 			COALESCE(c.temp_hp, 0), COALESCE(c.conditions, '[]'), COALESCE(c.spell_slots_used, '{}'),
 			COALESCE(c.concentrating_on, ''), COALESCE(c.death_save_successes, 0), COALESCE(c.death_save_failures, 0),
-			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false)
+			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false),
+			COALESCE(c.xp, 0)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -3528,7 +3565,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&str, &dex, &con, &intl, &wis, &cha,
 		&lobbyID, &lobbyName, &setting, &lobbyStatus,
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
-		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed)
+		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3727,6 +3764,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Build character info
+	xpToNext := getXPForNextLevel(level) - charXP
 	characterInfo := map[string]interface{}{
 		"id":                charID,
 		"name":              charName,
@@ -3740,6 +3778,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"status":            charStatus,
 		"conditions":        conditions,
 		"proficiency_bonus": proficiencyBonus(level),
+		"xp":                charXP,
+		"xp_to_next_level":  xpToNext,
 		"stats": map[string]int{
 			"str": str, "dex": dex, "con": con,
 			"int": intl, "wis": wis, "cha": cha,
@@ -5281,6 +5321,174 @@ func handleGMUpdateCharacter(w http.ResponseWriter, r *http.Request) {
 		"character": char,
 		"items":     items,
 	})
+}
+
+// handleGMAwardXP godoc
+// @Summary Award XP to characters
+// @Description GM awards experience points to one or more characters. Automatically handles level-ups.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_ids=[]integer,xp=integer,reason=string} true "XP award details"
+// @Success 200 {object} map[string]interface{} "XP awarded with level-up notifications"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/award-xp [post]
+func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterIDs []int  `json:"character_ids"`
+		XP           int    `json:"xp"`
+		Reason       string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if len(req.CharacterIDs) == 0 || req.XP <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_ids and positive xp required",
+		})
+		return
+	}
+	
+	// Verify this agent is the GM of all these characters' campaigns
+	for _, charID := range req.CharacterIDs {
+		var dmID int
+		err = db.QueryRow(`
+			SELECT l.dm_id FROM characters c 
+			JOIN lobbies l ON c.lobby_id = l.id 
+			WHERE c.id = $1
+		`, charID).Scan(&dmID)
+		
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if dmID != agentID {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_gm",
+				"message": fmt.Sprintf("You are not the GM for character %d's campaign", charID),
+			})
+			return
+		}
+	}
+	
+	// Award XP and check for level-ups
+	results := []map[string]interface{}{}
+	levelUps := []map[string]interface{}{}
+	
+	for _, charID := range req.CharacterIDs {
+		// Get current XP and level
+		var name string
+		var currentXP, currentLevel int
+		err = db.QueryRow(`
+			SELECT name, COALESCE(xp, 0), level FROM characters WHERE id = $1
+		`, charID).Scan(&name, &currentXP, &currentLevel)
+		
+		if err != nil {
+			continue
+		}
+		
+		newXP := currentXP + req.XP
+		newLevel := getLevelForXP(newXP)
+		
+		// Update character
+		_, err = db.Exec(`UPDATE characters SET xp = $1 WHERE id = $2`, newXP, charID)
+		if err != nil {
+			continue
+		}
+		
+		result := map[string]interface{}{
+			"character_id":   charID,
+			"character_name": name,
+			"xp_gained":      req.XP,
+			"total_xp":       newXP,
+		}
+		
+		// Check for level up
+		if newLevel > currentLevel {
+			// Update level automatically
+			_, err = db.Exec(`UPDATE characters SET level = $1 WHERE id = $2`, newLevel, charID)
+			if err == nil {
+				result["level_up"] = true
+				result["old_level"] = currentLevel
+				result["new_level"] = newLevel
+				
+				levelUps = append(levelUps, map[string]interface{}{
+					"character_name": name,
+					"old_level":      currentLevel,
+					"new_level":      newLevel,
+				})
+			}
+		} else {
+			result["level"] = currentLevel
+			result["xp_to_next_level"] = getXPForNextLevel(currentLevel) - newXP
+		}
+		
+		results = append(results, result)
+	}
+	
+	// Log XP award as an action
+	reason := req.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("XP award: %d", req.XP)
+	}
+	
+	if len(req.CharacterIDs) > 0 {
+		var lobbyID int
+		db.QueryRow(`SELECT lobby_id FROM characters WHERE id = $1`, req.CharacterIDs[0]).Scan(&lobbyID)
+		
+		if lobbyID > 0 {
+			charNames := []string{}
+			for _, r := range results {
+				if name, ok := r["character_name"].(string); ok {
+					charNames = append(charNames, name)
+				}
+			}
+			
+			_, err = db.Exec(`
+				INSERT INTO actions (lobby_id, action_type, description, result)
+				VALUES ($1, 'xp_award', $2, $3)
+			`, lobbyID, reason, fmt.Sprintf("%d XP to: %s", req.XP, strings.Join(charNames, ", ")))
+		}
+	}
+	
+	response := map[string]interface{}{
+		"success": true,
+		"awards":  results,
+	}
+	
+	if len(levelUps) > 0 {
+		response["level_ups"] = levelUps
+		response["message"] = fmt.Sprintf("%d character(s) leveled up!", len(levelUps))
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleCampaignMessages godoc
