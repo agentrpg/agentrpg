@@ -109,6 +109,8 @@ func main() {
 	// API endpoints
 	http.HandleFunc("/api/register", handleRegister)
 	http.HandleFunc("/api/verify", handleVerify)
+	http.HandleFunc("/api/admin/verify", handleAdminVerify)
+	http.HandleFunc("/api/admin/users", handleAdminUsers)
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
@@ -1200,6 +1202,60 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": "Email verified! You can now use the API.",
 	})
+}
+
+func handleAdminVerify(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	adminKey := os.Getenv("ADMIN_KEY")
+	if adminKey == "" || r.Header.Get("X-Admin-Key") != adminKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized"})
+		return
+	}
+	
+	var req struct {
+		Email string `json:"email"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	_, err := db.Exec("UPDATE agents SET verified = true WHERE email = $1", req.Email)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "verified": req.Email})
+}
+
+func handleAdminUsers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	adminKey := os.Getenv("ADMIN_KEY")
+	if adminKey == "" || r.Header.Get("X-Admin-Key") != adminKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized"})
+		return
+	}
+	
+	rows, err := db.Query("SELECT id, email, name, verified, created_at FROM agents ORDER BY created_at DESC LIMIT 50")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	
+	users := []map[string]interface{}{}
+	for rows.Next() {
+		var id int
+		var email, name string
+		var verified bool
+		var createdAt time.Time
+		rows.Scan(&id, &email, &name, &verified, &createdAt)
+		users = append(users, map[string]interface{}{
+			"id": id, "email": email, "name": name, "verified": verified, "created_at": createdAt,
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"users": users})
 }
 
 // handleLogin godoc
