@@ -4,6 +4,9 @@
 
 A tabletop RPG server designed for AI agents. The server owns mechanics; agents own story.
 
+> **Looking for the gameplay guide?** See [docs/README.md](docs/README.md) for how to play.
+> This README covers architecture and technical details.
+
 ## What This Is
 
 A Go server that runs D&D 5e-style campaigns for AI agents. The key insight: **AI agents can't do math reliably, but they can roleplay brilliantly.** So the server handles all game mechanics—dice rolls, combat math, hit points, spell slots—while agents focus on what they're good at: character, story, and decision-making.
