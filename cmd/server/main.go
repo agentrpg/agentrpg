@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.4.1"
+const version = "0.5.0"
 
 var db *sql.DB
 
@@ -1299,18 +1299,7 @@ type SRDAction struct {
 	DamageType  string `json:"damage_type"`
 }
 
-var srdMonsters = map[string]SRDMonster{
-	"goblin": {Name: "Goblin", Size: "Small", Type: "humanoid", AC: 15, HP: 7, HitDice: "2d6", Speed: 30, STR: 8, DEX: 14, CON: 10, INT: 10, WIS: 8, CHA: 8, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Scimitar", AttackBonus: 4, DamageDice: "1d6+2", DamageType: "slashing"}, {Name: "Shortbow", AttackBonus: 4, DamageDice: "1d6+2", DamageType: "piercing"}}},
-	"skeleton": {Name: "Skeleton", Size: "Medium", Type: "undead", AC: 13, HP: 13, HitDice: "2d8+4", Speed: 30, STR: 10, DEX: 14, CON: 15, INT: 6, WIS: 8, CHA: 5, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Shortsword", AttackBonus: 4, DamageDice: "1d6+2", DamageType: "piercing"}}},
-	"zombie": {Name: "Zombie", Size: "Medium", Type: "undead", AC: 8, HP: 22, HitDice: "3d8+9", Speed: 20, STR: 13, DEX: 6, CON: 16, INT: 3, WIS: 6, CHA: 5, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Slam", AttackBonus: 3, DamageDice: "1d6+1", DamageType: "bludgeoning"}}},
-	"wolf": {Name: "Wolf", Size: "Medium", Type: "beast", AC: 13, HP: 11, HitDice: "2d8+2", Speed: 40, STR: 12, DEX: 15, CON: 12, INT: 3, WIS: 12, CHA: 6, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Bite", AttackBonus: 4, DamageDice: "2d4+2", DamageType: "piercing"}}},
-	"orc": {Name: "Orc", Size: "Medium", Type: "humanoid", AC: 13, HP: 15, HitDice: "2d8+6", Speed: 30, STR: 16, DEX: 12, CON: 16, INT: 7, WIS: 11, CHA: 10, CR: "1/2", XP: 100, Actions: []SRDAction{{Name: "Greataxe", AttackBonus: 5, DamageDice: "1d12+3", DamageType: "slashing"}}},
-	"giant_spider": {Name: "Giant Spider", Size: "Large", Type: "beast", AC: 14, HP: 26, HitDice: "4d10+4", Speed: 30, STR: 14, DEX: 16, CON: 12, INT: 2, WIS: 11, CHA: 4, CR: "1", XP: 200, Actions: []SRDAction{{Name: "Bite", AttackBonus: 5, DamageDice: "1d8+3", DamageType: "piercing"}}},
-	"owlbear": {Name: "Owlbear", Size: "Large", Type: "monstrosity", AC: 13, HP: 59, HitDice: "7d10+21", Speed: 40, STR: 20, DEX: 12, CON: 17, INT: 3, WIS: 12, CHA: 7, CR: "3", XP: 700, Actions: []SRDAction{{Name: "Beak", AttackBonus: 7, DamageDice: "1d10+5", DamageType: "piercing"}, {Name: "Claws", AttackBonus: 7, DamageDice: "2d8+5", DamageType: "slashing"}}},
-	"troll": {Name: "Troll", Size: "Large", Type: "giant", AC: 15, HP: 84, HitDice: "8d10+40", Speed: 30, STR: 18, DEX: 13, CON: 20, INT: 7, WIS: 9, CHA: 7, CR: "5", XP: 1800, Actions: []SRDAction{{Name: "Bite", AttackBonus: 7, DamageDice: "1d6+4", DamageType: "piercing"}, {Name: "Claw", AttackBonus: 7, DamageDice: "2d6+4", DamageType: "slashing"}}},
-	"young_red_dragon": {Name: "Young Red Dragon", Size: "Large", Type: "dragon", AC: 18, HP: 178, HitDice: "17d10+85", Speed: 40, STR: 23, DEX: 10, CON: 21, INT: 14, WIS: 11, CHA: 19, CR: "10", XP: 5900, Actions: []SRDAction{{Name: "Bite", AttackBonus: 10, DamageDice: "2d10+6", DamageType: "piercing"}, {Name: "Fire Breath", AttackBonus: 0, DamageDice: "16d6", DamageType: "fire"}}},
-	"beholder": {Name: "Beholder", Size: "Large", Type: "aberration", AC: 18, HP: 180, HitDice: "19d10+76", Speed: 0, STR: 10, DEX: 14, CON: 18, INT: 17, WIS: 15, CHA: 17, CR: "13", XP: 10000, Actions: []SRDAction{{Name: "Bite", AttackBonus: 5, DamageDice: "4d6", DamageType: "piercing"}}},
-}
+// srdMonsters is in srd_generated.go (100 monsters from 5e SRD API)
 
 type SRDSpell struct {
 	Name        string `json:"name"`
@@ -1327,24 +1316,7 @@ type SRDSpell struct {
 	Healing     string `json:"healing,omitempty"`
 }
 
-var srdSpells = map[string]SRDSpell{
-	"fire_bolt": {Name: "Fire Bolt", Level: 0, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "1d10", DamageType: "fire", Description: "Hurl a mote of fire at a creature or object."},
-	"sacred_flame": {Name: "Sacred Flame", Level: 0, School: "evocation", CastingTime: "1 action", Range: "60 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "1d8", DamageType: "radiant", SavingThrow: "DEX", Description: "Flame-like radiance descends on a creature."},
-	"eldritch_blast": {Name: "Eldritch Blast", Level: 0, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "1d10", DamageType: "force", Description: "A beam of crackling energy."},
-	"magic_missile": {Name: "Magic Missile", Level: 1, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "3d4+3", DamageType: "force", Description: "Three darts hit automatically."},
-	"cure_wounds": {Name: "Cure Wounds", Level: 1, School: "evocation", CastingTime: "1 action", Range: "Touch", Components: "V, S", Duration: "Instantaneous", Healing: "1d8+mod", Description: "A creature you touch regains hit points."},
-	"shield": {Name: "Shield", Level: 1, School: "abjuration", CastingTime: "1 reaction", Range: "Self", Components: "V, S", Duration: "1 round", Description: "+5 AC until start of next turn."},
-	"sleep": {Name: "Sleep", Level: 1, School: "enchantment", CastingTime: "1 action", Range: "90 feet", Components: "V, S, M", Duration: "1 minute", DamageDice: "5d8", Description: "Creatures fall unconscious (HP threshold)."},
-	"thunderwave": {Name: "Thunderwave", Level: 1, School: "evocation", CastingTime: "1 action", Range: "Self (15-foot cube)", Components: "V, S", Duration: "Instantaneous", DamageDice: "2d8", DamageType: "thunder", SavingThrow: "CON", Description: "Wave of thunderous force."},
-	"scorching_ray": {Name: "Scorching Ray", Level: 2, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "2d6", DamageType: "fire", Description: "Three rays of fire, 2d6 each."},
-	"hold_person": {Name: "Hold Person", Level: 2, School: "enchantment", CastingTime: "1 action", Range: "60 feet", Components: "V, S, M", Duration: "Concentration, 1 minute", SavingThrow: "WIS", Description: "Target humanoid paralyzed on failed save."},
-	"misty_step": {Name: "Misty Step", Level: 2, School: "conjuration", CastingTime: "1 bonus action", Range: "Self", Components: "V", Duration: "Instantaneous", Description: "Teleport up to 30 feet."},
-	"fireball": {Name: "Fireball", Level: 3, School: "evocation", CastingTime: "1 action", Range: "150 feet", Components: "V, S, M", Duration: "Instantaneous", DamageDice: "8d6", DamageType: "fire", SavingThrow: "DEX", Description: "20-foot-radius sphere of fire."},
-	"lightning_bolt": {Name: "Lightning Bolt", Level: 3, School: "evocation", CastingTime: "1 action", Range: "Self (100-foot line)", Components: "V, S, M", Duration: "Instantaneous", DamageDice: "8d6", DamageType: "lightning", SavingThrow: "DEX", Description: "100-foot line of lightning."},
-	"counterspell": {Name: "Counterspell", Level: 3, School: "abjuration", CastingTime: "1 reaction", Range: "60 feet", Components: "S", Duration: "Instantaneous", Description: "Interrupt spell of 3rd level or lower."},
-	"dimension_door": {Name: "Dimension Door", Level: 4, School: "conjuration", CastingTime: "1 action", Range: "500 feet", Components: "V", Duration: "Instantaneous", Description: "Teleport to visible/visualized spot."},
-	"cone_of_cold": {Name: "Cone of Cold", Level: 5, School: "evocation", CastingTime: "1 action", Range: "Self (60-foot cone)", Components: "V, S, M", Duration: "Instantaneous", DamageDice: "8d8", DamageType: "cold", SavingThrow: "CON", Description: "60-foot cone of cold."},
-}
+// srdSpells is in srd_generated.go (100 spells from 5e SRD API)
 
 type SRDClass struct {
 	Name         string   `json:"name"`
