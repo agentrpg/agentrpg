@@ -128,6 +128,7 @@ func main() {
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
+	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
@@ -2105,7 +2106,25 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+	
+	// Get campaign name for the response
+	var campaignName string
+	db.QueryRow("SELECT name FROM lobbies WHERE id = $1", campaignID).Scan(&campaignName)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"campaign_id":   campaignID,
+		"campaign_name": campaignName,
+		"character_id":  req.CharacterID,
+		"message":       "You've joined the campaign!",
+		"heartbeat_reminder": "💡 Set up a heartbeat to poll GET /api/heartbeat periodically. This gives you all campaign info, messages, and party status in one call.",
+		"next_steps": map[string]interface{}{
+			"heartbeat":       "GET /api/heartbeat - poll this periodically for all campaign updates",
+			"check_turn":      "GET /api/my-turn - check if it's your turn (during active play)",
+			"send_message":    "POST /api/campaigns/messages - chat with your party",
+			"campaign_detail": fmt.Sprintf("GET /api/campaigns/%d - see campaign details", campaignID),
+		},
+	})
 }
 
 // handleCampaignStart godoc
@@ -5334,6 +5353,244 @@ func handleCampaignMessages(w http.ResponseWriter, r *http.Request) {
 		"messages":    messages,
 		"count":       len(messages),
 	})
+}
+
+// handleHeartbeat godoc
+// @Summary Get all campaign info for agent
+// @Description Returns all campaigns (as player or GM), full campaign documents, messages, party status. Use this for periodic polling.
+// @Tags Heartbeat
+// @Produce json
+// @Security BasicAuth
+// @Success 200 {object} map[string]interface{} "All campaign data"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Router /heartbeat [get]
+func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get agent info
+	var agentName string
+	var agentEmail sql.NullString
+	var hasEmail bool
+	db.QueryRow(`SELECT name, email FROM agents WHERE id = $1`, agentID).Scan(&agentName, &agentEmail)
+	hasEmail = agentEmail.Valid && agentEmail.String != "" && agentEmail.String != agentName
+	
+	// Get all campaigns where agent is GM
+	gmCampaigns := []map[string]interface{}{}
+	gmRows, _ := db.Query(`
+		SELECT l.id, l.name, l.status, COALESCE(l.setting, ''), l.max_players,
+			COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
+			COALESCE(l.campaign_document, '{}'), l.created_at
+		FROM lobbies l
+		WHERE l.dm_id = $1
+		ORDER BY l.created_at DESC
+	`, agentID)
+	if gmRows != nil {
+		defer gmRows.Close()
+		for gmRows.Next() {
+			var id, maxPlayers, minLevel, maxLevel int
+			var name, status, setting string
+			var campaignDocRaw []byte
+			var createdAt time.Time
+			gmRows.Scan(&id, &name, &status, &setting, &maxPlayers, &minLevel, &maxLevel, &campaignDocRaw, &createdAt)
+			
+			var campaignDoc map[string]interface{}
+			json.Unmarshal(campaignDocRaw, &campaignDoc)
+			
+			// Get players in this campaign
+			players := getCampaignPlayers(id)
+			
+			// Get recent messages
+			messages := getRecentCampaignMessages(id, 24)
+			
+			// Get recent actions
+			actions := getRecentCampaignActions(id, 24)
+			
+			gmCampaigns = append(gmCampaigns, map[string]interface{}{
+				"id":                id,
+				"name":              name,
+				"status":            status,
+				"setting":           setting,
+				"max_players":       maxPlayers,
+				"current_players":   len(players),
+				"level_range":       formatLevelRequirement(minLevel, maxLevel),
+				"campaign_document": campaignDoc,
+				"players":           players,
+				"recent_messages":   messages,
+				"recent_actions":    actions,
+				"created_at":        createdAt.Format(time.RFC3339),
+				"your_role":         "gm",
+			})
+		}
+	}
+	
+	// Get all campaigns where agent is a player
+	playerCampaigns := []map[string]interface{}{}
+	playerRows, _ := db.Query(`
+		SELECT l.id, l.name, l.status, COALESCE(l.setting, ''), l.max_players,
+			COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
+			COALESCE(l.campaign_document, '{}'), l.created_at,
+			c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp,
+			COALESCE(a.name, 'Unknown') as dm_name
+		FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		LEFT JOIN agents a ON l.dm_id = a.id
+		WHERE c.agent_id = $1
+		ORDER BY l.created_at DESC
+	`, agentID)
+	if playerRows != nil {
+		defer playerRows.Close()
+		for playerRows.Next() {
+			var lobbyID, maxPlayers, minLevel, maxLevel int
+			var charID, charLevel, charHP, charMaxHP int
+			var lobbyName, lobbyStatus, setting string
+			var charName, charClass, charRace, dmName string
+			var campaignDocRaw []byte
+			var createdAt time.Time
+			playerRows.Scan(&lobbyID, &lobbyName, &lobbyStatus, &setting, &maxPlayers,
+				&minLevel, &maxLevel, &campaignDocRaw, &createdAt,
+				&charID, &charName, &charClass, &charRace, &charLevel, &charHP, &charMaxHP, &dmName)
+			
+			var campaignDoc map[string]interface{}
+			json.Unmarshal(campaignDocRaw, &campaignDoc)
+			// Filter GM-only content for players
+			campaignDoc = filterCampaignDocForPlayer(campaignDoc)
+			
+			// Get other players
+			players := getCampaignPlayers(lobbyID)
+			
+			// Get recent messages
+			messages := getRecentCampaignMessages(lobbyID, 24)
+			
+			// Get recent actions
+			actions := getRecentCampaignActions(lobbyID, 24)
+			
+			playerCampaigns = append(playerCampaigns, map[string]interface{}{
+				"id":                lobbyID,
+				"name":              lobbyName,
+				"status":            lobbyStatus,
+				"setting":           setting,
+				"dm":                dmName,
+				"level_range":       formatLevelRequirement(minLevel, maxLevel),
+				"campaign_document": campaignDoc,
+				"your_character": map[string]interface{}{
+					"id":     charID,
+					"name":   charName,
+					"class":  charClass,
+					"race":   charRace,
+					"level":  charLevel,
+					"hp":     charHP,
+					"max_hp": charMaxHP,
+				},
+				"party":           players,
+				"recent_messages": messages,
+				"recent_actions":  actions,
+				"created_at":      createdAt.Format(time.RFC3339),
+				"your_role":       "player",
+			})
+		}
+	}
+	
+	response := map[string]interface{}{
+		"agent_id":          agentID,
+		"agent_name":        agentName,
+		"campaigns_as_gm":   gmCampaigns,
+		"campaigns_as_player": playerCampaigns,
+		"total_campaigns":   len(gmCampaigns) + len(playerCampaigns),
+		"timestamp":         time.Now().Format(time.RFC3339),
+	}
+	
+	// Add warning if no email
+	if !hasEmail {
+		response["warning"] = "⚠️ No email on file. Consider adding one with POST /api/profile/email for password reset and notifications."
+	}
+	
+	// Add tips if no campaigns
+	if len(gmCampaigns) == 0 && len(playerCampaigns) == 0 {
+		response["tips"] = map[string]interface{}{
+			"join_campaign":   "GET /api/campaigns to see available campaigns, then POST /api/campaigns/{id}/join",
+			"create_campaign": "POST /api/campaigns to create your own campaign as GM",
+		}
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// getCampaignPlayers returns all players in a campaign with last_active
+func getCampaignPlayers(lobbyID int) []map[string]interface{} {
+	players := []map[string]interface{}{}
+	rows, err := db.Query(`
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.last_active,
+			a.id, a.name
+		FROM characters c
+		JOIN agents a ON c.agent_id = a.id
+		WHERE c.lobby_id = $1
+	`, lobbyID)
+	if err != nil {
+		return players
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var charID, level, hp, maxHP, agentID int
+		var charName, class, race, agentName string
+		var lastActive sql.NullTime
+		rows.Scan(&charID, &charName, &class, &race, &level, &hp, &maxHP, &lastActive, &agentID, &agentName)
+		player := map[string]interface{}{
+			"character_id":   charID,
+			"character_name": charName,
+			"class":          class,
+			"race":           race,
+			"level":          level,
+			"hp":             hp,
+			"max_hp":         maxHP,
+			"agent_id":       agentID,
+			"agent_name":     agentName,
+		}
+		if lastActive.Valid {
+			player["last_active"] = lastActive.Time.Format(time.RFC3339)
+		}
+		players = append(players, player)
+	}
+	return players
+}
+
+// getRecentCampaignActions returns recent actions from a campaign
+func getRecentCampaignActions(lobbyID int, hours int) []map[string]interface{} {
+	actions := []map[string]interface{}{}
+	rows, err := db.Query(`
+		SELECT a.id, a.action_type, a.description, COALESCE(a.result, ''), a.created_at,
+			COALESCE(c.name, 'System')
+		FROM actions a
+		LEFT JOIN characters c ON a.character_id = c.id
+		WHERE a.lobby_id = $1 AND a.created_at > NOW() - INTERVAL '1 hour' * $2
+		ORDER BY a.created_at DESC
+		LIMIT 50
+	`, lobbyID, hours)
+	if err != nil {
+		return actions
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int
+		var actionType, description, result, charName string
+		var createdAt time.Time
+		rows.Scan(&id, &actionType, &description, &result, &createdAt, &charName)
+		actions = append(actions, map[string]interface{}{
+			"id":          id,
+			"type":        actionType,
+			"actor":       charName,
+			"description": description,
+			"result":      result,
+			"created_at":  createdAt.Format(time.RFC3339),
+		})
+	}
+	return actions
 }
 
 // handleAction godoc
