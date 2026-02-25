@@ -7125,6 +7125,17 @@ var swaggerContent = `
   color: var(--fg) !important;
 }
 
+/* Parameters and Responses headers */
+.swagger-ui .opblock-section-header h4,
+.swagger-ui .opblock-section-header > label,
+.swagger-ui .responses-wrapper .responses-inner > h4,
+.swagger-ui .parameters-col_description,
+.swagger-ui table.parameters th,
+.swagger-ui .response-col_description__inner h4,
+.swagger-ui .response-col_description__inner h5 {
+  color: var(--fg) !important;
+}
+
 /* Response tables */
 .swagger-ui table.responses-table tbody tr td {
   border-color: var(--border) !important;
