@@ -76,6 +76,7 @@ func main() {
 				initDB()
 				seedCampaignTemplates()
 				checkAndSeedSRD() // Auto-seed from 5e API if tables empty
+				seedExtendedEquipment() // Add 80+ weapons and 50+ armor beyond SRD
 				loadSRDFromDB()
 			}
 		}
@@ -722,6 +723,226 @@ func seedEquipmentFromAPI() {
 		}
 	}
 	log.Printf("Seeded %d weapons, %d armor", weapons, armors)
+}
+
+// Seed extended equipment beyond the 5e SRD
+func seedExtendedEquipment() {
+	// Check if we've already seeded extended equipment
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM weapons WHERE source = 'extended'").Scan(&count)
+	if count > 0 {
+		log.Printf("Extended equipment already seeded (%d weapons)", count)
+		return
+	}
+
+	log.Println("Seeding extended equipment...")
+
+	// Extended Weapons - Historical, Fantasy, and Exotic
+	weapons := []struct {
+		Slug, Name, Type, Damage, DamageType string
+		Weight                               float64
+		Props                                string
+	}{
+		// Historical Melee Weapons - Simple
+		{"club_great", "Great Club", "simple", "1d8", "bludgeoning", 10, "two-handed"},
+		{"sickle", "Sickle", "simple", "1d4", "slashing", 2, "light"},
+		{"staff_iron", "Iron Staff", "simple", "1d8", "bludgeoning", 6, "versatile (1d10)"},
+		{"cudgel", "Cudgel", "simple", "1d4", "bludgeoning", 2, "light"},
+		{"knife_hunting", "Hunting Knife", "simple", "1d4", "piercing", 1, "finesse, light"},
+		{"rock_throwing", "Throwing Rock", "simple", "1d4", "bludgeoning", 0.5, "thrown (20/60)"},
+
+		// Historical Melee Weapons - Martial
+		{"flail", "Flail", "martial", "1d8", "bludgeoning", 2, ""},
+		{"morningstar", "Morningstar", "martial", "1d8", "piercing", 4, ""},
+		{"war_pick", "War Pick", "martial", "1d8", "piercing", 2, ""},
+		{"halberd", "Halberd", "martial", "1d10", "slashing", 6, "heavy, reach, two-handed"},
+		{"glaive", "Glaive", "martial", "1d10", "slashing", 6, "heavy, reach, two-handed"},
+		{"pike", "Pike", "martial", "1d10", "piercing", 18, "heavy, reach, two-handed"},
+		{"lance", "Lance", "martial", "1d12", "piercing", 6, "reach, special"},
+		{"scimitar", "Scimitar", "martial", "1d6", "slashing", 3, "finesse, light"},
+		{"whip", "Whip", "martial", "1d4", "slashing", 3, "finesse, reach"},
+		{"trident", "Trident", "martial", "1d6", "piercing", 4, "thrown (20/60), versatile (1d8)"},
+		{"battleaxe", "Battleaxe", "martial", "1d8", "slashing", 4, "versatile (1d10)"},
+		{"warhammer", "Warhammer", "martial", "1d8", "bludgeoning", 2, "versatile (1d10)"},
+		{"maul", "Maul", "martial", "2d6", "bludgeoning", 10, "heavy, two-handed"},
+
+		// Exotic/Historical Weapons
+		{"falchion", "Falchion", "martial", "2d4", "slashing", 4, ""},
+		{"estoc", "Estoc", "martial", "1d8", "piercing", 3, "finesse"},
+		{"flamberge", "Flamberge", "martial", "2d6", "slashing", 7, "heavy, two-handed"},
+		{"zweihander", "Zweihänder", "martial", "2d6", "slashing", 8, "heavy, two-handed, reach"},
+		{"claymore", "Claymore", "martial", "2d6", "slashing", 6, "heavy, two-handed"},
+		{"katana", "Katana", "martial", "1d8", "slashing", 3, "finesse, versatile (1d10)"},
+		{"wakizashi", "Wakizashi", "martial", "1d6", "slashing", 2, "finesse, light"},
+		{"nodachi", "Nodachi", "martial", "1d10", "slashing", 5, "heavy, two-handed"},
+		{"naginata", "Naginata", "martial", "1d10", "slashing", 5, "heavy, reach, two-handed"},
+		{"khopesh", "Khopesh", "martial", "1d8", "slashing", 3, ""},
+		{"shotel", "Shotel", "martial", "1d8", "slashing", 3, "finesse"},
+		{"katar", "Katar", "martial", "1d4", "piercing", 1, "finesse, light, special"},
+		{"kukri", "Kukri", "martial", "1d4", "slashing", 1, "finesse, light"},
+		{"sai", "Sai", "martial", "1d4", "piercing", 1, "finesse, light, special"},
+		{"nunchaku", "Nunchaku", "martial", "1d6", "bludgeoning", 2, "finesse, light"},
+		{"tonfa", "Tonfa", "martial", "1d6", "bludgeoning", 2, "light"},
+		{"bo_staff", "Bo Staff", "martial", "1d8", "bludgeoning", 4, "versatile (1d10), reach"},
+		{"chain_whip", "Chain Whip", "martial", "1d6", "bludgeoning", 3, "finesse, reach"},
+
+		// Fantasy/Racial Weapons
+		{"elven_blade", "Elven Blade", "martial", "1d8", "slashing", 2, "finesse, light"},
+		{"elven_longblade", "Elven Longblade", "martial", "1d10", "slashing", 3, "finesse, two-handed"},
+		{"dwarven_waraxe", "Dwarven Waraxe", "martial", "1d10", "slashing", 5, "versatile (1d12)"},
+		{"dwarven_urgosh", "Dwarven Urgrosh", "martial", "1d8/1d6", "slashing/piercing", 6, "double, two-handed"},
+		{"orcish_cleaver", "Orcish Cleaver", "martial", "2d6", "slashing", 8, "heavy, two-handed"},
+		{"orcish_double_axe", "Orcish Double Axe", "martial", "1d8/1d8", "slashing", 10, "double, heavy, two-handed"},
+		{"gnomish_hooked_hammer", "Gnomish Hooked Hammer", "martial", "1d6/1d4", "bludgeoning/piercing", 4, "double, light"},
+		{"halfling_skiprock", "Halfling Skiprock", "simple", "1d4", "bludgeoning", 0.25, "finesse, thrown (30/90)"},
+
+		// Polearms and Reach Weapons
+		{"bardiche", "Bardiche", "martial", "1d10", "slashing", 7, "heavy, reach, two-handed"},
+		{"bec_de_corbin", "Bec de Corbin", "martial", "1d10", "piercing", 6, "heavy, reach, two-handed"},
+		{"bill_hook", "Bill Hook", "martial", "1d10", "slashing", 7, "heavy, reach, two-handed"},
+		{"fauchard", "Fauchard", "martial", "1d10", "slashing", 5, "reach, two-handed"},
+		{"guisarme", "Guisarme", "martial", "2d4", "slashing", 5, "heavy, reach, two-handed"},
+		{"lucerne_hammer", "Lucerne Hammer", "martial", "1d10", "bludgeoning", 6, "heavy, reach, two-handed"},
+		{"partisan", "Partisan", "martial", "1d8", "piercing", 5, "reach, two-handed"},
+		{"ranseur", "Ranseur", "martial", "1d8", "piercing", 5, "reach, two-handed"},
+		{"voulge", "Voulge", "martial", "1d10", "slashing", 6, "heavy, reach, two-handed"},
+
+		// Ranged Weapons
+		{"composite_longbow", "Composite Longbow", "martial", "1d10", "piercing", 3, "ammunition (200/800), heavy, two-handed"},
+		{"composite_shortbow", "Composite Shortbow", "martial", "1d8", "piercing", 2, "ammunition (100/400), two-handed"},
+		{"repeating_crossbow", "Repeating Crossbow", "martial", "1d8", "piercing", 6, "ammunition (80/320), two-handed"},
+		{"heavy_crossbow", "Heavy Crossbow", "martial", "1d10", "piercing", 18, "ammunition (100/400), heavy, loading, two-handed"},
+		{"hand_crossbow", "Hand Crossbow", "martial", "1d6", "piercing", 3, "ammunition (30/120), light, loading"},
+		{"sling_staff", "Sling Staff", "simple", "1d6", "bludgeoning", 3, "ammunition (60/240), two-handed"},
+		{"atlatl", "Atlatl", "simple", "1d8", "piercing", 1, "ammunition (60/180)"},
+		{"blowgun", "Blowgun", "martial", "1", "piercing", 1, "ammunition (25/100), loading"},
+		{"bolas", "Bolas", "martial", "1d4", "bludgeoning", 2, "thrown (20/60), special"},
+		{"net", "Net", "martial", "0", "none", 3, "thrown (5/15), special"},
+		{"chakram", "Chakram", "martial", "1d6", "slashing", 1, "finesse, thrown (30/90)"},
+		{"shuriken", "Shuriken", "martial", "1d4", "piercing", 0.1, "finesse, light, thrown (20/60)"},
+
+		// Thrown Weapons
+		{"throwing_axe", "Throwing Axe", "martial", "1d6", "slashing", 2, "light, thrown (20/60)"},
+		{"throwing_hammer", "Throwing Hammer", "martial", "1d4", "bludgeoning", 2, "light, thrown (20/60)"},
+		{"francisca", "Francisca", "martial", "1d6", "slashing", 1, "light, thrown (20/60)"},
+		{"pilum", "Pilum", "martial", "1d6", "piercing", 4, "thrown (30/90)"},
+
+		// Unusual/Specialty Weapons
+		{"spiked_chain", "Spiked Chain", "martial", "2d4", "piercing", 10, "finesse, reach, two-handed"},
+		{"meteor_hammer", "Meteor Hammer", "martial", "1d8", "bludgeoning", 5, "reach, two-handed"},
+		{"three_section_staff", "Three-Section Staff", "martial", "1d10", "bludgeoning", 4, "reach, two-handed"},
+		{"war_scythe", "War Scythe", "martial", "2d4", "slashing", 5, "heavy, reach, two-handed"},
+		{"executioners_sword", "Executioner's Sword", "martial", "2d6", "slashing", 10, "heavy, two-handed, special"},
+		{"hook_sword", "Hook Sword", "martial", "1d6", "slashing", 3, "finesse, light, special"},
+		{"fighting_fan", "Fighting Fan", "martial", "1d4", "slashing", 1, "finesse, light, special"},
+		{"knuckle_dusters", "Knuckle Dusters", "simple", "1d4", "bludgeoning", 0.5, "light, special"},
+		{"garrote", "Garrote", "martial", "1d6", "special", 0.1, "finesse, light, special, two-handed"},
+	}
+
+	for _, w := range weapons {
+		_, err := db.Exec(`INSERT INTO weapons (slug, name, type, damage, damage_type, weight, properties, source)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'extended') ON CONFLICT (slug) DO NOTHING`,
+			w.Slug, w.Name, w.Type, w.Damage, w.DamageType, w.Weight, w.Props)
+		if err != nil {
+			log.Printf("Failed to insert weapon %s: %v", w.Slug, err)
+		}
+	}
+	log.Printf("Seeded %d extended weapons", len(weapons))
+
+	// Extended Armor - Historical, Fantasy, and Exotic
+	armors := []struct {
+		Slug, Name, Type string
+		AC               int
+		ACBonus          string
+		StrReq           int
+		Stealth          bool
+		Weight           float64
+	}{
+		// Light Armor (AC 11-12 + DEX)
+		{"padded", "Padded Armor", "light", 11, "+DEX", 0, true, 8},
+		{"gambeson", "Gambeson", "light", 11, "+DEX", 0, false, 8},
+		{"leather_hardened", "Hardened Leather", "light", 12, "+DEX", 0, false, 12},
+		{"hide_light", "Light Hide", "light", 11, "+DEX", 0, false, 8},
+		{"fur_armor", "Fur Armor", "light", 11, "+DEX", 0, false, 10},
+		{"silk_armor", "Silk Armor", "light", 11, "+DEX", 0, false, 4},
+		{"elven_leafweave", "Elven Leafweave", "light", 12, "+DEX", 0, false, 5},
+		{"shadow_leather", "Shadow Leather", "light", 12, "+DEX", 0, false, 8},
+		{"spider_silk", "Spider Silk Armor", "light", 12, "+DEX", 0, false, 4},
+		{"bone_shirt", "Bone Shirt", "light", 12, "+DEX", 0, false, 15},
+		{"shark_leather", "Sharkskin Armor", "light", 12, "+DEX", 0, false, 10},
+
+		// Medium Armor (AC 12-15 + DEX max 2)
+		{"hide", "Hide Armor", "medium", 12, "+DEX (max 2)", 0, false, 12},
+		{"ring_mail", "Ring Mail", "medium", 14, "", 0, true, 40},
+		{"brigandine", "Brigandine", "medium", 14, "+DEX (max 2)", 0, true, 35},
+		{"lamellar", "Lamellar Armor", "medium", 14, "+DEX (max 2)", 0, true, 35},
+		{"jack_of_plates", "Jack of Plates", "medium", 13, "+DEX (max 2)", 0, false, 25},
+		{"coat_of_plates", "Coat of Plates", "medium", 14, "+DEX (max 2)", 0, true, 40},
+		{"mirror_armor", "Mirror Armor", "medium", 15, "+DEX (max 2)", 0, true, 45},
+		{"banded_mail", "Banded Mail", "medium", 14, "+DEX (max 2)", 0, true, 35},
+		{"horn_armor", "Horn Armor", "medium", 14, "+DEX (max 2)", 0, false, 30},
+		{"scale_coat", "Scale Coat", "medium", 13, "+DEX (max 2)", 0, true, 30},
+		{"cuir_bouilli", "Cuir Bouilli", "medium", 13, "+DEX (max 2)", 0, false, 20},
+		{"dwarven_chain_shirt", "Dwarven Chain Shirt", "medium", 14, "+DEX (max 2)", 0, false, 15},
+		{"elven_chain", "Elven Chain", "medium", 14, "+DEX (max 2)", 0, false, 15},
+		{"orcish_battle_harness", "Orcish Battle Harness", "medium", 13, "+DEX (max 2)", 0, false, 25},
+		{"dragonscale_mail", "Dragonscale Mail", "medium", 15, "+DEX (max 2)", 0, false, 35},
+		{"chitin_armor", "Chitin Armor", "medium", 14, "+DEX (max 2)", 0, false, 25},
+		{"stone_armor", "Stone Armor", "medium", 15, "+DEX (max 2)", 14, true, 60},
+		{"coral_armor", "Coral Armor", "medium", 14, "+DEX (max 2)", 0, false, 30},
+
+		// Heavy Armor (AC 14-20, no DEX)
+		{"lorica_segmentata", "Lorica Segmentata", "heavy", 16, "", 13, true, 50},
+		{"lorica_hamata", "Lorica Hamata", "heavy", 15, "", 0, true, 40},
+		{"full_plate", "Full Plate", "heavy", 18, "", 15, true, 65},
+		{"gothic_plate", "Gothic Plate", "heavy", 18, "", 15, true, 60},
+		{"maximilian_plate", "Maximilian Plate", "heavy", 19, "", 16, true, 65},
+		{"jousting_armor", "Jousting Armor", "heavy", 20, "", 18, true, 80},
+		{"field_plate", "Field Plate", "heavy", 17, "", 14, true, 55},
+		{"half_field_plate", "Half Field Plate", "heavy", 16, "", 13, true, 45},
+		{"dwarven_plate", "Dwarven Plate", "heavy", 19, "", 15, true, 55},
+		{"adamantine_plate", "Adamantine Plate", "heavy", 18, "", 15, true, 65},
+		{"mithral_plate", "Mithral Plate", "heavy", 18, "", 0, false, 35},
+		{"orcish_bloodmail", "Orcish Bloodmail", "heavy", 16, "", 13, true, 55},
+		{"spiked_plate", "Spiked Plate", "heavy", 17, "", 14, true, 60},
+		{"demon_forged", "Demon-Forged Armor", "heavy", 18, "", 15, true, 65},
+		{"celestial_plate", "Celestial Plate", "heavy", 18, "", 15, false, 50},
+		{"bone_plate", "Bone Plate Armor", "heavy", 16, "", 13, true, 50},
+		{"dragon_plate", "Dragon Plate", "heavy", 19, "", 16, true, 60},
+		{"stone_giant_mail", "Stone Giant Mail", "heavy", 17, "", 15, true, 70},
+		{"tortoise_shell", "Giant Tortoise Shell", "heavy", 17, "", 14, true, 60},
+
+		// Shields (AC bonus)
+		{"buckler", "Buckler", "shield", 1, "", 0, false, 3},
+		{"tower_shield", "Tower Shield", "shield", 3, "", 15, true, 25},
+		{"kite_shield", "Kite Shield", "shield", 2, "", 0, false, 8},
+		{"heater_shield", "Heater Shield", "shield", 2, "", 0, false, 6},
+		{"round_shield", "Round Shield", "shield", 2, "", 0, false, 5},
+		{"targe", "Targe", "shield", 1, "", 0, false, 4},
+		{"pavise", "Pavise", "shield", 3, "", 13, true, 20},
+		{"spiked_shield", "Spiked Shield", "shield", 2, "", 0, false, 8},
+		{"lantern_shield", "Lantern Shield", "shield", 1, "", 0, false, 6},
+		{"dwarven_shield", "Dwarven Tower Shield", "shield", 3, "", 14, false, 20},
+		{"elven_shield", "Elven Leaf Shield", "shield", 2, "", 0, false, 4},
+		{"orcish_war_shield", "Orcish War Shield", "shield", 2, "", 12, false, 12},
+		{"dragon_scale_shield", "Dragon Scale Shield", "shield", 2, "", 0, false, 8},
+		{"mirror_shield", "Mirror Shield", "shield", 2, "", 0, false, 7},
+		{"crystal_shield", "Crystal Shield", "shield", 2, "", 0, false, 5},
+		{"bone_shield", "Bone Shield", "shield", 2, "", 0, false, 6},
+		{"griffon_shield", "Griffon-Crest Shield", "shield", 2, "", 0, false, 7},
+	}
+
+	for _, a := range armors {
+		_, err := db.Exec(`INSERT INTO armor (slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight, source)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'extended') ON CONFLICT (slug) DO NOTHING`,
+			a.Slug, a.Name, a.Type, a.AC, a.ACBonus, a.StrReq, a.Stealth, a.Weight)
+		if err != nil {
+			log.Printf("Failed to insert armor %s: %v", a.Slug, err)
+		}
+	}
+	log.Printf("Seeded %d extended armor", len(armors))
+
+	log.Println("Extended equipment seeding complete")
 }
 
 // Load SRD data from Postgres into in-memory maps for fast access
