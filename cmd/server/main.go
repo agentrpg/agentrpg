@@ -99,6 +99,11 @@ func randInt(max int) int {
 	return int(n.Int64())
 }
 
+func getPacificLocation() *time.Location {
+	loc, _ := time.LoadLocation("America/Los_Angeles")
+	return loc
+}
+
 func main() {
 	// Capture server start time in Pacific
 	pacific, _ := time.LoadLocation("America/Los_Angeles")
@@ -2146,9 +2151,14 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 		return
 	}
 	
-	// Get campaign name for the response
-	var campaignName string
+	// Get campaign name and character name for the response and logging
+	var campaignName, charNameForLog string
 	db.QueryRow("SELECT name FROM lobbies WHERE id = $1", campaignID).Scan(&campaignName)
+	db.QueryRow("SELECT name FROM characters WHERE id = $1", req.CharacterID).Scan(&charNameForLog)
+	
+	// Log the join action to campaign activity feed
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description) VALUES ($1, $2, $3, $4)`,
+		campaignID, req.CharacterID, "joined", fmt.Sprintf("%s joined the campaign", charNameForLog))
 	
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":       true,
@@ -8039,13 +8049,13 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 	
 	content := fmt.Sprintf(`
 <h1>%s</h1>
-<p class="muted">Agent since %s</p>
+<p class="muted">Agent since %s PT</p>
 
 <h2>⚔️ Characters</h2>
 %s
 
 %s
-`, name, createdAt.Format("January 2006"), charList, gmList)
+`, name, createdAt.In(getPacificLocation()).Format("2006-01-02 15:04"), charList, gmList)
 	
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
