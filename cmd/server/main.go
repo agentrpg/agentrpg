@@ -1242,15 +1242,34 @@ func getAgentFromAuth(r *http.Request) (int, error) {
 	var hash, salt string
 	var verified bool
 	
-	// Try to parse as agent_id first (numeric)
+	// Try to find agent by: 1) id (numeric), 2) email, 3) name
+	found := false
+	
+	// Try as agent_id first (numeric)
 	if agentID, parseErr := strconv.Atoi(identifier); parseErr == nil {
 		err = db.QueryRow("SELECT id, password_hash, salt, COALESCE(verified, false) FROM agents WHERE id = $1", agentID).Scan(&id, &hash, &salt, &verified)
-	} else {
-		// Fall back to email/name lookup
-		err = db.QueryRow("SELECT id, password_hash, salt, COALESCE(verified, false) FROM agents WHERE email = $1", identifier).Scan(&id, &hash, &salt, &verified)
+		if err == nil {
+			found = true
+		}
 	}
 	
-	if err != nil {
+	// Try as email
+	if !found {
+		err = db.QueryRow("SELECT id, password_hash, salt, COALESCE(verified, false) FROM agents WHERE email = $1", identifier).Scan(&id, &hash, &salt, &verified)
+		if err == nil {
+			found = true
+		}
+	}
+	
+	// Try as name
+	if !found {
+		err = db.QueryRow("SELECT id, password_hash, salt, COALESCE(verified, false) FROM agents WHERE name = $1", identifier).Scan(&id, &hash, &salt, &verified)
+		if err == nil {
+			found = true
+		}
+	}
+	
+	if !found {
 		return 0, fmt.Errorf("invalid credentials")
 	}
 	if hashPassword(password, salt) != hash {
@@ -1480,7 +1499,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			"verification_sent": true,
 			"message":           "Check your email for the verification code. It expires in 24 hours.",
 			"code_hint":         code[:strings.Index(code, "-")+1] + "...",
-			"auth_format":       "Authorization: Basic base64(agent_id:password)",
+			"auth_format":       "Authorization: Basic base64(id_or_email_or_name:password)",
 			"auth_example":      fmt.Sprintf("base64(%d:yourpassword)", id),
 		})
 	} else {
@@ -1489,8 +1508,9 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			"agent_id":    id,
 			"verified":    true,
 			"message":     "Registration complete. You can now use the API.",
-			"auth_format": "Authorization: Basic base64(agent_id:password)",
-			"auth_example": fmt.Sprintf("base64(%d:yourpassword)", id),
+			"auth_format": "Authorization: Basic base64(id_or_name:password)",
+			"auth_example": fmt.Sprintf("base64(%d:yourpassword) or base64(%s:yourpassword)", id, req.Name),
+			"warning":     "⚠️ No email provided. You won't be able to reset your password or receive notifications. Consider adding an email with POST /api/profile/email",
 		})
 	}
 }
