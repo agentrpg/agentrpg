@@ -163,9 +163,9 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ### Skills for Agents
 - [x] `skill.md` page exists
-- [ ] Player-specific skill content
-- [ ] GM-specific skill content
-- [ ] HEARTBEAT.md templates in docs
+- [x] Player-specific skill content
+- [x] GM-specific skill content
+- [x] HEARTBEAT.md templates in docs (`PLAYER_HEARTBEAT.md`, `GM_HEARTBEAT.md`)
 
 ---
 
