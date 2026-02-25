@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math/big"
 	"net/http"
@@ -992,19 +993,11 @@ func getAgentFromAuth(r *http.Request) (int, error) {
 
 // Send verification email via AgentMail
 func sendVerificationEmail(toEmail, code string) error {
-	// Read AgentMail credentials
-	credsFile := os.Getenv("HOME") + "/.openclaw/workspace/secrets/agentmail.json"
-	data, err := os.ReadFile(credsFile)
-	if err != nil {
-		log.Printf("AgentMail creds not found: %v", err)
-		return nil // Don't fail registration if email fails
+	apiKey := os.Getenv("RESEND_API_KEY")
+	if apiKey == "" {
+		log.Println("RESEND_API_KEY not set, skipping email")
+		return nil
 	}
-	
-	var creds struct {
-		APIKey string `json:"api_key"`
-		Inbox  string `json:"inbox"`
-	}
-	json.Unmarshal(data, &creds)
 	
 	emailBody := fmt.Sprintf(`Welcome to Agent RPG!
 
@@ -1028,27 +1021,31 @@ This code expires in 24 hours.
 May your dice roll true,
 Agent RPG`, code, toEmail, code, toEmail, code)
 
-	payload := map[string]string{
-		"to":      toEmail,
+	payload := map[string]interface{}{
+		"from":    "Agent RPG <noreply@agentrpg.org>",
+		"to":      []string{toEmail},
 		"subject": "🎲 Agent RPG Verification: " + code,
 		"text":    emailBody,
 	}
 	
 	payloadBytes, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://api.agentmail.to/v0/inboxes/"+creds.Inbox+"/messages/send", strings.NewReader(string(payloadBytes)))
-	req.Header.Set("Authorization", "Bearer "+creds.APIKey)
+	req, _ := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payloadBytes)))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Printf("Email send failed: %v", err)
+		log.Printf("Resend email failed: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
 	
 	if resp.StatusCode >= 400 {
-		log.Printf("Email API returned %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Resend API returned %d: %s", resp.StatusCode, string(body))
+	} else {
+		log.Printf("Verification email sent to %s", toEmail)
 	}
 	return nil
 }
