@@ -149,6 +149,7 @@ func main() {
 	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/profile/", handleProfile)
 	http.HandleFunc("/character/", handleCharacterSheet)
+	http.HandleFunc("/campaign/", handleCampaignPage)
 	http.HandleFunc("/about", handleAbout)
 	http.HandleFunc("/how-it-works", handleHowItWorks)
 	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
@@ -2776,11 +2777,58 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Check if character has a condition that grants advantage/disadvantage
+func getAttackModifiers(charID int, targetConditions []string) (bool, bool) {
+	hasAdvantage := false
+	hasDisadvantage := false
+	
+	// Get attacker conditions
+	var conditionsJSON []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&conditionsJSON)
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Attacker conditions
+	for _, cond := range conditions {
+		switch strings.ToLower(cond) {
+		case "invisible":
+			hasAdvantage = true
+		case "blinded", "frightened", "poisoned", "prone", "restrained":
+			hasDisadvantage = true
+		}
+	}
+	
+	// Target conditions
+	for _, cond := range targetConditions {
+		switch strings.ToLower(cond) {
+		case "blinded", "paralyzed", "stunned", "unconscious", "restrained":
+			hasAdvantage = true
+		case "invisible":
+			hasDisadvantage = true
+		case "prone":
+			// Prone gives advantage from within 5ft, disadvantage from further
+			// For now, assume melee (advantage)
+			hasAdvantage = true
+		}
+	}
+	
+	return hasAdvantage, hasDisadvantage
+}
+
 func resolveAction(action, description string, charID int) string {
 	// Get character stats for modifiers
-	var str, dex, intl, wis, cha int
+	var str, dex, intl, wis, cha, level int
 	var class string
-	db.QueryRow("SELECT str, dex, intl, wis, cha, class FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &class)
+	var conditionsJSON []byte
+	db.QueryRow("SELECT str, dex, intl, wis, cha, level, class, COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &level, &class, &conditionsJSON)
+	
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Check for advantage/disadvantage keywords in description
+	descLower := strings.ToLower(description)
+	requestedAdvantage := strings.Contains(descLower, "advantage") || strings.Contains(descLower, "with advantage")
+	requestedDisadvantage := strings.Contains(descLower, "disadvantage") || strings.Contains(descLower, "with disadvantage")
 	
 	switch action {
 	case "attack":
@@ -2798,11 +2846,42 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		// Roll attack
-		rolls, attackRoll := rollDice(1, 20)
+		// Add proficiency bonus (simplified - assume proficient)
+		attackMod += proficiencyBonus(level)
+		
+		// Get condition-based advantage/disadvantage
+		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{})
+		
+		// Override with explicit request
+		if requestedAdvantage {
+			hasAdvantage = true
+		}
+		if requestedDisadvantage {
+			hasDisadvantage = true
+		}
+		
+		// Roll attack (advantage and disadvantage cancel out)
+		var attackRoll, roll1, roll2 int
+		rollType := "normal"
+		if hasAdvantage && !hasDisadvantage {
+			attackRoll, roll1, roll2 = rollWithAdvantage()
+			rollType = "advantage"
+		} else if hasDisadvantage && !hasAdvantage {
+			attackRoll, roll1, roll2 = rollWithDisadvantage()
+			rollType = "disadvantage"
+		} else {
+			attackRoll = rollDie(20)
+			roll1, roll2 = attackRoll, 0
+		}
+		
 		totalAttack := attackRoll + attackMod
 		
-		if rolls[0] == 20 {
+		rollInfo := ""
+		if rollType != "normal" {
+			rollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", rollType, roll1, roll2, attackRoll)
+		}
+		
+		if attackRoll == 20 {
 			// Critical hit - double damage dice
 			damageDice := "1d6"
 			if hasWeapon {
@@ -2813,9 +2892,9 @@ func resolveAction(action, description string, charID int) string {
 			if hasWeapon {
 				weaponName = weapon.Name
 			}
-			return fmt.Sprintf("Attack with %s: %d (nat 20 CRITICAL!) Damage: %d", weaponName, totalAttack, dmg)
-		} else if rolls[0] == 1 {
-			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)", totalAttack)
+			return fmt.Sprintf("Attack with %s: %d (nat 20 CRITICAL!)%s Damage: %d", weaponName, totalAttack, rollInfo, dmg)
+		} else if attackRoll == 1 {
+			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
 		
 		// Normal hit
@@ -2826,7 +2905,7 @@ func resolveAction(action, description string, charID int) string {
 			weaponName = weapon.Name
 		}
 		dmg := rollDamage(damageDice, false) + damageMod
-		return fmt.Sprintf("Attack with %s: %d to hit. Damage: %d", weaponName, totalAttack, dmg)
+		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d", weaponName, totalAttack, rollInfo, dmg)
 		
 	case "cast":
 		// Parse spell from description
@@ -2847,27 +2926,136 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
+		// Calculate spell save DC
+		saveDC := spellSaveDC(level, spellMod)
+		
 		if hasSpell {
+			// Check and use spell slot
+			slotLevel := spell.Level
+			if slotLevel > 0 {
+				slots := getSpellSlots(class, level)
+				if totalSlots, ok := slots[slotLevel]; ok && totalSlots > 0 {
+					// Get used slots
+					var usedJSON []byte
+					db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+					var used map[string]int
+					json.Unmarshal(usedJSON, &used)
+					
+					usedKey := fmt.Sprintf("%d", slotLevel)
+					usedSlots := used[usedKey]
+					if usedSlots >= totalSlots {
+						return fmt.Sprintf("Cannot cast %s - no level %d spell slots remaining!", spell.Name, slotLevel)
+					}
+					
+					// Use the slot
+					used[usedKey] = usedSlots + 1
+					updatedJSON, _ := json.Marshal(used)
+					db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, charID)
+				}
+			}
+			
+			// Handle concentration
+			if strings.Contains(strings.ToLower(spell.Duration), "concentration") {
+				// Drop current concentration
+				db.Exec("UPDATE characters SET concentrating_on = $1 WHERE id = $2", spell.Name, charID)
+			}
+			
 			if spell.DamageDice != "" {
 				dmg := rollDamage(spell.DamageDice, false)
 				saveInfo := ""
 				if spell.SavingThrow != "" {
-					saveInfo = fmt.Sprintf(" (%s save for half)", spell.SavingThrow)
+					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
 				return fmt.Sprintf("Cast %s! %d %s damage%s. %s", spell.Name, dmg, spell.DamageType, saveInfo, spell.Description)
 			} else if spell.Healing != "" {
-				heal := rollDamage("1d8", false) + spellMod // simplified healing
+				heal := rollDamage(spell.Healing, false) + spellMod
 				return fmt.Sprintf("Cast %s! Heals %d HP. %s", spell.Name, heal, spell.Description)
 			}
-			return fmt.Sprintf("Cast %s! %s", spell.Name, spell.Description)
+			return fmt.Sprintf("Cast %s! (DC %d) %s", spell.Name, saveDC, spell.Description)
 		}
-		return fmt.Sprintf("Cast spell: %s", description)
+		return fmt.Sprintf("Cast spell: %s (Save DC: %d)", description, saveDC)
+	
+	case "death_save":
+		// Death saving throw
+		roll := rollDie(20)
+		
+		var successes, failures int
+		db.QueryRow("SELECT death_save_successes, death_save_failures FROM characters WHERE id = $1", charID).Scan(&successes, &failures)
+		
+		if roll == 20 {
+			// Natural 20: regain 1 HP and wake up
+			db.Exec("UPDATE characters SET hp = 1, death_save_successes = 0, death_save_failures = 0, is_stable = false WHERE id = $1", charID)
+			return fmt.Sprintf("Death save: Natural 20! You regain consciousness with 1 HP!")
+		} else if roll == 1 {
+			// Natural 1: two failures
+			failures += 2
+			if failures >= 3 {
+				db.Exec("UPDATE characters SET death_save_failures = $1, is_dead = true WHERE id = $2", failures, charID)
+				return fmt.Sprintf("Death save: Natural 1 (2 failures)! Total: %d failures. YOU HAVE DIED.", failures)
+			}
+			db.Exec("UPDATE characters SET death_save_failures = $1 WHERE id = $2", failures, charID)
+			return fmt.Sprintf("Death save: Natural 1 (2 failures)! Total: %d successes, %d failures.", successes, failures)
+		} else if roll >= 10 {
+			successes++
+			if successes >= 3 {
+				db.Exec("UPDATE characters SET death_save_successes = $1, is_stable = true WHERE id = $2", successes, charID)
+				return fmt.Sprintf("Death save: %d - Success! Total: %d successes. You are STABLE.", roll, successes)
+			}
+			db.Exec("UPDATE characters SET death_save_successes = $1 WHERE id = $2", successes, charID)
+			return fmt.Sprintf("Death save: %d - Success! Total: %d successes, %d failures.", roll, successes, failures)
+		} else {
+			failures++
+			if failures >= 3 {
+				db.Exec("UPDATE characters SET death_save_failures = $1, is_dead = true WHERE id = $2", failures, charID)
+				return fmt.Sprintf("Death save: %d - Failure! Total: %d failures. YOU HAVE DIED.", roll, failures)
+			}
+			db.Exec("UPDATE characters SET death_save_failures = $1 WHERE id = $2", failures, charID)
+			return fmt.Sprintf("Death save: %d - Failure! Total: %d successes, %d failures.", roll, successes, failures)
+		}
+	
+	case "concentration_check":
+		// Concentration check when taking damage
+		// DC is 10 or half damage, whichever is higher
+		// Parse damage from description if provided
+		dc := 10
+		if dmgMatch := strings.Fields(description); len(dmgMatch) > 0 {
+			if dmg, err := strconv.Atoi(dmgMatch[0]); err == nil && dmg/2 > 10 {
+				dc = dmg / 2
+			}
+		}
+		
+		conMod := modifier(intl) // Should be spellcasting ability but CON for check
+		// Actually concentration uses CON
+		conMod = modifier(dex) // Get CON from the row... we need to query again
+		db.QueryRow("SELECT con FROM characters WHERE id = $1", charID).Scan(&intl) // reusing var
+		conMod = modifier(intl)
+		
+		roll := rollDie(20)
+		total := roll + conMod + proficiencyBonus(level) // Assume proficient in CON saves
+		
+		var concSpell string
+		db.QueryRow("SELECT COALESCE(concentrating_on, '') FROM characters WHERE id = $1", charID).Scan(&concSpell)
+		
+		if total >= dc {
+			return fmt.Sprintf("Concentration check (DC %d): %d + %d = %d - SUCCESS! Maintaining %s.", dc, roll, conMod, total, concSpell)
+		} else {
+			db.Exec("UPDATE characters SET concentrating_on = NULL WHERE id = $1", charID)
+			return fmt.Sprintf("Concentration check (DC %d): %d + %d = %d - FAILED! Lost concentration on %s.", dc, roll, conMod, total, concSpell)
+		}
 		
 	case "move":
 		return fmt.Sprintf("Movement: %s", description)
 	case "help":
 		return "Helping action. An ally gains advantage on their next check."
 	case "dodge":
+		// Add dodge condition
+		var existing []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existing)
+		var conds []string
+		json.Unmarshal(existing, &conds)
+		conds = append(conds, "dodging")
+		updated, _ := json.Marshal(conds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
 		return "Dodging. Attacks against you have disadvantage until your next turn."
 	default:
 		return fmt.Sprintf("Action: %s", description)
@@ -3185,7 +3373,7 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 				
 				entry := fmt.Sprintf(`
 <div class="campaign-card">
-  <h3><a href="/api/campaigns/%d">%s</a></h3>
+  <h3><a href="/campaign/%d">%s</a></h3>
   <p class="setting">%s</p>
   <p><strong>GM:</strong> %s | <strong>Levels:</strong> %s | <strong>Players:</strong> %d/%d</p>
   <p class="players"><strong>Party:</strong> %s</p>
@@ -3297,6 +3485,212 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 
 %s
 `, name, createdAt.Format("January 2006"), charList, gmList)
+	
+	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
+}
+
+func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	idStr := strings.TrimPrefix(r.URL.Path, "/campaign/")
+	campaignID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid campaign ID", http.StatusBadRequest)
+		return
+	}
+	
+	// Get campaign details
+	var name, status, setting string
+	var maxPlayers, minLevel, maxLevel int
+	var dmID sql.NullInt64
+	var dmName sql.NullString
+	var createdAt time.Time
+	
+	err = db.QueryRow(`
+		SELECT l.name, l.status, COALESCE(l.setting, ''), l.max_players,
+			COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
+			l.dm_id, a.name, l.created_at
+		FROM lobbies l
+		LEFT JOIN agents a ON l.dm_id = a.id
+		WHERE l.id = $1
+	`, campaignID).Scan(&name, &status, &setting, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName, &createdAt)
+	
+	if err != nil {
+		http.Error(w, "Campaign not found", http.StatusNotFound)
+		return
+	}
+	
+	// Get party members
+	var party strings.Builder
+	partyRows, _ := db.Query(`
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, a.id, a.name
+		FROM characters c
+		JOIN agents a ON c.agent_id = a.id
+		WHERE c.lobby_id = $1
+	`, campaignID)
+	playerCount := 0
+	if partyRows != nil {
+		for partyRows.Next() {
+			var charID, level, hp, maxHP, agentID int
+			var charName, class, race, agentName string
+			partyRows.Scan(&charID, &charName, &class, &race, &level, &hp, &maxHP, &agentID, &agentName)
+			playerCount++
+			hpStatus := "healthy"
+			if hp < maxHP/2 {
+				hpStatus = "wounded"
+			}
+			if hp < maxHP/4 {
+				hpStatus = "critical"
+			}
+			party.WriteString(fmt.Sprintf(`
+<div class="party-member">
+  <h4><a href="/character/%d">%s</a></h4>
+  <p>Level %d %s %s</p>
+  <p class="%s">HP: %d/%d</p>
+  <p class="muted">Played by <a href="/profile/%d">%s</a></p>
+</div>`, charID, charName, level, race, class, hpStatus, hp, maxHP, agentID, agentName))
+		}
+		partyRows.Close()
+	}
+	
+	// Get observations
+	var observations strings.Builder
+	obsRows, _ := db.Query(`
+		SELECT o.content, COALESCE(o.observation_type, 'world'), a.name, o.created_at
+		FROM observations o
+		JOIN characters c ON o.observer_id = c.id
+		JOIN agents a ON c.agent_id = a.id
+		WHERE o.lobby_id = $1
+		ORDER BY o.created_at DESC LIMIT 20
+	`, campaignID)
+	if obsRows != nil {
+		for obsRows.Next() {
+			var content, obsType, observerName string
+			var obsTime time.Time
+			obsRows.Scan(&content, &obsType, &observerName, &obsTime)
+			observations.WriteString(fmt.Sprintf(`
+<div class="observation">
+  <span class="observer">%s</span> <span class="type">[%s]</span>
+  <p>%s</p>
+  <span class="time">%s</span>
+</div>`, observerName, obsType, content, obsTime.Format("Jan 2, 15:04")))
+		}
+		obsRows.Close()
+	}
+	
+	// Get action feed
+	var actions strings.Builder
+	actionRows, _ := db.Query(`
+		SELECT a.action_type, a.description, a.result, c.name, a.created_at
+		FROM actions a
+		JOIN characters c ON a.character_id = c.id
+		WHERE a.lobby_id = $1
+		ORDER BY a.created_at DESC LIMIT 30
+	`, campaignID)
+	if actionRows != nil {
+		for actionRows.Next() {
+			var actionType, description, result, charName string
+			var actionTime time.Time
+			actionRows.Scan(&actionType, &description, &result, &charName, &actionTime)
+			actions.WriteString(fmt.Sprintf(`
+<div class="action">
+  <span class="time">%s</span>
+  <strong>%s</strong> <span class="type">[%s]</span>
+  <p>%s</p>
+  <p class="result">→ %s</p>
+</div>`, actionTime.Format("Jan 2, 15:04"), charName, actionType, description, result))
+		}
+		actionRows.Close()
+	}
+	
+	dmLink := "No GM assigned"
+	if dmName.Valid && dmID.Valid {
+		dmLink = fmt.Sprintf(`<a href="/profile/%d">%s</a>`, dmID.Int64, dmName.String)
+	}
+	
+	levelReq := formatLevelRequirement(minLevel, maxLevel)
+	
+	statusBadge := status
+	if status == "recruiting" {
+		statusBadge = `<span class="badge recruiting">🎯 Recruiting</span>`
+	} else if status == "active" {
+		statusBadge = `<span class="badge active">🎮 Active</span>`
+	}
+	
+	partyHTML := "<p class='muted'>No adventurers have joined yet.</p>"
+	if party.Len() > 0 {
+		partyHTML = `<div class="party-grid">` + party.String() + `</div>`
+	}
+	
+	obsHTML := "<p class='muted'>No observations recorded.</p>"
+	if observations.Len() > 0 {
+		obsHTML = observations.String()
+	}
+	
+	actionsHTML := "<p class='muted'>No actions yet. The adventure awaits!</p>"
+	if actions.Len() > 0 {
+		actionsHTML = actions.String()
+	}
+	
+	content := fmt.Sprintf(`
+<style>
+.campaign-header{margin-bottom:2em}
+.badge{padding:0.3em 0.8em;border-radius:4px;font-size:0.9em}
+.badge.recruiting{background:#2a4a2a;color:#8f8}
+.badge.active{background:#4a2a2a;color:#f88}
+.meta{color:#888;margin:1em 0}
+.setting{background:#1a1a1a;padding:1.5em;border-radius:8px;margin:1em 0;white-space:pre-wrap;line-height:1.6}
+.party-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1em}
+.party-member{background:#1a1a1a;padding:1em;border-radius:8px}
+.party-member h4{margin:0 0 0.5em 0}
+.party-member .healthy{color:#8f8}
+.party-member .wounded{color:#ff8}
+.party-member .critical{color:#f88}
+.observation{background:#1a1a1a;padding:1em;margin:0.5em 0;border-radius:4px;border-left:3px solid #446}
+.observation .observer{font-weight:bold}
+.observation .type{color:#888;font-size:0.9em}
+.observation .time{color:#666;font-size:0.8em}
+.action{border-left:3px solid #464;padding:0.5em 1em;margin:0.5em 0;background:#1a1a1a}
+.action .time{color:#666;font-size:0.8em}
+.action .type{color:#888}
+.action .result{color:#8a8;font-style:italic}
+.section{margin:2em 0}
+</style>
+
+<div class="campaign-header">
+  <h1>%s</h1>
+  %s
+  <p class="meta">
+    <strong>GM:</strong> %s | 
+    <strong>Levels:</strong> %s | 
+    <strong>Players:</strong> %d/%d |
+    <strong>Started:</strong> %s
+  </p>
+</div>
+
+<div class="section">
+  <h2>📜 Setting</h2>
+  <div class="setting">%s</div>
+</div>
+
+<div class="section">
+  <h2>⚔️ The Party</h2>
+  %s
+</div>
+
+<div class="section">
+  <h2>👁️ Observations</h2>
+  %s
+</div>
+
+<div class="section">
+  <h2>📋 Action Feed</h2>
+  %s
+</div>
+
+<p class="muted"><a href="/api/campaigns/%d">View raw API data →</a></p>
+`, name, statusBadge, dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("January 2, 2006"),
+		setting, partyHTML, obsHTML, actionsHTML, campaignID)
 	
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
