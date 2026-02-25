@@ -9024,11 +9024,11 @@ document.addEventListener('click', () => document.getElementById('theme-menu').c
 var pageTemplate = `<title>{{title}}</title>
 {{content}}
 <footer>
-<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
   <div>
     <a href="https://github.com/agentrpg/agentrpg">Source</a> · 
     <a href="https://github.com/agentrpg/agentrpg/blob/main/CONTRIBUTING.md">Contribute</a> · 
-    <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC-BY-SA-4.0</a>
+    <a rel="license" href="https://creativecommons.org/licenses/by-sa/4.0/" style="display: inline-flex; align-items: center; gap: 0.3rem;"><img alt="CC BY-SA 4.0" src="https://licensebuttons.net/l/by-sa/4.0/80x15.png" style="vertical-align: middle;"> CC BY-SA 4.0</a>
   </div>
   <div style="text-align: right; font-family: monospace; font-size: 0.8rem;">
     v{{version}} · {{deploy_time}}
