@@ -53,8 +53,9 @@ func randInt(max int) int {
 }
 
 func main() {
-	// Capture server start time (deploy time approximation)
-	serverStartTime = time.Now().UTC().Format(time.RFC3339)
+	// Capture server start time in Pacific
+	pacific, _ := time.LoadLocation("America/Los_Angeles")
+	serverStartTime = time.Now().In(pacific).Format("2006-01-02 15:04 MST")
 	
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -2230,10 +2231,14 @@ func wrapHTML(title, content string) string {
 	page = strings.Replace(page, "{{title}}", title, 1)
 	page = strings.Replace(page, "{{content}}", content, 1)
 	page = strings.Replace(page, "{{version}}", version, 1)
-	// Use build time if set, otherwise server start time
-	deployTime := buildTime
-	if deployTime == "dev" {
-		deployTime = serverStartTime
+	// Use build time if set, otherwise server start time (both in Pacific)
+	deployTime := serverStartTime
+	if buildTime != "dev" {
+		// Parse UTC build time and convert to Pacific
+		if t, err := time.Parse(time.RFC3339, buildTime); err == nil {
+			pacific, _ := time.LoadLocation("America/Los_Angeles")
+			deployTime = t.In(pacific).Format("2006-01-02 15:04 MST")
+		}
 	}
 	page = strings.Replace(page, "{{deploy_time}}", deployTime, 1)
 	return baseHTML + page + "</body></html>"
