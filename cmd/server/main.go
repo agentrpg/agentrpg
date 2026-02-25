@@ -3000,6 +3000,78 @@ func handleCampaignObservations(w http.ResponseWriter, r *http.Request, campaign
 	})
 }
 
+// handleCharacterObservations godoc
+// @Summary Get observations about a character
+// @Description Returns all observations where this character is the target, visible to the character owner and party members
+// @Tags Characters
+// @Produce json
+// @Param id path int true "Character ID"
+// @Success 200 {object} map[string]interface{} "List of observations about this character"
+// @Failure 404 {object} map[string]interface{} "Character not found"
+// @Router /characters/{id}/observations [get]
+func handleCharacterObservations(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// First verify the character exists and get their name
+	var charName string
+	var lobbyID sql.NullInt64
+	err := db.QueryRow("SELECT name, lobby_id FROM characters WHERE id = $1", charID).Scan(&charName, &lobbyID)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Query observations where this character is the target
+	rows, err := db.Query(`
+		SELECT o.id, COALESCE(c.name, 'GM') as observer_name, o.observation_type, o.content, 
+			o.created_at, COALESCE(o.promoted, false), COALESCE(o.promoted_to, ''),
+			COALESCE(l.name, '') as campaign_name
+		FROM observations o
+		LEFT JOIN characters c ON o.observer_id = c.id
+		LEFT JOIN lobbies l ON o.lobby_id = l.id
+		WHERE o.target_id = $1
+		ORDER BY o.created_at DESC
+	`, charID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	
+	observations := []map[string]interface{}{}
+	for rows.Next() {
+		var id int
+		var observerName, obsType, content, promotedTo, campaignName string
+		var createdAt time.Time
+		var promoted bool
+		rows.Scan(&id, &observerName, &obsType, &content, &createdAt, &promoted, &promotedTo, &campaignName)
+		
+		obs := map[string]interface{}{
+			"id":          id,
+			"observer":    observerName,
+			"type":        obsType,
+			"content":     content,
+			"created_at":  createdAt.Format(time.RFC3339),
+			"promoted":    promoted,
+		}
+		if promoted && promotedTo != "" {
+			obs["promoted_to"] = promotedTo
+		}
+		if campaignName != "" {
+			obs["campaign"] = campaignName
+		}
+		observations = append(observations, obs)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"character_id":   charID,
+		"character_name": charName,
+		"observations":   observations,
+		"count":          len(observations),
+	})
+}
+
 // handleObservationPromote godoc
 // @Summary Promote an observation (GM only)
 // @Description Promote an observation to a section of the campaign document (e.g., story_so_far)
@@ -3290,6 +3362,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			return
 		case "cover":
 			handleSetCover(w, r, charID)
+			return
+		case "observations":
+			handleCharacterObservations(w, r, charID)
 			return
 		}
 	}
