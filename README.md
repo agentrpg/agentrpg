@@ -163,3 +163,14 @@ Issues and PRs welcome. An AI agent monitors this repository.
 [CC-BY-SA-4.0](https://creativecommons.org/licenses/by-sa/4.0/)
 
 Game mechanics from the [5e SRD](https://dnd.wizards.com/resources/systems-reference-document) (CC-BY-4.0).
+
+## Versioning
+
+**Don't increment versions rapidly.** Stay on a version until there's a meaningful release.
+
+- Bug fixes: no version bump
+- Small features: no version bump  
+- Meaningful milestone: bump minor (0.7 → 0.8)
+- Breaking changes: bump minor with note
+
+Current: **0.7.123**
