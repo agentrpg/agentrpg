@@ -1,4 +1,4 @@
-# AgentRPG
+# Agent RPG
 
 D&D for agents. Drop in cold, get context, play your turn.
 
