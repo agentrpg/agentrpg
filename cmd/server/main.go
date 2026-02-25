@@ -124,9 +124,9 @@ func main() {
 	// Pages
 	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/about", handleAbout)
-	// http.HandleFunc("/how-it-works", handleHowItWorks)
+	http.HandleFunc("/how-it-works", handleHowItWorks)
 	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
-	// http.HandleFunc("/docs/", handleDocsRaw)
+	http.HandleFunc("/docs/", handleDocsRaw)
 	http.HandleFunc("/docs", handleSwagger)
 	http.HandleFunc("/", handleRoot)
 
@@ -2317,10 +2317,15 @@ nav a:visited { color: var(--link); }
 nav a:hover { text-decoration: underline; }
 .nav-spacer { flex-grow: 1; }
 .theme-toggle { cursor: pointer; padding: 0.25rem; border: none; background: none; font-size: 1.2rem; position: relative; }
-.theme-menu { display: none; position: absolute; right: 0; top: 100%; background: var(--bg); border: 1px solid var(--border); padding: 0.5rem 0; min-width: 180px; z-index: 100; }
+.theme-menu { display: none; position: absolute; right: 0; top: 100%; background: var(--bg); border: 1px solid var(--border); padding: 0.5rem; min-width: 200px; z-index: 100; }
 .theme-menu.open { display: block; }
-.theme-menu button { display: flex; align-items: center; width: 100%; padding: 0.5rem 1rem; border: none; background: none; cursor: pointer; color: var(--fg); font-size: 0.9rem; text-align: left; }
-.theme-menu button:hover { background: var(--code-bg); }
+.theme-row { display: flex; align-items: center; justify-content: space-between; padding: 0.4rem 0.5rem; }
+.theme-row:hover { background: var(--code-bg); }
+.theme-name { font-size: 0.85rem; color: var(--fg); }
+.theme-swatches { display: flex; gap: 4px; }
+.theme-menu button { padding: 0; border: none; background: none; cursor: pointer; line-height: 0; }
+.theme-menu button .swatch { width: 20px; height: 20px; border-radius: 4px; display: block; }
+.theme-menu button:hover .swatch { box-shadow: 0 0 0 2px var(--link); }
 .swatch { width: 16px; height: 16px; border-radius: 2px; margin-right: 0.75rem; border: 1px solid var(--border); }
 h1 { font-size: 1.5rem; margin: 0 0 1rem 0; font-weight: normal; }
 h2 { font-size: 1.2rem; margin: 1.5rem 0 0.5rem 0; font-weight: normal; border-bottom: 1px solid var(--border); }
@@ -2350,14 +2355,10 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <div class="theme-toggle" onclick="toggleThemeMenu(event)">
 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7z"/></svg>
 <div class="theme-menu" id="theme-menu">
-<button onclick="setTheme('light')"><span class="swatch" style="background:#ffffff"></span>Light</button>
-<button onclick="setTheme('dark')"><span class="swatch" style="background:#1a1b26"></span>Dark</button>
-<button onclick="setTheme('catppuccin-latte')"><span class="swatch" style="background:#eff1f5"></span>Catppuccin Latte</button>
-<button onclick="setTheme('catppuccin-mocha')"><span class="swatch" style="background:#1e1e2e"></span>Catppuccin Mocha</button>
-<button onclick="setTheme('tokyonight')"><span class="swatch" style="background:#1a1b26"></span>Tokyo Night</button>
-<button onclick="setTheme('tokyonight-day')"><span class="swatch" style="background:#e1e2e7"></span>Tokyo Night Day</button>
-<button onclick="setTheme('solarized-light')"><span class="swatch" style="background:#fdf6e3"></span>Solarized Light</button>
-<button onclick="setTheme('solarized-dark')"><span class="swatch" style="background:#002b36"></span>Solarized Dark</button>
+<div class="theme-row"><span class="theme-name">Default</span><span class="theme-swatches"><button onclick="setTheme('light')" title="Light"><span class="swatch" style="background:#ffffff;border:1px solid #ccc"></span></button><button onclick="setTheme('dark')" title="Dark"><span class="swatch" style="background:#1a1b26"></span></button></span></div>
+<div class="theme-row"><span class="theme-name">Tokyo Night</span><span class="theme-swatches"><button onclick="setTheme('tokyonight-day')" title="Day"><span class="swatch" style="background:#e1e2e7"></span></button><button onclick="setTheme('tokyonight')" title="Night"><span class="swatch" style="background:#1a1b26"></span></button></span></div>
+<div class="theme-row"><span class="theme-name">Catppuccin</span><span class="theme-swatches"><button onclick="setTheme('catppuccin-latte')" title="Latte"><span class="swatch" style="background:#eff1f5"></span></button><button onclick="setTheme('catppuccin-mocha')" title="Mocha"><span class="swatch" style="background:#1e1e2e"></span></button></span></div>
+<div class="theme-row"><span class="theme-name">Solarized</span><span class="theme-swatches"><button onclick="setTheme('solarized-light')" title="Light"><span class="swatch" style="background:#fdf6e3"></span></button><button onclick="setTheme('solarized-dark')" title="Dark"><span class="swatch" style="background:#002b36"></span></button></span></div>
 </div>
 </div>
 </nav>
