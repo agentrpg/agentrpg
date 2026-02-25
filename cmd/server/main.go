@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.4.0"
+const version = "0.4.1"
 
 var db *sql.DB
 
@@ -768,7 +768,25 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 		if req.Wis == 0 { req.Wis = 10 }
 		if req.Cha == 0 { req.Cha = 10 }
 		
-		hp := 10 + modifier(req.Con)
+		// Apply race ability bonuses from SRD
+		raceKey := strings.ToLower(strings.ReplaceAll(req.Race, " ", "_"))
+		raceKey = strings.ReplaceAll(raceKey, "-", "_")
+		if race, ok := srdRaces[raceKey]; ok {
+			req.Str += race.AbilityMods["STR"]
+			req.Dex += race.AbilityMods["DEX"]
+			req.Con += race.AbilityMods["CON"]
+			req.Int += race.AbilityMods["INT"]
+			req.Wis += race.AbilityMods["WIS"]
+			req.Cha += race.AbilityMods["CHA"]
+		}
+		
+		// Use class hit die from SRD for HP
+		classKey := strings.ToLower(req.Class)
+		hitDie := 8 // default
+		if class, ok := srdClasses[classKey]; ok {
+			hitDie = class.HitDie
+		}
+		hp := hitDie + modifier(req.Con) // Level 1: max hit die + CON mod
 		ac := 10 + modifier(req.Dex)
 		
 		var id int
@@ -940,19 +958,92 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func resolveAction(action, description string, charID int) string {
+	// Get character stats for modifiers
+	var str, dex, intl, wis, cha int
+	var class string
+	db.QueryRow("SELECT str, dex, intl, wis, cha, class FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &class)
+	
 	switch action {
 	case "attack":
-		rolls, total := rollDice(1, 20)
-		if rolls[0] == 20 {
-			dmgRolls, dmg := rollDice(2, 6)
-			return fmt.Sprintf("Attack roll: %d (CRITICAL HIT!) Damage: %d (%v)", total, dmg, dmgRolls)
-		} else if rolls[0] == 1 {
-			return fmt.Sprintf("Attack roll: %d (Critical miss!)", total)
+		// Parse weapon from description or use default
+		weaponKey := parseWeaponFromDescription(description)
+		weapon, hasWeapon := srdWeapons[weaponKey]
+		
+		// Determine attack modifier (STR for melee, DEX for ranged/finesse)
+		attackMod := modifier(str)
+		damageMod := modifier(str)
+		if hasWeapon {
+			if weapon.Type == "ranged" || containsProperty(weapon.Properties, "finesse") {
+				attackMod = modifier(dex)
+				damageMod = modifier(dex)
+			}
 		}
-		dmgRolls, dmg := rollDice(1, 6)
-		return fmt.Sprintf("Attack roll: %d Damage: %d (%v)", total, dmg, dmgRolls)
+		
+		// Roll attack
+		rolls, attackRoll := rollDice(1, 20)
+		totalAttack := attackRoll + attackMod
+		
+		if rolls[0] == 20 {
+			// Critical hit - double damage dice
+			damageDice := "1d6"
+			if hasWeapon {
+				damageDice = weapon.Damage
+			}
+			dmg := rollDamage(damageDice, true) + damageMod
+			weaponName := "unarmed"
+			if hasWeapon {
+				weaponName = weapon.Name
+			}
+			return fmt.Sprintf("Attack with %s: %d (nat 20 CRITICAL!) Damage: %d", weaponName, totalAttack, dmg)
+		} else if rolls[0] == 1 {
+			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)", totalAttack)
+		}
+		
+		// Normal hit
+		damageDice := "1d6"
+		weaponName := "unarmed"
+		if hasWeapon {
+			damageDice = weapon.Damage
+			weaponName = weapon.Name
+		}
+		dmg := rollDamage(damageDice, false) + damageMod
+		return fmt.Sprintf("Attack with %s: %d to hit. Damage: %d", weaponName, totalAttack, dmg)
+		
 	case "cast":
-		return fmt.Sprintf("Spell cast. %s", description)
+		// Parse spell from description
+		spellKey := parseSpellFromDescription(description)
+		spell, hasSpell := srdSpells[spellKey]
+		
+		// Get spellcasting ability modifier
+		classKey := strings.ToLower(class)
+		spellMod := 0
+		if c, ok := srdClasses[classKey]; ok {
+			switch c.Spellcasting {
+			case "INT":
+				spellMod = modifier(intl)
+			case "WIS":
+				spellMod = modifier(wis)
+			case "CHA":
+				spellMod = modifier(cha)
+			}
+		}
+		
+		if hasSpell {
+			if spell.DamageDice != "" {
+				dmg := rollDamage(spell.DamageDice, false)
+				saveInfo := ""
+				if spell.SavingThrow != "" {
+					saveInfo = fmt.Sprintf(" (%s save for half)", spell.SavingThrow)
+				}
+				return fmt.Sprintf("Cast %s! %d %s damage%s. %s", spell.Name, dmg, spell.DamageType, saveInfo, spell.Description)
+			} else if spell.Healing != "" {
+				heal := rollDamage("1d8", false) + spellMod // simplified healing
+				return fmt.Sprintf("Cast %s! Heals %d HP. %s", spell.Name, heal, spell.Description)
+			}
+			return fmt.Sprintf("Cast %s! %s", spell.Name, spell.Description)
+		}
+		return fmt.Sprintf("Cast spell: %s", description)
+		
 	case "move":
 		return fmt.Sprintf("Movement: %s", description)
 	case "help":
@@ -962,6 +1053,66 @@ func resolveAction(action, description string, charID int) string {
 	default:
 		return fmt.Sprintf("Action: %s", description)
 	}
+}
+
+// Helper to parse weapon name from action description
+func parseWeaponFromDescription(desc string) string {
+	desc = strings.ToLower(desc)
+	for key := range srdWeapons {
+		weaponName := strings.ReplaceAll(key, "_", " ")
+		if strings.Contains(desc, weaponName) || strings.Contains(desc, key) {
+			return key
+		}
+	}
+	return ""
+}
+
+// Helper to parse spell name from action description
+func parseSpellFromDescription(desc string) string {
+	desc = strings.ToLower(desc)
+	for key := range srdSpells {
+		spellName := strings.ReplaceAll(key, "_", " ")
+		if strings.Contains(desc, spellName) || strings.Contains(desc, key) {
+			return key
+		}
+	}
+	return ""
+}
+
+// Check if weapon has a property
+func containsProperty(props []string, prop string) bool {
+	for _, p := range props {
+		if strings.Contains(strings.ToLower(p), prop) {
+			return true
+		}
+	}
+	return false
+}
+
+// Roll damage dice (e.g., "2d6", "1d8+2")
+func rollDamage(dice string, critical bool) int {
+	dice = strings.ToLower(dice)
+	// Remove any +X modifier for now, just roll dice
+	if idx := strings.Index(dice, "+"); idx > 0 {
+		dice = dice[:idx]
+	}
+	
+	parts := strings.Split(dice, "d")
+	if len(parts) != 2 {
+		return rollDie(6)
+	}
+	
+	count, _ := strconv.Atoi(parts[0])
+	sides, _ := strconv.Atoi(parts[1])
+	if count < 1 { count = 1 }
+	if sides < 1 { sides = 6 }
+	
+	if critical {
+		count *= 2 // Double dice on crit
+	}
+	
+	_, total := rollDice(count, sides)
+	return total
 }
 
 func handleObserve(w http.ResponseWriter, r *http.Request) {

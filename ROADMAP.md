@@ -33,6 +33,11 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Races: 11 races including subraces
 - [x] Equipment: 13 weapons, 10 armor types
 - [x] API endpoints: /api/srd/*
+- [x] **Character creation uses class hit die for HP**
+- [x] **Race ability bonuses applied automatically**
+- [x] **Attack action uses weapon damage from SRD**
+- [x] **Cast action uses spell damage/effects from SRD**
+- [x] **Ability modifiers applied to attack/damage rolls**
 
 ---
 
