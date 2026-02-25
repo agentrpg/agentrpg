@@ -674,7 +674,7 @@ func seedEquipmentFromAPI() {
 				weaponType = strings.ToLower(wc)
 			}
 			
-			db.Exec(`INSERT INTO weapons (slug, name, type, damage, damage_type, weight, properties)
+			db.Exec(`INSERT INTO weapons (slug, name, category, damage_dice, damage_type, weight, properties)
 				VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (slug) DO NOTHING`,
 				r["index"], detail["name"], weaponType, damageDice, damageType, weight, strings.Join(props, ", "))
 			weapons++
@@ -709,9 +709,15 @@ func seedEquipmentFromAPI() {
 				armorType = strings.ToLower(ac)
 			}
 			
-			db.Exec(`INSERT INTO armor (slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (slug) DO NOTHING`,
-				r["index"], detail["name"], armorType, ac, acBonus, strReq, stealth, weight)
+			dexBonus := acBonus != ""
+			maxBonus := 0
+			if strings.Contains(acBonus, "max") {
+				fmt.Sscanf(acBonus, "+DEX (max %d)", &maxBonus)
+			}
+			
+			db.Exec(`INSERT INTO armor (slug, name, category, ac_base, ac_dex_bonus, ac_max_bonus, strength_requirement, stealth_disadvantage, weight)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) ON CONFLICT (slug) DO NOTHING`,
+				r["index"], detail["name"], armorType, ac, dexBonus, maxBonus, strReq, stealth, weight)
 			armors++
 		}
 	}
