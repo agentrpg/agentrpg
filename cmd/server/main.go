@@ -1032,6 +1032,16 @@ func spellSaveDC(level int, spellcastingMod int) int {
 	return 8 + proficiencyBonus(level) + spellcastingMod
 }
 
+// Cover bonuses for AC
+// Half cover: +2 AC, Three-quarters cover: +5 AC, Full cover: can't be targeted
+var coverBonuses = map[string]int{
+	"none":            0,
+	"half":            2,
+	"three_quarters":  5,
+	"three-quarters":  5,
+	"full":            0, // Full cover means can't be targeted, not an AC bonus
+}
+
 // Standard 5e conditions with their effects
 var conditionEffects = map[string]string{
 	"blinded":      "Can't see. Auto-fail sight checks. Attack rolls have disadvantage, attacks against have advantage.",
@@ -2504,12 +2514,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		case "rest":
 			handleRest(w, r, charID)
 			return
+		case "cover":
+			handleSetCover(w, r, charID)
+			return
 		}
 	}
 	
 	var name, class, race, background string
 	var level, hp, maxHP, ac, str, dex, con, intl, wis, cha int
-	var tempHP, deathSuccesses, deathFailures int
+	var tempHP, deathSuccesses, deathFailures, coverBonus int
 	var isStable, isDead bool
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
@@ -2520,12 +2533,12 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(temp_hp, 0), COALESCE(death_save_successes, 0), COALESCE(death_save_failures, 0),
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
-			COALESCE(concentrating_on, '')
+			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0)
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
-		&conditionsJSON, &slotsUsedJSON, &concentratingOn)
+		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -2565,10 +2578,12 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	effectiveAC := ac + coverBonus
 	response := map[string]interface{}{
 		"id": charID, "name": name, "class": class, "race": race,
 		"background": background, "level": level,
-		"hp": hp, "max_hp": maxHP, "temp_hp": tempHP, "ac": ac,
+		"hp": hp, "max_hp": maxHP, "temp_hp": tempHP, 
+		"ac": ac, "effective_ac": effectiveAC,
 		"stats": map[string]int{
 			"str": str, "dex": dex, "con": con,
 			"int": intl, "wis": wis, "cha": cha,
@@ -2579,6 +2594,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		},
 		"conditions":          conditions,
 		"proficiency_bonus":   proficiencyBonus(level),
+	}
+	
+	if coverBonus > 0 {
+		coverType := "half"
+		if coverBonus >= 5 {
+			coverType = "three_quarters"
+		}
+		response["cover"] = coverType
+		response["cover_bonus"] = coverBonus
 	}
 	
 	// Death save info (only if relevant)
@@ -4113,7 +4137,57 @@ func handleConditionsList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"conditions": conditionEffects,
-		"note":       "Use POST /api/characters/{id}/conditions to apply a condition",
+		"cover": map[string]interface{}{
+			"none":            "+0 AC",
+			"half":            "+2 AC (behind low wall, another creature, etc.)",
+			"three_quarters":  "+5 AC (behind arrow slit, behind thick tree, etc.)",
+			"full":            "Can't be directly targeted by attacks or spells",
+		},
+		"note": "Use POST /api/characters/{id}/conditions to apply a condition. Use POST /api/characters/{id}/cover to set cover.",
+	})
+}
+
+// handleSetCover godoc
+// @Summary Set cover for a character
+// @Description Set cover bonus (none, half, three_quarters, full)
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{cover=string} true "Cover type (none, half, three_quarters, full)"
+// @Success 200 {object} map[string]interface{} "Cover set"
+// @Router /characters/{id}/cover [post]
+func handleSetCover(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	var req struct {
+		Cover string `json:"cover"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	coverType := strings.ToLower(strings.ReplaceAll(req.Cover, "-", "_"))
+	bonus, valid := coverBonuses[coverType]
+	if !valid {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "invalid_cover_type",
+			"valid_types": []string{"none", "half", "three_quarters", "full"},
+		})
+		return
+	}
+	
+	db.Exec("UPDATE characters SET cover_bonus = $1 WHERE id = $2", bonus, charID)
+	
+	message := fmt.Sprintf("Cover set to %s (+%d AC)", req.Cover, bonus)
+	if coverType == "full" {
+		message = "Full cover - can't be directly targeted by attacks or most spells"
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"cover":       req.Cover,
+		"ac_bonus":    bonus,
+		"message":     message,
 	})
 }
 

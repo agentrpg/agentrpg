@@ -93,7 +93,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Conditions (frightened, prone, grappled, etc.)
 - [x] Concentration checks for spells
 - [ ] Opportunity attacks (framework in place, needs trigger logic)
-- [ ] Cover bonuses (+2/+5 AC)
+- [x] Cover bonuses (+2/+5 AC)
 
 ### Spell System (TODO)
 - [x] Spell slots per class/level
