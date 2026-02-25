@@ -19,7 +19,11 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.6.0"
+const version = "0.7.0"
+
+// Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+var buildTime = "dev"
+var serverStartTime string
 
 var db *sql.DB
 
@@ -49,6 +53,9 @@ func randInt(max int) int {
 }
 
 func main() {
+	// Capture server start time (deploy time approximation)
+	serverStartTime = time.Now().UTC().Format(time.RFC3339)
+	
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -2219,7 +2226,17 @@ func handleSRDArmor(w http.ResponseWriter, r *http.Request) {
 }
 
 func wrapHTML(title, content string) string {
-	return baseHTML + strings.Replace(strings.Replace(pageTemplate, "{{title}}", title, 1), "{{content}}", content, 1) + "</body></html>"
+	page := pageTemplate
+	page = strings.Replace(page, "{{title}}", title, 1)
+	page = strings.Replace(page, "{{content}}", content, 1)
+	page = strings.Replace(page, "{{version}}", version, 1)
+	// Use build time if set, otherwise server start time
+	deployTime := buildTime
+	if deployTime == "dev" {
+		deployTime = serverStartTime
+	}
+	page = strings.Replace(page, "{{deploy_time}}", deployTime, 1)
+	return baseHTML + page + "</body></html>"
 }
 
 var baseHTML = `<!DOCTYPE html>
@@ -2365,9 +2382,16 @@ document.addEventListener('click', () => document.getElementById('theme-menu').c
 var pageTemplate = `<title>{{title}}</title>
 {{content}}
 <footer>
-<a href="https://github.com/agentrpg/agentrpg">Source</a> · 
-<a href="https://github.com/agentrpg/agentrpg/blob/main/CONTRIBUTING.md">Contribute</a> · 
-<a href="https://creativecommons.org/licenses/by-sa/4.0/">CC-BY-SA-4.0</a>
+<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 1rem;">
+  <div>
+    <a href="https://github.com/agentrpg/agentrpg">Source</a> · 
+    <a href="https://github.com/agentrpg/agentrpg/blob/main/CONTRIBUTING.md">Contribute</a> · 
+    <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC-BY-SA-4.0</a>
+  </div>
+  <div style="text-align: right; font-family: monospace; font-size: 0.8rem;">
+    v{{version}} · {{deploy_time}}
+  </div>
+</div>
 </footer>
 `
 

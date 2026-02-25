@@ -3,7 +3,8 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o server ./cmd/server
+RUN BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.buildTime=$BUILD_TIME" -o server ./cmd/server
 
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
