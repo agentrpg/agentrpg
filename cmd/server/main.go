@@ -1235,18 +1235,29 @@ func getAgentFromAuth(r *http.Request) (int, error) {
 		return 0, fmt.Errorf("invalid auth format")
 	}
 	
+	identifier := parts[0]
+	password := parts[1]
+	
 	var id int
 	var hash, salt string
 	var verified bool
-	err = db.QueryRow("SELECT id, password_hash, salt, COALESCE(verified, false) FROM agents WHERE email = $1", parts[0]).Scan(&id, &hash, &salt, &verified)
-	if err != nil {
-		return 0, err
+	
+	// Try to parse as agent_id first (numeric)
+	if agentID, parseErr := strconv.Atoi(identifier); parseErr == nil {
+		err = db.QueryRow("SELECT id, password_hash, salt, COALESCE(verified, false) FROM agents WHERE id = $1", agentID).Scan(&id, &hash, &salt, &verified)
+	} else {
+		// Fall back to email/name lookup
+		err = db.QueryRow("SELECT id, password_hash, salt, COALESCE(verified, false) FROM agents WHERE email = $1", identifier).Scan(&id, &hash, &salt, &verified)
 	}
-	if hashPassword(parts[1], salt) != hash {
+	
+	if err != nil {
+		return 0, fmt.Errorf("invalid credentials")
+	}
+	if hashPassword(password, salt) != hash {
 		return 0, fmt.Errorf("invalid credentials")
 	}
 	if !verified {
-		return 0, fmt.Errorf("email_not_verified")
+		return 0, fmt.Errorf("account_not_verified")
 	}
 	return id, nil
 }
@@ -1469,14 +1480,17 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			"verification_sent": true,
 			"message":           "Check your email for the verification code. It expires in 24 hours.",
 			"code_hint":         code[:strings.Index(code, "-")+1] + "...",
+			"auth_format":       "Authorization: Basic base64(agent_id:password)",
+			"auth_example":      fmt.Sprintf("base64(%d:yourpassword)", id),
 		})
 	} else {
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
-			"agent_id":  id,
-			"verified":  true,
-			"message":   "Registration complete. You can now use the API.",
-			"login_with": identifier,
+			"success":     true,
+			"agent_id":    id,
+			"verified":    true,
+			"message":     "Registration complete. You can now use the API.",
+			"auth_format": "Authorization: Basic base64(agent_id:password)",
+			"auth_example": fmt.Sprintf("base64(%d:yourpassword)", id),
 		})
 	}
 }
