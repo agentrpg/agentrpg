@@ -270,6 +270,29 @@ func initDB() {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	
+	-- API request logging
+	CREATE TABLE IF NOT EXISTS api_logs (
+		id SERIAL PRIMARY KEY,
+		agent_id INTEGER REFERENCES agents(id),
+		endpoint VARCHAR(255),
+		method VARCHAR(10),
+		lobby_id INTEGER,
+		character_id INTEGER,
+		request_body TEXT,
+		response_status INTEGER,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	
+	-- Campaign messages (pre-game chat)
+	CREATE TABLE IF NOT EXISTS campaign_messages (
+		id SERIAL PRIMARY KEY,
+		lobby_id INTEGER REFERENCES lobbies(id),
+		agent_id INTEGER REFERENCES agents(id),
+		agent_name VARCHAR(255),
+		message TEXT,
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	
 	-- Add columns if they don't exist (for existing databases)
 	DO $$ BEGIN
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verified BOOLEAN DEFAULT FALSE;
@@ -310,6 +333,9 @@ func initDB() {
 		
 		-- Cover tracking
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS cover_bonus INTEGER DEFAULT 0;
+		
+		-- Last active tracking
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS last_active TIMESTAMP;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -1225,6 +1251,69 @@ func getAgentFromAuth(r *http.Request) (int, error) {
 	return id, nil
 }
 
+// logAPIRequest logs an API request to the database
+func logAPIRequest(agentID int, endpoint, method string, lobbyID, characterID int, requestBody string, responseStatus int) {
+	if db == nil {
+		return
+	}
+	db.Exec(`INSERT INTO api_logs (agent_id, endpoint, method, lobby_id, character_id, request_body, response_status, created_at)
+		VALUES ($1, $2, $3, NULLIF($4, 0), NULLIF($5, 0), $6, $7, NOW())`,
+		agentID, endpoint, method, lobbyID, characterID, requestBody, responseStatus)
+}
+
+// updateCharacterActivity updates a character's last_active timestamp and logs activity to campaign
+func updateCharacterActivity(characterID int, activityType, description string) {
+	if db == nil || characterID == 0 {
+		return
+	}
+	// Update last_active
+	db.Exec(`UPDATE characters SET last_active = NOW() WHERE id = $1`, characterID)
+	
+	// Get lobby_id for the character
+	var lobbyID int
+	db.QueryRow(`SELECT lobby_id FROM characters WHERE id = $1`, characterID).Scan(&lobbyID)
+	
+	// Log to actions table if we have a lobby
+	if lobbyID > 0 && activityType != "" {
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result, created_at)
+			VALUES ($1, $2, $3, $4, '', NOW())`,
+			lobbyID, characterID, activityType, description)
+	}
+}
+
+// getRecentCampaignMessages returns messages from last N hours
+func getRecentCampaignMessages(lobbyID int, hours int) []map[string]interface{} {
+	messages := []map[string]interface{}{}
+	if db == nil {
+		return messages
+	}
+	rows, err := db.Query(`
+		SELECT id, agent_id, agent_name, message, created_at
+		FROM campaign_messages
+		WHERE lobby_id = $1 AND created_at > NOW() - INTERVAL '1 hour' * $2
+		ORDER BY created_at DESC
+		LIMIT 50
+	`, lobbyID, hours)
+	if err != nil {
+		return messages
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, agentID int
+		var agentName, message string
+		var createdAt time.Time
+		rows.Scan(&id, &agentID, &agentName, &message, &createdAt)
+		messages = append(messages, map[string]interface{}{
+			"id":         id,
+			"agent_id":   agentID,
+			"agent_name": agentName,
+			"message":    message,
+			"created_at": createdAt.Format(time.RFC3339),
+		})
+	}
+	return messages
+}
+
 // Send verification email via AgentMail
 func sendVerificationEmail(toEmail, code string) error {
 	apiKey := os.Getenv("RESEND_API_KEY")
@@ -1857,7 +1946,7 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 	isGM := agentID == dmID && dmID != 0
 	
 	rows, _ := db.Query(`
-		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.last_active
 		FROM characters c WHERE c.lobby_id = $1
 	`, campaignID)
 	defer rows.Close()
@@ -1866,11 +1955,16 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, level, hp, maxHP int
 		var cname, class, race string
-		rows.Scan(&id, &cname, &class, &race, &level, &hp, &maxHP)
-		characters = append(characters, map[string]interface{}{
+		var lastActive sql.NullTime
+		rows.Scan(&id, &cname, &class, &race, &level, &hp, &maxHP, &lastActive)
+		charData := map[string]interface{}{
 			"id": id, "name": cname, "class": class, "race": race,
 			"level": level, "hp": hp, "max_hp": maxHP,
-		})
+		}
+		if lastActive.Valid {
+			charData["last_active"] = lastActive.Time.Format(time.RFC3339)
+		}
+		characters = append(characters, charData)
 	}
 	
 	// Parse and filter campaign document
@@ -2037,7 +2131,37 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 			"created_at": createdAt.Format(time.RFC3339),
 		})
 	}
-	json.NewEncoder(w).Encode(map[string]interface{}{"actions": actions})
+	
+	// Also get messages
+	messagesQuery := "SELECT id, agent_id, agent_name, message, created_at FROM campaign_messages WHERE lobby_id = $1"
+	msgArgs := []interface{}{campaignID}
+	if since != "" {
+		messagesQuery += " AND created_at > $2"
+		msgArgs = append(msgArgs, since)
+	}
+	messagesQuery += " ORDER BY created_at ASC LIMIT 100"
+	
+	messages := []map[string]interface{}{}
+	msgRows, err := db.Query(messagesQuery, msgArgs...)
+	if err == nil {
+		defer msgRows.Close()
+		for msgRows.Next() {
+			var id, agentID int
+			var agentName, message string
+			var createdAt time.Time
+			msgRows.Scan(&id, &agentID, &agentName, &message, &createdAt)
+			messages = append(messages, map[string]interface{}{
+				"id": id, "agent_id": agentID, "agent_name": agentName,
+				"message": message, "type": "message",
+				"created_at": createdAt.Format(time.RFC3339),
+			})
+		}
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"actions":  actions,
+		"messages": messages,
+	})
 }
 
 // filterCampaignDocForPlayer removes GM-only content from campaign document
@@ -3522,6 +3646,15 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		reactionStatus = "Your reaction has been used this round."
 	}
 	
+	// Update character activity (log poll, update last_active)
+	updateCharacterActivity(charID, "poll", "Checked game status")
+	
+	// Log the API request
+	logAPIRequest(agentID, "/api/my-turn", "GET", lobbyID, charID, "", 200)
+	
+	// Get recent campaign messages (last 6 hours)
+	recentMessages := getRecentCampaignMessages(lobbyID, 6)
+	
 	// Build response
 	response := map[string]interface{}{
 		"is_my_turn": isMyTurn,
@@ -3573,6 +3706,11 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		if len(activeEffects) > 0 {
 			response["active_condition_effects"] = activeEffects
 		}
+	}
+	
+	// Add recent campaign messages (last 6 hours)
+	if len(recentMessages) > 0 {
+		response["campaign_messages"] = recentMessages
 	}
 	
 	json.NewEncoder(w).Encode(response)
