@@ -7015,7 +7015,7 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 			
 			var contentBuilder strings.Builder
 			contentBuilder.WriteString("<h1>Watch</h1>\n")
-			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid #333;padding:1em;margin:1em 0;border-radius:8px;background:#1a1a1a}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:#aaa;margin:0.5em 0}.players{font-size:0.9em;color:#888}</style>`)
+			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid var(--note-border);padding:1em;margin:1em 0;border-radius:8px;background:var(--note-bg)}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:#aaa;margin:0.5em 0}.players{font-size:0.9em;color:#888}</style>`)
 			
 			if hasActive {
 				contentBuilder.WriteString("<h2>🎮 Active Campaigns</h2>\n")
@@ -7120,7 +7120,7 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 	content.WriteString(`
 <style>
 .campaigns-grid{display:grid;gap:1.5em}
-.campaign-card{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:1.5em}
+.campaign-card{background:var(--note-bg);border:1px solid var(--note-border);border-radius:8px;padding:1.5em}
 .campaign-card h3{margin:0 0 0.5em 0}
 .campaign-card .setting{color:#aaa;font-style:italic;margin:0.5em 0;max-height:4em;overflow:hidden}
 .campaign-card .meta{color:#888;font-size:0.9em}
@@ -7128,7 +7128,7 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 .badge.recruiting{background:#2a4a2a;color:#8f8}
 .badge.active{background:#4a2a2a;color:#f88}
 .badge.completed{background:#2a2a4a;color:#88f}
-.filters{margin:1em 0;padding:1em;background:#1a1a1a;border-radius:8px}
+.filters{margin:1em 0;padding:1em;background:var(--note-bg);border-radius:8px}
 </style>
 
 <h1>Campaigns</h1>
@@ -7443,18 +7443,18 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 .badge.recruiting{background:#2a4a2a;color:#8f8}
 .badge.active{background:#4a2a2a;color:#f88}
 .meta{color:#888;margin:1em 0}
-.setting{background:#1a1a1a;padding:1.5em;border-radius:8px;margin:1em 0;white-space:pre-wrap;line-height:1.6}
+.setting{background:var(--note-bg);padding:1.5em;border-radius:8px;margin:1em 0;white-space:pre-wrap;line-height:1.6}
 .party-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1em}
-.party-member{background:#1a1a1a;padding:1em;border-radius:8px}
+.party-member{background:var(--note-bg);padding:1em;border-radius:8px}
 .party-member h4{margin:0 0 0.5em 0}
 .party-member .healthy{color:#8f8}
 .party-member .wounded{color:#ff8}
 .party-member .critical{color:#f88}
-.observation{background:#1a1a1a;padding:1em;margin:0.5em 0;border-radius:4px;border-left:3px solid #446}
+.observation{background:var(--note-bg);padding:1em;margin:0.5em 0;border-radius:4px;border-left:3px solid #446}
 .observation .observer{font-weight:bold}
 .observation .type{color:#888;font-size:0.9em}
 .observation .time{color:#666;font-size:0.8em}
-.feed-item{padding:0.5em 1em;margin:0.5em 0;background:#1a1a1a;border-radius:4px}
+.feed-item{padding:0.5em 1em;margin:0.5em 0;background:var(--note-bg);border-radius:4px}
 .feed-item.action{border-left:3px solid #464}
 .feed-item.message{border-left:3px solid #446}
 .feed-item.poll{border-left:3px solid #444}
