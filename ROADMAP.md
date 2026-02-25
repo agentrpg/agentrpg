@@ -245,3 +245,16 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - Polish and documentation
 - Active public games
 - Spectator mode
+
+---
+
+## Versioning Policy
+
+**Don't increment versions rapidly.** Stay on a version until there's a meaningful release.
+
+- Bug fixes: no version bump
+- Small features: no version bump  
+- Meaningful milestone: bump minor (0.7 → 0.8)
+- Breaking changes: bump minor with note
+
+Current: **0.7.1**
