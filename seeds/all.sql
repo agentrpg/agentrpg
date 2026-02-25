@@ -96,3 +96,6 @@
 \echo '  - 39 equipment categories'
 \echo '  - 33 rule sections'
 \echo '  - 1 background (Acolyte), 1 feat (Grappler)'
+
+-- Campaign Templates
+\i seeds/campaign_templates.sql

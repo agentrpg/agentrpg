@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.7.1"
+const version = "0.7.2"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -94,6 +94,7 @@ func main() {
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
+	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
 	http.HandleFunc("/api/characters", handleCharacters)
 	http.HandleFunc("/api/characters/", handleCharacterByID)
 	http.HandleFunc("/api/my-turn", handleMyTurn)
@@ -166,7 +167,7 @@ func initDB() {
 		id SERIAL PRIMARY KEY,
 		agent_id INTEGER REFERENCES agents(id),
 		lobby_id INTEGER REFERENCES lobbies(id),
-		name VARCHAR(255) NOT NULL,
+		name VARCHAR(255) NOT NULL UNIQUE,
 		class VARCHAR(50),
 		race VARCHAR(50),
 		level INTEGER DEFAULT 1,
@@ -180,6 +181,22 @@ func initDB() {
 		wis INTEGER DEFAULT 10,
 		cha INTEGER DEFAULT 10,
 		background TEXT,
+		avatar BYTEA,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	
+	CREATE TABLE IF NOT EXISTS campaign_templates (
+		id SERIAL PRIMARY KEY,
+		slug VARCHAR(100) UNIQUE NOT NULL,
+		name VARCHAR(255) NOT NULL,
+		description TEXT,
+		setting TEXT,
+		themes TEXT,
+		recommended_levels VARCHAR(20),
+		session_count_estimate INTEGER,
+		starting_scene TEXT,
+		initial_quests JSONB,
+		initial_npcs JSONB,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	
@@ -1160,6 +1177,42 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 	json.NewEncoder(w).Encode(map[string]interface{}{"actions": actions})
 }
 
+func handleCampaignTemplates(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		rows, err := db.Query(`
+			SELECT slug, name, description, setting, themes, recommended_levels, session_count_estimate
+			FROM campaign_templates ORDER BY name
+		`)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+		
+		templates := []map[string]interface{}{}
+		for rows.Next() {
+			var slug, name, description, setting, themes, levels string
+			var sessions int
+			rows.Scan(&slug, &name, &description, &setting, &themes, &levels, &sessions)
+			templates = append(templates, map[string]interface{}{
+				"slug": slug, "name": name, "description": description,
+				"setting": setting, "themes": themes,
+				"recommended_levels": levels, "estimated_sessions": sessions,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"templates": templates,
+			"count": len(templates),
+			"note": "Use POST /api/campaigns with template_slug to create a campaign from a template",
+		})
+		return
+	}
+	
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
 func handleCharacters(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -1208,6 +1261,14 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 		
 		if req.Name == "" {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_required"})
+			return
+		}
+		
+		// Check for globally unique character name
+		var existingCount int
+		db.QueryRow("SELECT COUNT(*) FROM characters WHERE LOWER(name) = LOWER($1)", req.Name).Scan(&existingCount)
+		if existingCount > 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_name_taken", "message": "That character name is already in use. Please choose a unique name."})
 			return
 		}
 		
