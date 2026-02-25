@@ -27,6 +27,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -123,6 +124,7 @@ func main() {
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
+	http.HandleFunc("/api/conditions", handleConditionsList)
 	
 	// SRD endpoints
 	// SRD search endpoints (paginated, filterable)
@@ -1753,6 +1755,23 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 			}
 			handleCampaignObservations(w, r, campaignID)
 			return
+		case "combat":
+			// Combat management endpoints
+			if len(parts) > 2 {
+				switch parts[2] {
+				case "start":
+					handleCombatStart(w, r, campaignID)
+					return
+				case "end":
+					handleCombatEnd(w, r, campaignID)
+					return
+				case "next":
+					handleCombatNext(w, r, campaignID)
+					return
+				}
+			}
+			handleCombatStatus(w, r, campaignID)
+			return
 		}
 	}
 	
@@ -2447,7 +2466,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 
 // handleCharacterByID godoc
 // @Summary Get character sheet
-// @Description Returns full character details including stats and modifiers
+// @Description Returns full character details including stats, modifiers, conditions, and spell slots
 // @Tags Characters
 // @Produce json
 // @Param id path int true "Character ID"
@@ -2458,28 +2477,97 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	idStr := strings.TrimPrefix(r.URL.Path, "/api/characters/")
-	charID, err := strconv.Atoi(idStr)
+	parts := strings.Split(idStr, "/")
+	charID, err := strconv.Atoi(parts[0])
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_character_id"})
 		return
 	}
 	
+	// Handle sub-routes
+	if len(parts) > 1 {
+		switch parts[1] {
+		case "damage":
+			handleDamage(w, r, charID)
+			return
+		case "heal":
+			handleHeal(w, r, charID)
+			return
+		case "conditions":
+			if r.Method == "DELETE" {
+				handleRemoveCondition(w, r, charID)
+			} else {
+				handleAddCondition(w, r, charID)
+			}
+			return
+		case "rest":
+			handleRest(w, r, charID)
+			return
+		}
+	}
+	
 	var name, class, race, background string
 	var level, hp, maxHP, ac, str, dex, con, intl, wis, cha int
+	var tempHP, deathSuccesses, deathFailures int
+	var isStable, isDead bool
+	var conditionsJSON, slotsUsedJSON []byte
+	var concentratingOn string
+	
 	err = db.QueryRow(`
-		SELECT name, class, race, background, level, hp, max_hp, ac, str, dex, con, intl, wis, cha
+		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
+			str, dex, con, intl, wis, cha,
+			COALESCE(temp_hp, 0), COALESCE(death_save_successes, 0), COALESCE(death_save_failures, 0),
+			COALESCE(is_stable, false), COALESCE(is_dead, false),
+			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
+			COALESCE(concentrating_on, '')
 		FROM characters WHERE id = $1
-	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac, &str, &dex, &con, &intl, &wis, &cha)
+	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
+		&str, &dex, &con, &intl, &wis, &cha,
+		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
+		&conditionsJSON, &slotsUsedJSON, &concentratingOn)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
 		return
 	}
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	var slotsUsed map[string]int
+	json.Unmarshal(slotsUsedJSON, &slotsUsed)
+	
+	// Get total spell slots for class/level
+	totalSlots := getSpellSlots(class, level)
+	
+	// Calculate remaining slots
+	remainingSlots := map[string]int{}
+	for lvl, total := range totalSlots {
+		key := fmt.Sprintf("%d", lvl)
+		used := slotsUsed[key]
+		remainingSlots[key] = total - used
+	}
+	
+	// Calculate spell save DC
+	classKey := strings.ToLower(class)
+	spellMod := 0
+	spellAbility := ""
+	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
+		spellAbility = c.Spellcasting
+		switch c.Spellcasting {
+		case "INT":
+			spellMod = modifier(intl)
+		case "WIS":
+			spellMod = modifier(wis)
+		case "CHA":
+			spellMod = modifier(cha)
+		}
+	}
+	
+	response := map[string]interface{}{
 		"id": charID, "name": name, "class": class, "race": race,
 		"background": background, "level": level,
-		"hp": hp, "max_hp": maxHP, "ac": ac,
+		"hp": hp, "max_hp": maxHP, "temp_hp": tempHP, "ac": ac,
 		"stats": map[string]int{
 			"str": str, "dex": dex, "con": con,
 			"int": intl, "wis": wis, "cha": cha,
@@ -2488,7 +2576,39 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
 			"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
 		},
-	})
+		"conditions":          conditions,
+		"proficiency_bonus":   proficiencyBonus(level),
+	}
+	
+	// Death save info (only if relevant)
+	if hp == 0 && !isDead {
+		response["death_saves"] = map[string]interface{}{
+			"successes": deathSuccesses,
+			"failures":  deathFailures,
+			"stable":    isStable,
+		}
+	}
+	if isDead {
+		response["is_dead"] = true
+	}
+	
+	// Spell info (only for casters)
+	if len(totalSlots) > 0 {
+		response["spell_slots"] = map[string]interface{}{
+			"total":     totalSlots,
+			"remaining": remainingSlots,
+		}
+		response["spell_save_dc"] = spellSaveDC(level, spellMod)
+		response["spell_attack_bonus"] = spellMod + proficiencyBonus(level)
+		response["spellcasting_ability"] = spellAbility
+	}
+	
+	// Concentration
+	if concentratingOn != "" {
+		response["concentrating_on"] = concentratingOn
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleMyTurn godoc
@@ -3217,10 +3337,12 @@ func handleObserve(w http.ResponseWriter, r *http.Request) {
 
 // handleRoll godoc
 // @Summary Roll dice
-// @Description Fair dice using crypto/rand. No authentication required.
+// @Description Fair dice using crypto/rand. Supports advantage/disadvantage for d20s. No authentication required.
 // @Tags Actions
 // @Produce json
 // @Param dice query string false "Dice notation (e.g., 2d6, 1d20)" default(1d20)
+// @Param advantage query bool false "Roll with advantage (d20 only)"
+// @Param disadvantage query bool false "Roll with disadvantage (d20 only)"
 // @Success 200 {object} map[string]interface{} "Dice roll result with individual rolls and total"
 // @Router /roll [get]
 func handleRoll(w http.ResponseWriter, r *http.Request) {
@@ -3230,6 +3352,9 @@ func handleRoll(w http.ResponseWriter, r *http.Request) {
 	if dice == "" {
 		dice = "1d20"
 	}
+	
+	advantage := r.URL.Query().Get("advantage") == "true"
+	disadvantage := r.URL.Query().Get("disadvantage") == "true"
 	
 	parts := strings.Split(strings.ToLower(dice), "d")
 	if len(parts) != 2 {
@@ -3244,9 +3369,595 @@ func handleRoll(w http.ResponseWriter, r *http.Request) {
 	if sides < 2 { sides = 2 }
 	if sides > 100 { sides = 100 }
 	
+	// Handle advantage/disadvantage for d20
+	if sides == 20 && count == 1 && (advantage || disadvantage) {
+		var result, roll1, roll2 int
+		rollType := "normal"
+		if advantage && !disadvantage {
+			result, roll1, roll2 = rollWithAdvantage()
+			rollType = "advantage"
+		} else if disadvantage && !advantage {
+			result, roll1, roll2 = rollWithDisadvantage()
+			rollType = "disadvantage"
+		} else {
+			// Both cancel out
+			result = rollDie(20)
+			roll1, roll2 = result, result
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"dice": dice, "rolls": []int{roll1, roll2}, "total": result, "type": rollType,
+		})
+		return
+	}
+	
 	rolls, total := rollDice(count, sides)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"dice": dice, "rolls": rolls, "total": total,
+	})
+}
+
+// handleCombatStart godoc
+// @Summary Start combat (GM only)
+// @Description Roll initiative for all characters and enter combat mode
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Combat started with initiative order"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Only GM can start combat"
+// @Router /campaigns/{id}/combat/start [post]
+func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_start_combat"})
+		return
+	}
+	
+	// Roll initiative for all characters in the campaign
+	rows, err := db.Query(`
+		SELECT c.id, c.name, c.dex, COALESCE(c.initiative_bonus, 0)
+		FROM characters c WHERE c.lobby_id = $1
+	`, campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+	
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+		DexScore   int    `json:"dex_score"`
+	}
+	
+	entries := []InitEntry{}
+	for rows.Next() {
+		var id, dex, initBonus int
+		var name string
+		rows.Scan(&id, &name, &dex, &initBonus)
+		
+		init := rollInitiative(modifier(dex), initBonus)
+		db.Exec("UPDATE characters SET current_initiative = $1 WHERE id = $2", init, id)
+		
+		entries = append(entries, InitEntry{ID: id, Name: name, Initiative: init, DexScore: dex})
+	}
+	
+	// Sort by initiative (highest first), then by DEX (highest first)
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Initiative != entries[j].Initiative {
+			return entries[i].Initiative > entries[j].Initiative
+		}
+		return entries[i].DexScore > entries[j].DexScore
+	})
+	
+	// Store combat state
+	turnOrderJSON, _ := json.Marshal(entries)
+	db.Exec(`
+		INSERT INTO combat_state (lobby_id, round_number, current_turn_index, turn_order, active)
+		VALUES ($1, 1, 0, $2, true)
+		ON CONFLICT (lobby_id) DO UPDATE SET
+			round_number = 1, current_turn_index = 0, turn_order = $2, active = true
+	`, campaignID, turnOrderJSON)
+	
+	// Reset reactions for all characters
+	db.Exec("UPDATE characters SET reaction_used = false WHERE lobby_id = $1", campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"round":        1,
+		"turn_order":   entries,
+		"current_turn": entries[0].Name,
+	})
+}
+
+// handleCombatEnd godoc
+// @Summary End combat (GM only)
+// @Description End combat mode and clear initiative
+// @Tags Combat
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Combat ended"
+// @Router /campaigns/{id}/combat/end [post]
+func handleCombatEnd(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_end_combat"})
+		return
+	}
+	
+	db.Exec("UPDATE combat_state SET active = false WHERE lobby_id = $1", campaignID)
+	
+	// Clear temporary combat conditions
+	db.Exec("UPDATE characters SET conditions = '[]', reaction_used = false WHERE lobby_id = $1", campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "Combat ended"})
+}
+
+// handleCombatNext godoc
+// @Summary Advance to next turn (GM only)
+// @Description Move to the next character in initiative order
+// @Tags Combat
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Turn advanced"
+// @Router /campaigns/{id}/combat/next [post]
+func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_advance_turn"})
+		return
+	}
+	
+	var round, turnIndex int
+	var turnOrderJSON []byte
+	var active bool
+	err = db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active 
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&round, &turnIndex, &turnOrderJSON, &active)
+	
+	if err != nil || !active {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_active_combat"})
+		return
+	}
+	
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	if len(entries) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+		return
+	}
+	
+	// Clear start-of-turn conditions for current character
+	currentID := entries[turnIndex].ID
+	db.Exec("UPDATE characters SET reaction_used = false WHERE id = $1", currentID)
+	
+	// Remove "dodging" condition at end of turn
+	var condJSON []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", currentID).Scan(&condJSON)
+	var conds []string
+	json.Unmarshal(condJSON, &conds)
+	newConds := []string{}
+	for _, c := range conds {
+		if c != "dodging" {
+			newConds = append(newConds, c)
+		}
+	}
+	updatedConds, _ := json.Marshal(newConds)
+	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, currentID)
+	
+	// Advance turn
+	turnIndex++
+	if turnIndex >= len(entries) {
+		turnIndex = 0
+		round++
+	}
+	
+	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2 WHERE lobby_id = $3", turnIndex, round, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"round":        round,
+		"current_turn": entries[turnIndex].Name,
+		"turn_index":   turnIndex,
+	})
+}
+
+// handleCombatStatus godoc
+// @Summary Get combat status
+// @Description Get current combat state including initiative order and whose turn it is
+// @Tags Combat
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Success 200 {object} map[string]interface{} "Combat status"
+// @Router /campaigns/{id}/combat [get]
+func handleCombatStatus(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	var round, turnIndex int
+	var turnOrderJSON []byte
+	var active bool
+	err := db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active 
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&round, &turnIndex, &turnOrderJSON, &active)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"in_combat": false,
+			"message":   "No combat active",
+		})
+		return
+	}
+	
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	currentTurn := ""
+	currentID := 0
+	if len(entries) > turnIndex {
+		currentTurn = entries[turnIndex].Name
+		currentID = entries[turnIndex].ID
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"in_combat":         active,
+		"round":             round,
+		"turn_order":        entries,
+		"current_turn":      currentTurn,
+		"current_turn_id":   currentID,
+		"current_turn_index": turnIndex,
+	})
+}
+
+// handleDamage godoc
+// @Summary Apply damage to a character (GM only)
+// @Description Deal damage to a character, tracking HP, temp HP, death saves
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{damage=integer,damage_type=string} true "Damage to apply"
+// @Success 200 {object} map[string]interface{} "Damage applied"
+// @Router /characters/{id}/damage [post]
+func handleDamage(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	var req struct {
+		Damage     int    `json:"damage"`
+		DamageType string `json:"damage_type"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	if req.Damage <= 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "damage_must_be_positive"})
+		return
+	}
+	
+	var hp, maxHP, tempHP int
+	var concentratingOn string
+	err := db.QueryRow(`
+		SELECT hp, max_hp, COALESCE(temp_hp, 0), COALESCE(concentrating_on, '')
+		FROM characters WHERE id = $1
+	`, charID).Scan(&hp, &maxHP, &tempHP, &concentratingOn)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	damage := req.Damage
+	result := map[string]interface{}{
+		"damage_dealt": damage,
+	}
+	
+	// Apply to temp HP first
+	if tempHP > 0 {
+		if damage <= tempHP {
+			tempHP -= damage
+			damage = 0
+		} else {
+			damage -= tempHP
+			tempHP = 0
+		}
+		result["temp_hp_absorbed"] = req.Damage - damage
+	}
+	
+	// Apply remaining to HP
+	hp -= damage
+	
+	// Check for unconscious/death
+	if hp <= 0 {
+		if hp <= -maxHP {
+			// Massive damage - instant death
+			db.Exec("UPDATE characters SET hp = 0, temp_hp = $1, is_dead = true WHERE id = $2", tempHP, charID)
+			result["status"] = "INSTANT_DEATH"
+			result["message"] = "Massive damage (damage exceeded max HP) - instant death!"
+		} else {
+			// Fall unconscious, start death saves
+			db.Exec("UPDATE characters SET hp = 0, temp_hp = $1, concentrating_on = NULL WHERE id = $2", tempHP, charID)
+			result["status"] = "unconscious"
+			result["message"] = "Dropped to 0 HP - unconscious and making death saves"
+		}
+		hp = 0
+	} else {
+		db.Exec("UPDATE characters SET hp = $1, temp_hp = $2 WHERE id = $3", hp, tempHP, charID)
+		result["status"] = "damaged"
+	}
+	
+	result["hp"] = hp
+	result["max_hp"] = maxHP
+	result["temp_hp"] = tempHP
+	
+	// Concentration check if concentrating
+	if concentratingOn != "" && hp > 0 {
+		dc := 10
+		if req.Damage/2 > 10 {
+			dc = req.Damage / 2
+		}
+		result["concentration_check_required"] = true
+		result["concentration_dc"] = dc
+		result["concentrating_on"] = concentratingOn
+	}
+	
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleHeal godoc
+// @Summary Heal a character
+// @Description Restore HP to a character
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{healing=integer} true "Healing amount"
+// @Success 200 {object} map[string]interface{} "Healing applied"
+// @Router /characters/{id}/heal [post]
+func handleHeal(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	var req struct {
+		Healing int `json:"healing"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	var hp, maxHP int
+	var isStable bool
+	db.QueryRow("SELECT hp, max_hp, COALESCE(is_stable, false) FROM characters WHERE id = $1", charID).Scan(&hp, &maxHP, &isStable)
+	
+	wasUnconscious := hp == 0
+	hp += req.Healing
+	if hp > maxHP {
+		hp = maxHP
+	}
+	
+	// Reset death saves if healed from 0
+	if wasUnconscious {
+		db.Exec("UPDATE characters SET hp = $1, death_save_successes = 0, death_save_failures = 0, is_stable = false WHERE id = $2", hp, charID)
+	} else {
+		db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", hp, charID)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":          true,
+		"hp":               hp,
+		"max_hp":           maxHP,
+		"healing_applied":  req.Healing,
+		"regained_consciousness": wasUnconscious && hp > 0,
+	})
+}
+
+// handleAddCondition godoc
+// @Summary Add a condition to a character (GM only)
+// @Description Apply a condition like frightened, poisoned, prone, etc.
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{condition=string} true "Condition to add"
+// @Success 200 {object} map[string]interface{} "Condition added"
+// @Router /characters/{id}/conditions [post]
+func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	var req struct {
+		Condition string `json:"condition"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	condition := strings.ToLower(req.Condition)
+	
+	// Validate condition
+	if _, valid := conditionEffects[condition]; !valid {
+		validConditions := make([]string, 0, len(conditionEffects))
+		for k := range conditionEffects {
+			validConditions = append(validConditions, k)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":            "invalid_condition",
+			"valid_conditions": validConditions,
+		})
+		return
+	}
+	
+	var condJSON []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&condJSON)
+	var conditions []string
+	json.Unmarshal(condJSON, &conditions)
+	
+	// Check if already has condition
+	for _, c := range conditions {
+		if c == condition {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":    true,
+				"message":    "Already has condition",
+				"conditions": conditions,
+			})
+			return
+		}
+	}
+	
+	conditions = append(conditions, condition)
+	updated, _ := json.Marshal(conditions)
+	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"condition":  condition,
+		"effect":     conditionEffects[condition],
+		"conditions": conditions,
+	})
+}
+
+// handleRemoveCondition godoc
+// @Summary Remove a condition from a character
+// @Description Remove a condition like frightened, poisoned, prone, etc.
+// @Tags Combat
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{condition=string} true "Condition to remove"
+// @Success 200 {object} map[string]interface{} "Condition removed"
+// @Router /characters/{id}/conditions [delete]
+func handleRemoveCondition(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	var req struct {
+		Condition string `json:"condition"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	condition := strings.ToLower(req.Condition)
+	
+	var condJSON []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&condJSON)
+	var conditions []string
+	json.Unmarshal(condJSON, &conditions)
+	
+	newConditions := []string{}
+	removed := false
+	for _, c := range conditions {
+		if c == condition {
+			removed = true
+		} else {
+			newConditions = append(newConditions, c)
+		}
+	}
+	
+	updated, _ := json.Marshal(newConditions)
+	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"removed":    removed,
+		"conditions": newConditions,
+	})
+}
+
+// handleRestoreSpellSlots godoc
+// @Summary Restore spell slots (long rest)
+// @Description Restore all spell slots for a character after a long rest
+// @Tags Combat
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Spell slots restored"
+// @Router /characters/{id}/rest [post]
+func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Reset spell slots, HP, and death saves
+	db.Exec(`
+		UPDATE characters SET
+			spell_slots_used = '{}',
+			death_save_successes = 0,
+			death_save_failures = 0,
+			is_stable = false,
+			concentrating_on = NULL,
+			conditions = '[]'
+		WHERE id = $1
+	`, charID)
+	
+	// Restore HP to max
+	db.Exec("UPDATE characters SET hp = max_hp WHERE id = $1", charID)
+	
+	var class string
+	var level, hp, maxHP int
+	db.QueryRow("SELECT class, level, hp, max_hp FROM characters WHERE id = $1", charID).Scan(&class, &level, &hp, &maxHP)
+	
+	slots := getSpellSlots(class, level)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"hp":           maxHP,
+		"spell_slots":  slots,
+		"message":      "Long rest complete. HP and spell slots restored.",
+	})
+}
+
+// handleConditionsList godoc
+// @Summary List all 5e conditions
+// @Description Returns all standard 5e conditions with their effects
+// @Tags Combat
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of conditions"
+// @Router /conditions [get]
+func handleConditionsList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"conditions": conditionEffects,
+		"note":       "Use POST /api/characters/{id}/conditions to apply a condition",
 	})
 }
 
@@ -3446,7 +4157,7 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 			charRows.Scan(&charID, &charName, &class, &race, &level, &campaignName, &campaignID)
 			campaign := "Not in a campaign"
 			if campaignName.Valid {
-				campaign = fmt.Sprintf(`<a href="/api/campaigns/%d">%s</a>`, campaignID.Int64, campaignName.String)
+				campaign = fmt.Sprintf(`<a href="/campaign/%d">%s</a>`, campaignID.Int64, campaignName.String)
 			}
 			characters.WriteString(fmt.Sprintf("<li><strong>%s</strong> — Level %d %s %s (%s)</li>\n", charName, level, race, class, campaign))
 		}
@@ -3466,7 +4177,7 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 			var cID int
 			var cName, cStatus string
 			gmRows.Scan(&cID, &cName, &cStatus)
-			gmCampaigns.WriteString(fmt.Sprintf("<li><a href=\"/api/campaigns/%d\">%s</a> (%s)</li>\n", cID, cName, cStatus))
+			gmCampaigns.WriteString(fmt.Sprintf("<li><a href="/campaign/%d">%s</a> (%s)</li>\n", cID, cName, cStatus))
 		}
 		gmRows.Close()
 	}
@@ -3785,7 +4496,7 @@ func handleCharacterSheet(w http.ResponseWriter, r *http.Request) {
 	
 	campaignInfo := "Not in a campaign"
 	if campaignName.Valid {
-		campaignInfo = fmt.Sprintf(`<a href="/api/campaigns/%d">%s</a>`, campaignID.Int64, campaignName.String)
+		campaignInfo = fmt.Sprintf(`<a href="/campaign/%d">%s</a>`, campaignID.Int64, campaignName.String)
 	}
 	
 	historyHTML := "<p class='muted'>No actions yet.</p>"
