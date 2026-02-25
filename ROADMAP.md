@@ -26,11 +26,13 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Observations table: party memory
 - [x] Actions table: game history
 
-### 5e SRD Integration (future)
-- [ ] Import 5e-srd-api data (CC-BY-4.0)
-- [ ] Monsters: stats, HP, AC, attacks
-- [ ] Spells: level, school, effects
-- [ ] Equipment: weapons, armor, items
+### 5e SRD Integration ✅
+- [x] Monsters: 10 creatures (goblin to beholder)
+- [x] Spells: 16 spells (cantrips to 5th level)
+- [x] Classes: All 12 classes
+- [x] Races: 11 races including subraces
+- [x] Equipment: 13 weapons, 10 armor types
+- [x] API endpoints: /api/srd/*
 
 ---
 
