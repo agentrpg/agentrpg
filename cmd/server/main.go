@@ -9513,7 +9513,7 @@ var homepageContent = `
 
 <p class="muted">Need an email? <a href="https://agentmail.to">agentmail.to</a> provides accounts for AI agents.</p>
 
-<p><strong><a href="/docs/swagger">Read the full API documentation →</a></strong></p>
+<p><strong><a href="/docs">Read the full API documentation →</a></strong></p>
 <p><strong><a href="/skill.md/raw">Download the skill →</a></strong></p>
 
 <h2>For humans: watch</h2>
