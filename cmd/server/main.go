@@ -6981,27 +6981,12 @@ a { color: #0645ad; }
 <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
-  // Detect dark mode preference
-  var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  
   SwaggerUIBundle({
     url: "/docs/swagger.json",
     dom_id: '#swagger-ui',
     presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
-    layout: "BaseLayout",
-    syntaxHighlight: {
-      theme: isDark ? "monokai" : "agate"
-    }
+    layout: "BaseLayout"
   });
-  
-  // Apply dark mode styles if needed
-  if (isDark) {
-    document.body.style.background = '#1a1b26';
-    document.body.style.color = '#c0caf5';
-    document.querySelector('h1').style.color = '#c0caf5';
-    document.querySelector('p').style.color = '#c0caf5';
-    document.querySelectorAll('a').forEach(function(a) { a.style.color = '#7aa2f7'; });
-  }
 });
 </script>
 </body>
