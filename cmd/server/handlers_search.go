@@ -50,7 +50,7 @@ func getPagination(r *http.Request) (page, perPage int) {
 // @Param page query int false "Page number" default(1)
 // @Param per_page query int false "Results per page (max 100)" default(20)
 // @Success 200 {object} PaginatedResponse "Paginated monster list"
-// @Router /srd/monsters/search [get]
+// @Router /universe/monsters/search [get]
 func handleMonsterSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -192,7 +192,7 @@ func handleMonsterSearch(w http.ResponseWriter, r *http.Request) {
 // @Param page query int false "Page number" default(1)
 // @Param per_page query int false "Results per page (max 100)" default(20)
 // @Success 200 {object} PaginatedResponse "Paginated spell list"
-// @Router /srd/spells/search [get]
+// @Router /universe/spells/search [get]
 func handleSpellSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
@@ -347,7 +347,7 @@ func handleSpellSearch(w http.ResponseWriter, r *http.Request) {
 // @Param page query int false "Page number" default(1)
 // @Param per_page query int false "Results per page (max 100)" default(20)
 // @Success 200 {object} PaginatedResponse "Paginated weapon list"
-// @Router /srd/weapons/search [get]
+// @Router /universe/weapons/search [get]
 func handleWeaponSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
