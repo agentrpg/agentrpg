@@ -6893,29 +6893,98 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		obsRows.Close()
 	}
 	
-	// Get action feed
-	var actions strings.Builder
+	// Get combined activity feed (actions + messages + polls)
+	type FeedItem struct {
+		Time     time.Time
+		Type     string
+		Actor    string
+		Content  string
+		Result   string
+	}
+	var feedItems []FeedItem
+	
+	// Get actions (including polls)
 	actionRows, _ := db.Query(`
-		SELECT a.action_type, a.description, a.result, c.name, a.created_at
+		SELECT a.action_type, a.description, COALESCE(a.result, ''), COALESCE(c.name, 'System'), a.created_at
 		FROM actions a
-		JOIN characters c ON a.character_id = c.id
+		LEFT JOIN characters c ON a.character_id = c.id
 		WHERE a.lobby_id = $1
-		ORDER BY a.created_at DESC LIMIT 30
+		ORDER BY a.created_at DESC LIMIT 50
 	`, campaignID)
 	if actionRows != nil {
 		for actionRows.Next() {
 			var actionType, description, result, charName string
 			var actionTime time.Time
 			actionRows.Scan(&actionType, &description, &result, &charName, &actionTime)
+			feedItems = append(feedItems, FeedItem{
+				Time: actionTime, Type: actionType, Actor: charName,
+				Content: description, Result: result,
+			})
+		}
+		actionRows.Close()
+	}
+	
+	// Get messages
+	msgRows, _ := db.Query(`
+		SELECT agent_name, message, created_at
+		FROM campaign_messages
+		WHERE lobby_id = $1
+		ORDER BY created_at DESC LIMIT 50
+	`, campaignID)
+	if msgRows != nil {
+		for msgRows.Next() {
+			var agentName, message string
+			var msgTime time.Time
+			msgRows.Scan(&agentName, &message, &msgTime)
+			feedItems = append(feedItems, FeedItem{
+				Time: msgTime, Type: "message", Actor: agentName,
+				Content: message, Result: "",
+			})
+		}
+		msgRows.Close()
+	}
+	
+	// Sort by time descending
+	sort.Slice(feedItems, func(i, j int) bool {
+		return feedItems[i].Time.After(feedItems[j].Time)
+	})
+	
+	// Limit to 50 most recent
+	if len(feedItems) > 50 {
+		feedItems = feedItems[:50]
+	}
+	
+	// Render feed
+	var actions strings.Builder
+	for _, item := range feedItems {
+		switch item.Type {
+		case "message":
 			actions.WriteString(fmt.Sprintf(`
-<div class="action">
+<div class="feed-item message">
+  <span class="time">%s</span>
+  <strong>%s</strong> <span class="type">💬</span>
+  <p>%s</p>
+</div>`, item.Time.Format("Jan 2, 15:04"), item.Actor, item.Content))
+		case "poll":
+			actions.WriteString(fmt.Sprintf(`
+<div class="feed-item poll">
+  <span class="time">%s</span>
+  <strong>%s</strong> <span class="type">📡</span>
+  <p class="muted">%s</p>
+</div>`, item.Time.Format("Jan 2, 15:04"), item.Actor, item.Content))
+		default:
+			resultHTML := ""
+			if item.Result != "" {
+				resultHTML = fmt.Sprintf(`<p class="result">→ %s</p>`, item.Result)
+			}
+			actions.WriteString(fmt.Sprintf(`
+<div class="feed-item action">
   <span class="time">%s</span>
   <strong>%s</strong> <span class="type">[%s]</span>
   <p>%s</p>
-  <p class="result">→ %s</p>
-</div>`, actionTime.Format("Jan 2, 15:04"), charName, actionType, description, result))
+  %s
+</div>`, item.Time.Format("Jan 2, 15:04"), item.Actor, item.Type, item.Content, resultHTML))
 		}
-		actionRows.Close()
 	}
 	
 	dmLink := "No GM assigned"
@@ -6965,10 +7034,13 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 .observation .observer{font-weight:bold}
 .observation .type{color:#888;font-size:0.9em}
 .observation .time{color:#666;font-size:0.8em}
-.action{border-left:3px solid #464;padding:0.5em 1em;margin:0.5em 0;background:#1a1a1a}
-.action .time{color:#666;font-size:0.8em}
-.action .type{color:#888}
-.action .result{color:#8a8;font-style:italic}
+.feed-item{padding:0.5em 1em;margin:0.5em 0;background:#1a1a1a;border-radius:4px}
+.feed-item.action{border-left:3px solid #464}
+.feed-item.message{border-left:3px solid #446}
+.feed-item.poll{border-left:3px solid #444}
+.feed-item .time{color:#666;font-size:0.8em}
+.feed-item .type{color:#888}
+.feed-item .result{color:#8a8;font-style:italic}
 .section{margin:2em 0}
 </style>
 
@@ -6999,7 +7071,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 </div>
 
 <div class="section">
-  <h2>📋 Action Feed</h2>
+  <h2>📋 Activity Feed</h2>
   %s
 </div>
 
