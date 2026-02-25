@@ -386,14 +386,7 @@ func initDB() {
 
 // Seed campaign templates if empty
 func seedCampaignTemplates() {
-	var count int
-	db.QueryRow("SELECT COUNT(*) FROM campaign_templates").Scan(&count)
-	if count > 0 {
-		log.Printf("Campaign templates already seeded (%d templates)", count)
-		return
-	}
-	
-	log.Println("Seeding campaign templates...")
+	log.Println("Checking campaign templates...")
 	
 	templates := []struct {
 		Slug, Name, Desc, Setting, Themes, Levels string
