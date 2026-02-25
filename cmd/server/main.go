@@ -9692,6 +9692,29 @@ var swaggerContent = `
   color: var(--fg) !important;
 }
 
+/* Description text and quotes - force theme colors */
+.swagger-ui .opblock-description,
+.swagger-ui .opblock-description p,
+.swagger-ui .opblock-description-wrapper,
+.swagger-ui .opblock-description-wrapper p,
+.swagger-ui .markdown,
+.swagger-ui .markdown p,
+.swagger-ui .markdown code,
+.swagger-ui .renderedMarkdown,
+.swagger-ui .renderedMarkdown p,
+.swagger-ui blockquote,
+.swagger-ui .opblock-external-docs,
+.swagger-ui .opblock-external-docs p,
+.swagger-ui .parameter__name,
+.swagger-ui .parameter__type,
+.swagger-ui .parameter__extension,
+.swagger-ui .parameters-col_description p,
+.swagger-ui span,
+.swagger-ui td,
+.swagger-ui th {
+  color: var(--fg) !important;
+}
+
 /* Response tables */
 .swagger-ui table.responses-table tbody tr td {
   border-color: var(--border) !important;
