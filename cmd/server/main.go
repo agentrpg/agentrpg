@@ -148,6 +148,7 @@ func main() {
 	// Pages
 	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/profile/", handleProfile)
+	http.HandleFunc("/character/", handleCharacterSheet)
 	http.HandleFunc("/about", handleAbout)
 	http.HandleFunc("/how-it-works", handleHowItWorks)
 	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
@@ -247,6 +248,17 @@ func initDB() {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	
+	-- Combat state table for initiative tracking
+	CREATE TABLE IF NOT EXISTS combat_state (
+		id SERIAL PRIMARY KEY,
+		lobby_id INTEGER REFERENCES lobbies(id) UNIQUE,
+		round_number INTEGER DEFAULT 1,
+		current_turn_index INTEGER DEFAULT 0,
+		turn_order JSONB DEFAULT '[]',
+		active BOOLEAN DEFAULT TRUE,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	
 	-- Add columns if they don't exist (for existing databases)
 	DO $$ BEGIN
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verified BOOLEAN DEFAULT FALSE;
@@ -260,6 +272,33 @@ func initDB() {
 		ALTER TABLE observations ADD COLUMN IF NOT EXISTS promoted_to TEXT;
 		-- Make target_id nullable for freeform observations
 		ALTER TABLE observations ALTER COLUMN target_id DROP NOT NULL;
+		
+		-- Death saves and HP tracking (HP tracking and death saves - roadmap item)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS temp_hp INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS death_save_successes INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS death_save_failures INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS is_stable BOOLEAN DEFAULT FALSE;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS is_dead BOOLEAN DEFAULT FALSE;
+		
+		-- Conditions system (Conditions - roadmap item)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS conditions JSONB DEFAULT '[]';
+		
+		-- Initiative tracking (Initiative tracking - roadmap item)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS initiative_bonus INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS current_initiative INTEGER DEFAULT 0;
+		
+		-- Spell slots (Spell slots - roadmap item)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS spell_slots JSONB DEFAULT '{}';
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS spell_slots_used JSONB DEFAULT '{}';
+		
+		-- Concentration tracking
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS concentrating_on VARCHAR(100);
+		
+		-- Reaction tracking (for opportunity attacks)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS reaction_used BOOLEAN DEFAULT FALSE;
+		
+		-- Cover tracking
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS cover_bonus INTEGER DEFAULT 0;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -944,8 +983,170 @@ func rollDice(count, sides int) ([]int, int) {
 	return rolls, total
 }
 
+// Roll with advantage (take highest of two d20s)
+func rollWithAdvantage() (int, int, int) {
+	roll1 := rollDie(20)
+	roll2 := rollDie(20)
+	result := roll1
+	if roll2 > roll1 {
+		result = roll2
+	}
+	return result, roll1, roll2
+}
+
+// Roll with disadvantage (take lowest of two d20s)
+func rollWithDisadvantage() (int, int, int) {
+	roll1 := rollDie(20)
+	roll2 := rollDie(20)
+	result := roll1
+	if roll2 < roll1 {
+		result = roll2
+	}
+	return result, roll1, roll2
+}
+
 func modifier(stat int) int {
 	return (stat - 10) / 2
+}
+
+// Proficiency bonus by level (5e standard)
+func proficiencyBonus(level int) int {
+	if level < 5 {
+		return 2
+	} else if level < 9 {
+		return 3
+	} else if level < 13 {
+		return 4
+	} else if level < 17 {
+		return 5
+	}
+	return 6
+}
+
+// Calculate spell save DC: 8 + proficiency bonus + spellcasting modifier
+func spellSaveDC(level int, spellcastingMod int) int {
+	return 8 + proficiencyBonus(level) + spellcastingMod
+}
+
+// Standard 5e conditions with their effects
+var conditionEffects = map[string]string{
+	"blinded":      "Can't see. Auto-fail sight checks. Attack rolls have disadvantage, attacks against have advantage.",
+	"charmed":      "Can't attack the charmer. Charmer has advantage on social checks.",
+	"deafened":     "Can't hear. Auto-fail hearing checks.",
+	"frightened":   "Disadvantage on ability checks and attacks while source is visible. Can't willingly move closer.",
+	"grappled":     "Speed becomes 0. Ends if grappler incapacitated or moved out of reach.",
+	"incapacitated": "Can't take actions or reactions.",
+	"invisible":    "Impossible to see without magic. Attacks against have disadvantage, attacks have advantage.",
+	"paralyzed":    "Incapacitated, can't move or speak. Auto-fail STR/DEX saves. Attacks have advantage, hits from 5ft are crits.",
+	"petrified":    "Transformed to stone. Weight x10. Incapacitated, unaware. Resistant to all damage. Immune to poison/disease.",
+	"poisoned":     "Disadvantage on attack rolls and ability checks.",
+	"prone":        "Disadvantage on attacks. Attacks from 5ft have advantage, from further have disadvantage. Must crawl or stand.",
+	"restrained":   "Speed 0. Attacks have disadvantage. Attacks against have advantage. Disadvantage on DEX saves.",
+	"stunned":      "Incapacitated, can't move, can only speak falteringly. Auto-fail STR/DEX saves. Attacks have advantage.",
+	"unconscious":  "Incapacitated, can't move or speak, unaware. Drop items, fall prone. Auto-fail STR/DEX saves. Attacks have advantage, 5ft hits are crits.",
+	"exhaustion":   "Cumulative levels (1-6). 6 = death.",
+}
+
+// Spell slots by class and level (returns map of spell level -> slots)
+func getSpellSlots(class string, level int) map[int]int {
+	// Full casters: Bard, Cleric, Druid, Sorcerer, Wizard
+	// Half casters: Paladin, Ranger (start at level 2)
+	// Warlock is special (pact magic)
+	
+	class = strings.ToLower(class)
+	
+	// Full casters spell slot progression
+	fullCasterSlots := map[int]map[int]int{
+		1:  {1: 2},
+		2:  {1: 3},
+		3:  {1: 4, 2: 2},
+		4:  {1: 4, 2: 3},
+		5:  {1: 4, 2: 3, 3: 2},
+		6:  {1: 4, 2: 3, 3: 3},
+		7:  {1: 4, 2: 3, 3: 3, 4: 1},
+		8:  {1: 4, 2: 3, 3: 3, 4: 2},
+		9:  {1: 4, 2: 3, 3: 3, 4: 3, 5: 1},
+		10: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2},
+		11: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1},
+		12: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1},
+		13: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1},
+		14: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1},
+		15: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1, 8: 1},
+		16: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1, 8: 1},
+		17: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2, 6: 1, 7: 1, 8: 1, 9: 1},
+		18: {1: 4, 2: 3, 3: 3, 4: 3, 5: 3, 6: 1, 7: 1, 8: 1, 9: 1},
+		19: {1: 4, 2: 3, 3: 3, 4: 3, 5: 3, 6: 2, 7: 1, 8: 1, 9: 1},
+		20: {1: 4, 2: 3, 3: 3, 4: 3, 5: 3, 6: 2, 7: 2, 8: 1, 9: 1},
+	}
+	
+	// Half casters (Paladin, Ranger) - half the slots, start at level 2
+	halfCasterSlots := map[int]map[int]int{
+		2:  {1: 2},
+		3:  {1: 3},
+		4:  {1: 3},
+		5:  {1: 4, 2: 2},
+		6:  {1: 4, 2: 2},
+		7:  {1: 4, 2: 3},
+		8:  {1: 4, 2: 3},
+		9:  {1: 4, 2: 3, 3: 2},
+		10: {1: 4, 2: 3, 3: 2},
+		11: {1: 4, 2: 3, 3: 3},
+		12: {1: 4, 2: 3, 3: 3},
+		13: {1: 4, 2: 3, 3: 3, 4: 1},
+		14: {1: 4, 2: 3, 3: 3, 4: 1},
+		15: {1: 4, 2: 3, 3: 3, 4: 2},
+		16: {1: 4, 2: 3, 3: 3, 4: 2},
+		17: {1: 4, 2: 3, 3: 3, 4: 3, 5: 1},
+		18: {1: 4, 2: 3, 3: 3, 4: 3, 5: 1},
+		19: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2},
+		20: {1: 4, 2: 3, 3: 3, 4: 3, 5: 2},
+	}
+	
+	// Warlock pact magic (all slots are same level)
+	warlockSlots := map[int]map[int]int{
+		1:  {1: 1},
+		2:  {1: 2},
+		3:  {2: 2},
+		4:  {2: 2},
+		5:  {3: 2},
+		6:  {3: 2},
+		7:  {4: 2},
+		8:  {4: 2},
+		9:  {5: 2},
+		10: {5: 2},
+		11: {5: 3},
+		12: {5: 3},
+		13: {5: 3},
+		14: {5: 3},
+		15: {5: 3},
+		16: {5: 3},
+		17: {5: 4},
+		18: {5: 4},
+		19: {5: 4},
+		20: {5: 4},
+	}
+	
+	switch class {
+	case "bard", "cleric", "druid", "sorcerer", "wizard":
+		if slots, ok := fullCasterSlots[level]; ok {
+			return slots
+		}
+	case "paladin", "ranger":
+		if slots, ok := halfCasterSlots[level]; ok {
+			return slots
+		}
+	case "warlock":
+		if slots, ok := warlockSlots[level]; ok {
+			return slots
+		}
+	}
+	
+	return map[int]int{} // Non-casters have no slots
+}
+
+// Roll initiative for a character
+func rollInitiative(dexMod int, initiativeBonus int) int {
+	return rollDie(20) + dexMod + initiativeBonus
 }
 
 // Auth helpers
@@ -2945,7 +3146,7 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 				
 				// Get players in this campaign
 				playerRows, _ := db.Query(`
-					SELECT c.name, a.id, a.name as agent_name
+					SELECT c.id, c.name, a.id, a.name as agent_name
 					FROM characters c
 					JOIN agents a ON c.agent_id = a.id
 					WHERE c.lobby_id = $1
@@ -2953,10 +3154,10 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 				var players []string
 				if playerRows != nil {
 					for playerRows.Next() {
+						var charID, agentID int
 						var charName, agentName string
-						var agentID int
-						playerRows.Scan(&charName, &agentID, &agentName)
-						players = append(players, fmt.Sprintf(`<a href="/profile/%d">%s</a> (%s)`, agentID, agentName, charName))
+						playerRows.Scan(&charID, &charName, &agentID, &agentName)
+						players = append(players, fmt.Sprintf(`<a href="/profile/%d">%s</a> (<a href="/character/%d">%s</a>)`, agentID, agentName, charID, charName))
 					}
 					playerRows.Close()
 				}
@@ -3096,6 +3297,166 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 
 %s
 `, name, createdAt.Format("January 2006"), charList, gmList)
+	
+	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
+}
+
+func handleCharacterSheet(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	idStr := strings.TrimPrefix(r.URL.Path, "/character/")
+	charID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid character ID", http.StatusBadRequest)
+		return
+	}
+	
+	// Get character details
+	var name, class, race, background string
+	var level, hp, maxHP, ac, str, dex, con, intel, wis, cha int
+	var agentID int
+	var agentName string
+	var campaignID sql.NullInt64
+	var campaignName sql.NullString
+	var createdAt time.Time
+	
+	err = db.QueryRow(`
+		SELECT c.name, c.class, c.race, COALESCE(c.background, ''), c.level, 
+			c.hp, c.max_hp, c.ac, c.str, c.dex, c.con, c.intl, c.wis, c.cha,
+			c.agent_id, a.name, c.lobby_id, l.name, c.created_at
+		FROM characters c
+		JOIN agents a ON c.agent_id = a.id
+		LEFT JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
+		&str, &dex, &con, &intel, &wis, &cha, &agentID, &agentName, &campaignID, &campaignName, &createdAt)
+	
+	if err != nil {
+		http.Error(w, "Character not found", http.StatusNotFound)
+		return
+	}
+	
+	// Calculate modifiers
+	mod := func(score int) string {
+		m := (score - 10) / 2
+		if m >= 0 {
+			return fmt.Sprintf("+%d", m)
+		}
+		return fmt.Sprintf("%d", m)
+	}
+	
+	// Get campaign history (actions)
+	var history strings.Builder
+	if campaignID.Valid {
+		actionRows, _ := db.Query(`
+			SELECT action_type, description, result, created_at
+			FROM actions WHERE character_id = $1
+			ORDER BY created_at DESC LIMIT 20
+		`, charID)
+		if actionRows != nil {
+			for actionRows.Next() {
+				var actionType, description, result string
+				var actionTime time.Time
+				actionRows.Scan(&actionType, &description, &result, &actionTime)
+				history.WriteString(fmt.Sprintf(`
+<div class="action">
+  <span class="time">%s</span>
+  <span class="type">[%s]</span> %s
+  <div class="result">→ %s</div>
+</div>`, actionTime.Format("Jan 2 15:04"), actionType, description, result))
+			}
+			actionRows.Close()
+		}
+	}
+	
+	// Get observations about this character
+	var observations strings.Builder
+	obsRows, _ := db.Query(`
+		SELECT o.content, o.observation_type, a.name, o.created_at
+		FROM observations o
+		JOIN characters observer ON o.observer_id = observer.id
+		JOIN agents a ON observer.agent_id = a.id
+		WHERE o.target_id = $1
+		ORDER BY o.created_at DESC LIMIT 10
+	`, charID)
+	if obsRows != nil {
+		for obsRows.Next() {
+			var content, obsType, observerName string
+			var obsTime time.Time
+			obsRows.Scan(&content, &obsType, &observerName, &obsTime)
+			observations.WriteString(fmt.Sprintf(`<li><strong>%s</strong> observed: "%s" <span class="muted">(%s)</span></li>`, observerName, content, obsTime.Format("Jan 2")))
+		}
+		obsRows.Close()
+	}
+	
+	campaignInfo := "Not in a campaign"
+	if campaignName.Valid {
+		campaignInfo = fmt.Sprintf(`<a href="/api/campaigns/%d">%s</a>`, campaignID.Int64, campaignName.String)
+	}
+	
+	historyHTML := "<p class='muted'>No actions yet.</p>"
+	if history.Len() > 0 {
+		historyHTML = history.String()
+	}
+	
+	obsHTML := "<p class='muted'>No observations recorded.</p>"
+	if observations.Len() > 0 {
+		obsHTML = "<ul>" + observations.String() + "</ul>"
+	}
+	
+	content := fmt.Sprintf(`
+<style>
+.char-header{display:flex;gap:2em;align-items:flex-start}
+.stats{display:grid;grid-template-columns:repeat(6,1fr);gap:0.5em;text-align:center}
+.stat{background:#222;padding:0.5em;border-radius:4px}
+.stat .value{font-size:1.5em;font-weight:bold}
+.stat .mod{color:#888}
+.stat .label{font-size:0.8em;color:#666}
+.vitals{display:flex;gap:2em;margin:1em 0}
+.vital{background:#222;padding:1em;border-radius:4px}
+.action{border-left:2px solid #444;padding-left:1em;margin:0.5em 0}
+.action .time{color:#666;font-size:0.8em}
+.action .type{color:#888}
+.action .result{color:#aaa;font-style:italic}
+</style>
+
+<h1>%s</h1>
+<p class="muted">Level %d %s %s • Played by <a href="/profile/%d">%s</a></p>
+
+<div class="vitals">
+  <div class="vital"><strong>HP:</strong> %d / %d</div>
+  <div class="vital"><strong>AC:</strong> %d</div>
+  <div class="vital"><strong>Campaign:</strong> %s</div>
+</div>
+
+<h2>Ability Scores</h2>
+<div class="stats">
+  <div class="stat"><div class="value">%d</div><div class="mod">%s</div><div class="label">STR</div></div>
+  <div class="stat"><div class="value">%d</div><div class="mod">%s</div><div class="label">DEX</div></div>
+  <div class="stat"><div class="value">%d</div><div class="mod">%s</div><div class="label">CON</div></div>
+  <div class="stat"><div class="value">%d</div><div class="mod">%s</div><div class="label">INT</div></div>
+  <div class="stat"><div class="value">%d</div><div class="mod">%s</div><div class="label">WIS</div></div>
+  <div class="stat"><div class="value">%d</div><div class="mod">%s</div><div class="label">CHA</div></div>
+</div>
+
+%s
+
+<h2>Party Observations</h2>
+%s
+
+<h2>Recent Actions</h2>
+%s
+
+<p class="muted">Created %s</p>
+`, name, level, race, class, agentID, agentName, hp, maxHP, ac, campaignInfo,
+		str, mod(str), dex, mod(dex), con, mod(con), intel, mod(intel), wis, mod(wis), cha, mod(cha),
+		func() string {
+			if background != "" {
+				return fmt.Sprintf("<h2>Background</h2><p>%s</p>", background)
+			}
+			return ""
+		}(),
+		obsHTML, historyHTML, createdAt.Format("January 2, 2006"))
 	
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
