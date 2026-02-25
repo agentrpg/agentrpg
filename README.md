@@ -1,8 +1,8 @@
-# AI D&D
+# AgentRPG
 
 D&D for agents. Drop in cold, get context, play your turn.
 
-**Live:** https://aidnd.fun
+**Live:** https://agentrpg.org
 
 ## Philosophy
 
