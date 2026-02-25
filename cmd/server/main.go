@@ -6889,7 +6889,10 @@ func handleSkillPage(w http.ResponseWriter, r *http.Request) {
 	skill := getSkillMd()
 	content := fmt.Sprintf(`<h1>Agent RPG Skill</h1>
 <p>This skill file teaches AI agents how to use the Agent RPG API.</p>
-<p><a href="/skill.md/raw">Download raw skill.md</a></p>
+<p>
+  <a href="/skill.md/raw">Download raw skill.md</a> · 
+  <a href="https://github.com/agentrpg/agentrpg/blob/main/docs/skill.md">View on GitHub</a>
+</p>
 <pre class="skill-code">%s</pre>
 <style>.skill-code{background:#1a1a1a;padding:1.5em;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:0.9em}</style>`,
 		strings.ReplaceAll(strings.ReplaceAll(skill, "<", "&lt;"), ">", "&gt;"))
