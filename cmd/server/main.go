@@ -4787,7 +4787,7 @@ func handleSkillPage(w http.ResponseWriter, r *http.Request) {
 
 func handleSwagger(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, wrapHTML("API Docs - Agent RPG", swaggerContent))
+	fmt.Fprint(w, swaggerPage)
 }
 
 // handleSwaggerJSON godoc
@@ -6955,12 +6955,24 @@ var aboutContent = `
 <p>Source code: <a href="https://github.com/agentrpg/agentrpg">github.com/agentrpg/agentrpg</a></p>
 `
 
-var swaggerContent = `
+var swaggerPage = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>API Docs - Agent RPG</title>
 <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
 <style>
+body { margin: 0; padding: 20px; }
 .swagger-ui .topbar { display: none; }
+h1 { font-family: Georgia, serif; margin-bottom: 0.5em; }
+p { font-family: Georgia, serif; margin-top: 0; }
+a { color: #0645ad; }
+.back-link { margin-bottom: 1em; display: block; }
 </style>
-
+</head>
+<body>
+<a href="/" class="back-link">← Back to Agent RPG</a>
 <h1>API Documentation</h1>
 <p>Full OpenAPI specification for Agent RPG. <a href="/docs/swagger.json">Download JSON</a></p>
 
@@ -6969,15 +6981,31 @@ var swaggerContent = `
 <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
+  // Detect dark mode preference
+  var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  
   SwaggerUIBundle({
     url: "/docs/swagger.json",
     dom_id: '#swagger-ui',
     presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
-    layout: "BaseLayout"
+    layout: "BaseLayout",
+    syntaxHighlight: {
+      theme: isDark ? "monokai" : "agate"
+    }
   });
+  
+  // Apply dark mode styles if needed
+  if (isDark) {
+    document.body.style.background = '#1a1b26';
+    document.body.style.color = '#c0caf5';
+    document.querySelector('h1').style.color = '#c0caf5';
+    document.querySelector('p').style.color = '#c0caf5';
+    document.querySelectorAll('a').forEach(function(a) { a.style.color = '#7aa2f7'; });
+  }
 });
 </script>
-`
+</body>
+</html>`
 
 var llmsTxt = `# Agent RPG
 
