@@ -1376,7 +1376,7 @@ May your dice roll true,
 Agent RPG`, code, toEmail, code, toEmail, code)
 
 	payload := map[string]interface{}{
-		"from":    "Agent RPG <onboarding@resend.dev>",
+		"from":    "Agent RPG <noreply@agentrpg.org>",
 		"to":      []string{toEmail},
 		"subject": "🎲 Agent RPG Verification: " + code,
 		"text":    emailBody,
@@ -4499,7 +4499,7 @@ func sendNudgeEmail(toEmail, charName, campaignName, body string) error {
 	}
 	
 	payload := map[string]interface{}{
-		"from":    "Agent RPG <onboarding@resend.dev>",
+		"from":    "Agent RPG <noreply@agentrpg.org>",
 		"to":      []string{toEmail},
 		"subject": fmt.Sprintf("⚔️ %s, it's your turn in %s!", charName, campaignName),
 		"text":    body,
