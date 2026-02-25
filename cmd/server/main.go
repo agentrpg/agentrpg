@@ -4787,7 +4787,7 @@ func handleSkillPage(w http.ResponseWriter, r *http.Request) {
 
 func handleSwagger(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	fmt.Fprint(w, swaggerPage)
+	fmt.Fprint(w, wrapHTML("API Docs - Agent RPG", swaggerContent))
 }
 
 // handleSwaggerJSON godoc
@@ -6955,24 +6955,179 @@ var aboutContent = `
 <p>Source code: <a href="https://github.com/agentrpg/agentrpg">github.com/agentrpg/agentrpg</a></p>
 `
 
-var swaggerPage = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>API Docs - Agent RPG</title>
+var swaggerContent = `
 <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
 <style>
-body { margin: 0; padding: 20px; }
+/* === Swagger UI Theme Overrides === */
+/* Uses CSS variables from our theme system */
+
+/* Hide default topbar */
 .swagger-ui .topbar { display: none; }
-h1 { font-family: Georgia, serif; margin-bottom: 0.5em; }
-p { font-family: Georgia, serif; margin-top: 0; }
-a { color: #0645ad; }
-.back-link { margin-bottom: 1em; display: block; }
+
+/* Main wrapper and backgrounds */
+.swagger-ui,
+.swagger-ui .wrapper,
+.swagger-ui .scheme-container,
+.swagger-ui .opblock-tag,
+.swagger-ui section.models,
+.swagger-ui section.models .model-container,
+.swagger-ui .opblock .opblock-section-header,
+.swagger-ui .opblock-body pre.microlight,
+.swagger-ui .dialog-ux .modal-ux,
+.swagger-ui select,
+.swagger-ui .btn {
+  background: var(--bg) !important;
+}
+
+/* Main text colors */
+.swagger-ui,
+.swagger-ui .info .title,
+.swagger-ui .info p,
+.swagger-ui .info li,
+.swagger-ui .opblock-tag,
+.swagger-ui .opblock .opblock-summary-description,
+.swagger-ui .opblock .opblock-summary-operation-id,
+.swagger-ui .opblock .opblock-summary-path,
+.swagger-ui .opblock-description-wrapper p,
+.swagger-ui .opblock-external-docs-wrapper p,
+.swagger-ui table thead tr td,
+.swagger-ui table thead tr th,
+.swagger-ui .parameter__name,
+.swagger-ui .parameter__type,
+.swagger-ui .parameter__in,
+.swagger-ui .response-col_status,
+.swagger-ui .response-col_description,
+.swagger-ui .response-col_links,
+.swagger-ui .model-title,
+.swagger-ui .model,
+.swagger-ui .model-box,
+.swagger-ui section.models h4,
+.swagger-ui section.models h5,
+.swagger-ui .servers > label,
+.swagger-ui .servers-title,
+.swagger-ui .scheme-container .schemes > label,
+.swagger-ui label,
+.swagger-ui .btn,
+.swagger-ui select,
+.swagger-ui .dialog-ux .modal-ux-header h3,
+.swagger-ui .dialog-ux .modal-ux-content p,
+.swagger-ui .dialog-ux .modal-ux-content h4,
+.swagger-ui .markdown p,
+.swagger-ui .markdown pre,
+.swagger-ui .renderedMarkdown p,
+.swagger-ui .prop-type,
+.swagger-ui .prop-format,
+.swagger-ui table.model tbody tr td,
+.swagger-ui table.headers tbody tr td {
+  color: var(--fg) !important;
+}
+
+/* Muted/secondary text */
+.swagger-ui .opblock-summary-path__deprecated,
+.swagger-ui .parameter__deprecated,
+.swagger-ui .response-col_status .response-undocumented {
+  color: var(--muted) !important;
+}
+
+/* Links */
+.swagger-ui a,
+.swagger-ui .info a,
+.swagger-ui .opblock-external-docs-wrapper a {
+  color: var(--link) !important;
+}
+
+/* Borders */
+.swagger-ui .opblock-tag,
+.swagger-ui section.models,
+.swagger-ui section.models.is-open h4,
+.swagger-ui .opblock,
+.swagger-ui .opblock .opblock-section-header,
+.swagger-ui table thead tr td,
+.swagger-ui table thead tr th,
+.swagger-ui .model-box,
+.swagger-ui select,
+.swagger-ui .btn,
+.swagger-ui input[type=text],
+.swagger-ui input[type=password],
+.swagger-ui input[type=email],
+.swagger-ui textarea {
+  border-color: var(--border) !important;
+}
+
+/* Form inputs */
+.swagger-ui input[type=text],
+.swagger-ui input[type=password],
+.swagger-ui input[type=email],
+.swagger-ui textarea,
+.swagger-ui select {
+  background: var(--code-bg) !important;
+  color: var(--fg) !important;
+}
+
+/* Code blocks */
+.swagger-ui .opblock-body pre,
+.swagger-ui .highlight-code,
+.swagger-ui pre.microlight {
+  background: var(--code-bg) !important;
+  color: var(--fg) !important;
+}
+
+/* Model containers */
+.swagger-ui section.models .model-container {
+  background: var(--code-bg) !important;
+  border-radius: 4px;
+  margin: 0 0 10px;
+}
+
+/* Operation blocks - keep their method colors but adjust borders */
+.swagger-ui .opblock.opblock-get .opblock-summary { border-color: #61affe !important; }
+.swagger-ui .opblock.opblock-post .opblock-summary { border-color: #49cc90 !important; }
+.swagger-ui .opblock.opblock-put .opblock-summary { border-color: #fca130 !important; }
+.swagger-ui .opblock.opblock-delete .opblock-summary { border-color: #f93e3e !important; }
+.swagger-ui .opblock.opblock-patch .opblock-summary { border-color: #50e3c2 !important; }
+
+/* Expanded operation backgrounds */
+.swagger-ui .opblock.opblock-get { background: rgba(97, 175, 254, 0.1) !important; }
+.swagger-ui .opblock.opblock-post { background: rgba(73, 204, 144, 0.1) !important; }
+.swagger-ui .opblock.opblock-put { background: rgba(252, 161, 48, 0.1) !important; }
+.swagger-ui .opblock.opblock-delete { background: rgba(249, 62, 62, 0.1) !important; }
+.swagger-ui .opblock.opblock-patch { background: rgba(80, 227, 194, 0.1) !important; }
+
+/* Try it out response area */
+.swagger-ui .responses-inner {
+  background: var(--bg) !important;
+}
+
+/* Loading spinner */
+.swagger-ui .loading-container .loading::before {
+  border-color: var(--border) !important;
+  border-top-color: var(--fg) !important;
+}
+
+/* Authorization modal */
+.swagger-ui .dialog-ux .modal-ux {
+  border: 1px solid var(--border) !important;
+}
+
+/* JSON highlighting in responses */
+.swagger-ui .highlight-code .microlight {
+  background: transparent !important;
+}
+
+/* Tab headers */
+.swagger-ui .tab li {
+  color: var(--muted) !important;
+}
+.swagger-ui .tab li.active {
+  color: var(--fg) !important;
+}
+
+/* Response tables */
+.swagger-ui table.responses-table tbody tr td {
+  border-color: var(--border) !important;
+}
 </style>
-</head>
-<body>
-<a href="/" class="back-link">← Back to Agent RPG</a>
+
 <h1>API Documentation</h1>
 <p>Full OpenAPI specification for Agent RPG. <a href="/docs/swagger.json">Download JSON</a></p>
 
@@ -6989,8 +7144,7 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 });
 </script>
-</body>
-</html>`
+`
 
 var llmsTxt = `# Agent RPG
 
