@@ -6751,16 +6751,14 @@ nav a:visited { color: var(--link); }
 nav a:hover { text-decoration: underline; }
 .nav-spacer { flex-grow: 1; }
 .theme-toggle { cursor: pointer; padding: 0.25rem; border: none; background: none; font-size: 1.2rem; position: relative; }
-.theme-menu { display: none; position: absolute; right: 0; top: 100%; background: var(--bg); border: 1px solid var(--border); padding: 0.5rem; min-width: 200px; z-index: 100; }
+.theme-menu { display: none; position: absolute; right: 0; top: 100%; border: 1px solid var(--border); min-width: 220px; z-index: 100; overflow: hidden; border-radius: 4px; }
 .theme-menu.open { display: block; }
-.theme-row { display: flex; align-items: center; justify-content: space-between; padding: 0.4rem 0.5rem; }
-.theme-row:hover { background: var(--code-bg); }
-.theme-name { font-size: 0.85rem; color: var(--fg); }
+.theme-row { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 0.75rem; cursor: pointer; border-bottom: 1px solid rgba(128,128,128,0.2); }
+.theme-row:last-child { border-bottom: none; }
+.theme-row:hover { opacity: 0.85; }
+.theme-name { font-size: 0.85rem; font-weight: 500; }
 .theme-swatches { display: flex; gap: 4px; }
-.theme-menu button { padding: 0; border: none; background: none; cursor: pointer; line-height: 0; }
-.theme-menu button .swatch { width: 20px; height: 20px; border-radius: 4px; display: block; }
-.theme-menu button:hover .swatch { box-shadow: 0 0 0 2px var(--link); }
-.swatch { width: 16px; height: 16px; border-radius: 2px; margin-right: 0.75rem; border: 1px solid var(--border); }
+.theme-swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(128,128,128,0.3); }
 h1 { font-size: 1.5rem; margin: 0 0 1rem 0; font-weight: normal; }
 h2 { font-size: 1.2rem; margin: 1.5rem 0 0.5rem 0; font-weight: normal; border-bottom: 1px solid var(--border); }
 h3 { font-size: 1rem; margin: 1rem 0 0.5rem 0; }
@@ -6791,10 +6789,14 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <div class="theme-toggle" onclick="toggleThemeMenu(event)">
 <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 5c-7 0-10 7-10 7s3 7 10 7 10-7 10-7-3-7-10-7z"/></svg>
 <div class="theme-menu" id="theme-menu">
-<div class="theme-row"><span class="theme-name">Default</span><span class="theme-swatches"><button onclick="setTheme('light')" title="Light"><span class="swatch" style="background:#ffffff;border:1px solid #ccc"></span></button><button onclick="setTheme('dark')" title="Dark"><span class="swatch" style="background:#1a1b26"></span></button></span></div>
-<div class="theme-row"><span class="theme-name">Tokyo Night</span><span class="theme-swatches"><button onclick="setTheme('tokyonight-day')" title="Day"><span class="swatch" style="background:#e1e2e7"></span></button><button onclick="setTheme('tokyonight')" title="Night"><span class="swatch" style="background:#1a1b26"></span></button></span></div>
-<div class="theme-row"><span class="theme-name">Catppuccin</span><span class="theme-swatches"><button onclick="setTheme('catppuccin-latte')" title="Latte"><span class="swatch" style="background:#eff1f5"></span></button><button onclick="setTheme('catppuccin-mocha')" title="Mocha"><span class="swatch" style="background:#1e1e2e"></span></button></span></div>
-<div class="theme-row"><span class="theme-name">Solarized</span><span class="theme-swatches"><button onclick="setTheme('solarized-light')" title="Light"><span class="swatch" style="background:#fdf6e3"></span></button><button onclick="setTheme('solarized-dark')" title="Dark"><span class="swatch" style="background:#002b36"></span></button></span></div>
+<div class="theme-row" onclick="setTheme('light')" style="background:#ffffff;color:#222222"><span class="theme-name">Light</span><span class="theme-swatches"><span class="theme-swatch" style="background:#0645ad"></span><span class="theme-swatch" style="background:#0b0080"></span><span class="theme-swatch" style="background:#666666"></span></span></div>
+<div class="theme-row" onclick="setTheme('dark')" style="background:#1a1b26;color:#c0caf5"><span class="theme-name">Dark</span><span class="theme-swatches"><span class="theme-swatch" style="background:#7aa2f7"></span><span class="theme-swatch" style="background:#bb9af7"></span><span class="theme-swatch" style="background:#565f89"></span></span></div>
+<div class="theme-row" onclick="setTheme('tokyonight')" style="background:#1a1b26;color:#c0caf5"><span class="theme-name">Tokyo Night</span><span class="theme-swatches"><span class="theme-swatch" style="background:#7aa2f7"></span><span class="theme-swatch" style="background:#bb9af7"></span><span class="theme-swatch" style="background:#565f89"></span></span></div>
+<div class="theme-row" onclick="setTheme('tokyonight-day')" style="background:#e1e2e7;color:#3760bf"><span class="theme-name">Tokyo Night Day</span><span class="theme-swatches"><span class="theme-swatch" style="background:#2e7de9"></span><span class="theme-swatch" style="background:#9854f1"></span><span class="theme-swatch" style="background:#6172b0"></span></span></div>
+<div class="theme-row" onclick="setTheme('catppuccin-latte')" style="background:#eff1f5;color:#4c4f69"><span class="theme-name">Catppuccin Latte</span><span class="theme-swatches"><span class="theme-swatch" style="background:#1e66f5"></span><span class="theme-swatch" style="background:#8839ef"></span><span class="theme-swatch" style="background:#8c8fa1"></span></span></div>
+<div class="theme-row" onclick="setTheme('catppuccin-mocha')" style="background:#1e1e2e;color:#cdd6f4"><span class="theme-name">Catppuccin Mocha</span><span class="theme-swatches"><span class="theme-swatch" style="background:#89b4fa"></span><span class="theme-swatch" style="background:#cba6f7"></span><span class="theme-swatch" style="background:#6c7086"></span></span></div>
+<div class="theme-row" onclick="setTheme('solarized-light')" style="background:#fdf6e3;color:#657b83"><span class="theme-name">Solarized Light</span><span class="theme-swatches"><span class="theme-swatch" style="background:#268bd2"></span><span class="theme-swatch" style="background:#6c71c4"></span><span class="theme-swatch" style="background:#93a1a1"></span></span></div>
+<div class="theme-row" onclick="setTheme('solarized-dark')" style="background:#002b36;color:#839496"><span class="theme-name">Solarized Dark</span><span class="theme-swatches"><span class="theme-swatch" style="background:#268bd2"></span><span class="theme-swatch" style="background:#6c71c4"></span><span class="theme-swatch" style="background:#586e75"></span></span></div>
 </div>
 </div>
 </nav>
