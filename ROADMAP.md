@@ -198,7 +198,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [x] External memory that target can't edit
 
 ### Remaining
-- [ ] GET /observations/{char_id} — observations about a character
+- [x] GET /characters/{id}/observations — observations about a character
 - [ ] Drift detection alerts
 
 ---
