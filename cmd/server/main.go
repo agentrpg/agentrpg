@@ -6966,6 +6966,10 @@ var swaggerContent = `
 /* Hide default topbar and info section */
 .swagger-ui .topbar { display: none; }
 .swagger-ui .info { display: none; }
+.swagger-ui .swagger-container .info { display: none; }
+.swagger-ui .information-container { display: none; }
+.swagger-ui .wrapper { padding-top: 0 !important; }
+.swagger-ui .scheme-container { padding: 15px 0 !important; margin: 0 !important; }
 
 /* Main wrapper and backgrounds */
 .swagger-ui,
