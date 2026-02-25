@@ -125,6 +125,7 @@ func main() {
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
+	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
@@ -4531,6 +4532,246 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		"roll":         finalRoll,
 		"roll_type":    rollType,
 		"modifier":     totalMod,
+		"total":        total,
+		"dc":           req.DC,
+		"outcome":      outcomeStr,
+		"result":       fullResult,
+		"rolls_detail": map[string]interface{}{
+			"die1": roll1,
+			"die2": roll2,
+		},
+	})
+}
+
+// handleGMSavingThrow godoc
+// @Summary Call for a saving throw
+// @Description GM calls for a saving throw from a character. Server resolves mechanics with proficiency.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,ability=string,dc=int,advantage=bool,disadvantage=bool,description=string} true "Saving throw details"
+// @Success 200 {object} map[string]interface{} "Saving throw result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/saving-throw [post]
+func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID  int    `json:"character_id"`
+		Ability      string `json:"ability"`      // str, dex, con, int, wis, cha
+		DC           int    `json:"dc"`           // Difficulty Class
+		Advantage    bool   `json:"advantage"`
+		Disadvantage bool   `json:"disadvantage"`
+		Description  string `json:"description"`  // Optional context (e.g., "Fireball", "Dragon's Breath")
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	if req.Ability == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "ability required (str, dex, con, int, wis, cha)"})
+		return
+	}
+	
+	if req.DC == 0 {
+		req.DC = 10 // Default DC
+	}
+	
+	// Get character stats and class
+	var charName, className string
+	var str, dex, con, intl, wis, cha, level int
+	var charLobbyID int
+	err = db.QueryRow(`
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, class
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &className)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify character is in this campaign
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Get class saving throw proficiencies
+	var classSaves string
+	err = db.QueryRow(`SELECT saving_throws FROM classes WHERE slug = $1`, strings.ToLower(className)).Scan(&classSaves)
+	if err != nil {
+		classSaves = "" // Class not found, no proficiencies
+	}
+	
+	// Parse the ability
+	abilityUsed := strings.ToLower(req.Ability)
+	var abilityMod int
+	var abilityName string
+	var abilityShort string
+	
+	switch abilityUsed {
+	case "str", "strength":
+		abilityMod = modifier(str)
+		abilityName = "Strength"
+		abilityShort = "str"
+	case "dex", "dexterity":
+		abilityMod = modifier(dex)
+		abilityName = "Dexterity"
+		abilityShort = "dex"
+	case "con", "constitution":
+		abilityMod = modifier(con)
+		abilityName = "Constitution"
+		abilityShort = "con"
+	case "int", "intelligence":
+		abilityMod = modifier(intl)
+		abilityName = "Intelligence"
+		abilityShort = "int"
+	case "wis", "wisdom":
+		abilityMod = modifier(wis)
+		abilityName = "Wisdom"
+		abilityShort = "wis"
+	case "cha", "charisma":
+		abilityMod = modifier(cha)
+		abilityName = "Charisma"
+		abilityShort = "cha"
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid ability - use str, dex, con, int, wis, or cha"})
+		return
+	}
+	
+	// Check if proficient in this saving throw
+	proficient := false
+	if classSaves != "" {
+		for _, save := range strings.Split(classSaves, ",") {
+			if strings.TrimSpace(strings.ToLower(save)) == abilityShort {
+				proficient = true
+				break
+			}
+		}
+	}
+	
+	// Calculate total modifier
+	totalMod := abilityMod
+	if proficient {
+		totalMod += proficiencyBonus(level)
+	}
+	
+	// Roll the die
+	var roll1, roll2, finalRoll int
+	rollType := "normal"
+	
+	if req.Advantage && !req.Disadvantage {
+		roll1, roll2, finalRoll = rollWithAdvantage()
+		rollType = "advantage"
+	} else if req.Disadvantage && !req.Advantage {
+		roll1, roll2, finalRoll = rollWithDisadvantage()
+		rollType = "disadvantage"
+	} else {
+		finalRoll = rollDie(20)
+		roll1 = finalRoll
+		roll2 = 0
+	}
+	
+	total := finalRoll + totalMod
+	success := total >= req.DC
+	
+	// Build result description
+	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
+	if rollType == "advantage" {
+		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+	} else if rollType == "disadvantage" {
+		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+	}
+	
+	modStr := ""
+	if totalMod >= 0 {
+		modStr = fmt.Sprintf("+%d", totalMod)
+	} else {
+		modStr = fmt.Sprintf("%d", totalMod)
+	}
+	
+	profStr := ""
+	if proficient {
+		profStr = " (proficient)"
+	}
+	
+	outcomeStr := "FAILURE"
+	if success {
+		outcomeStr = "SUCCESS"
+	}
+	
+	// Natural 20 always succeeds, natural 1 always fails (5e death save rule, commonly used)
+	if finalRoll == 20 {
+		success = true
+		outcomeStr = "CRITICAL SUCCESS"
+	} else if finalRoll == 1 {
+		success = false
+		outcomeStr = "CRITICAL FAILURE"
+	}
+	
+	fullResult := fmt.Sprintf("%s saving throw%s: %s%s = %d vs DC %d → %s",
+		abilityName, profStr, resultStr, modStr, total, req.DC, outcomeStr)
+	
+	// Record the saving throw
+	desc := fmt.Sprintf("%s: %s saving throw (DC %d)", charName, abilityName, req.DC)
+	if req.Description != "" {
+		desc = fmt.Sprintf("%s: %s - %s saving throw (DC %d)", charName, req.Description, abilityName, req.DC)
+	}
+	
+	_, _ = db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'saving_throw', $3, $4)
+	`, campaignID, req.CharacterID, desc, fullResult)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      success,
+		"character":    charName,
+		"ability":      abilityName,
+		"proficient":   proficient,
+		"roll":         finalRoll,
+		"roll_type":    rollType,
+		"ability_mod":  abilityMod,
+		"total_mod":    totalMod,
 		"total":        total,
 		"dc":           req.DC,
 		"outcome":      outcomeStr,

@@ -186,7 +186,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 ### Skill Checks
 - [x] `POST /api/gm/skill-check` — set DC, server resolves
 - [ ] Contested checks
-- [ ] Saving throws
+- [x] Saving throws (`POST /api/gm/saving-throw`)
 
 ---
 
