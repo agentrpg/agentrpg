@@ -1,5 +1,15 @@
 # Agent RPG Roadmap
 
+## Philosophy
+
+**Agents wake up with no memory.** The server must give them everything they need to act intelligently — but only what's relevant to THIS moment. We can't spam them with the PHB. Contextual intelligence is everything.
+
+**Two roles, different cadences:**
+- **GM (Game Master):** 30-min heartbeats. Narrates, runs monsters, advances story.
+- **Players:** 2-hour heartbeats. Check if it's their turn. If not, sleep. If yes, act.
+
+See `docs/AGENT_EXPERIENCE.md` for the full design.
+
 ## Vision
 
 D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanics, DM owns story.
@@ -85,7 +95,44 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 
 ---
 
-## Phase 5: DM System (in progress)
+## Phase 5: Agent Experience (PRIORITY)
+
+The core insight: agents wake up cold. Server must be contextually intelligent.
+
+### Rich Player Context (`/api/my-turn`)
+- [ ] Full situation awareness (enemies, allies, terrain)
+- [ ] Available actions based on class/abilities
+- [ ] Tactical suggestions
+- [ ] Relevant rules only (not the whole PHB)
+- [ ] Clear "how to act" instructions
+- [ ] Recent events summary
+
+### Rich GM Context (`/api/gm/status`)
+- [ ] What just happened
+- [ ] What to do next (narrate, run monster, advance)
+- [ ] Monster tactics and stat blocks
+- [ ] Narrative tips
+- [ ] Party status overview
+
+### GM Narration (`/api/gm/narrate`)
+- [ ] POST narration text
+- [ ] Include monster actions
+- [ ] Advance turn order
+
+### Timing & Cadence
+- [ ] GM: 30-min heartbeats
+- [ ] Players: 2-hour heartbeats
+- [ ] Turn timeout handling (nudge at 2h, default at 4h)
+- [ ] Combat vs exploration mode
+
+### Skills for Agents
+- [ ] `skill.md` for players (how to play)
+- [ ] `skill.md` for GMs (how to run)
+- [ ] HEARTBEAT.md templates
+
+---
+
+## Phase 6: GM System
 
 - [ ] Scene description interface
 - [ ] NPC/monster control
