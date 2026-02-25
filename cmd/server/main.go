@@ -224,8 +224,10 @@ func initDB() {
 		observer_id INTEGER REFERENCES characters(id),
 		target_id INTEGER REFERENCES characters(id),
 		lobby_id INTEGER REFERENCES lobbies(id),
-		observation_type VARCHAR(50),
+		observation_type VARCHAR(50) DEFAULT 'world',
 		content TEXT,
+		promoted BOOLEAN DEFAULT FALSE,
+		promoted_to TEXT,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	
@@ -246,6 +248,11 @@ func initDB() {
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMP;
 		ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS min_level INTEGER DEFAULT 1;
 		ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS max_level INTEGER DEFAULT 1;
+		ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS campaign_document JSONB DEFAULT '{}';
+		ALTER TABLE observations ADD COLUMN IF NOT EXISTS promoted BOOLEAN DEFAULT FALSE;
+		ALTER TABLE observations ADD COLUMN IF NOT EXISTS promoted_to TEXT;
+		-- Make target_id nullable for freeform observations
+		ALTER TABLE observations ALTER COLUMN target_id DROP NOT NULL;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -1303,13 +1310,42 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		var req struct {
-			Name       string `json:"name"`
-			MaxPlayers int    `json:"max_players"`
-			Setting    string `json:"setting"`
-			MinLevel   int    `json:"min_level"`
-			MaxLevel   int    `json:"max_level"`
+			Name         string `json:"name"`
+			MaxPlayers   int    `json:"max_players"`
+			Setting      string `json:"setting"`
+			MinLevel     int    `json:"min_level"`
+			MaxLevel     int    `json:"max_level"`
+			TemplateSlug string `json:"template_slug"`
 		}
 		json.NewDecoder(r.Body).Decode(&req)
+		
+		// If template_slug provided, populate from template
+		if req.TemplateSlug != "" {
+			var tName, tDesc, tSetting, tThemes, tLevels, tScene string
+			var tQuests, tNPCs string
+			err := db.QueryRow(`
+				SELECT name, description, setting, themes, recommended_levels, starting_scene, initial_quests, initial_npcs
+				FROM campaign_templates WHERE slug = $1
+			`, req.TemplateSlug).Scan(&tName, &tDesc, &tSetting, &tThemes, &tLevels, &tScene, &tQuests, &tNPCs)
+			if err != nil {
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": "template_not_found", "slug": req.TemplateSlug})
+				return
+			}
+			if req.Name == "" {
+				req.Name = tName
+			}
+			if req.Setting == "" {
+				req.Setting = tSetting + "\n\n" + tDesc + "\n\nThemes: " + tThemes + "\n\nStarting Scene:\n" + tScene
+			}
+			// Parse level range from template (e.g., "1-5")
+			if req.MinLevel == 0 && req.MaxLevel == 0 {
+				fmt.Sscanf(tLevels, "%d-%d", &req.MinLevel, &req.MaxLevel)
+				if req.MaxLevel == 0 {
+					req.MaxLevel = req.MinLevel
+				}
+			}
+		}
+		
 		if req.Name == "" {
 			req.Name = "Unnamed Adventure"
 		}
