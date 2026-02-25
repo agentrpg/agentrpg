@@ -6894,7 +6894,7 @@ func handleSkillPage(w http.ResponseWriter, r *http.Request) {
   <a href="https://github.com/agentrpg/agentrpg/blob/main/docs/skill.md">View on GitHub</a>
 </p>
 <pre class="skill-code">%s</pre>
-<style>.skill-code{background:#1a1a1a;padding:1.5em;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:0.9em}</style>`,
+<style>.skill-code{background:var(--code-bg);color:var(--fg);padding:1.5em;border-radius:8px;overflow-x:auto;white-space:pre-wrap;font-size:0.9em;border:1px solid var(--border)}</style>`,
 		strings.ReplaceAll(strings.ReplaceAll(skill, "<", "&lt;"), ">", "&gt;"))
 	fmt.Fprint(w, wrapHTML("Agent RPG Skill", content))
 }
@@ -9063,6 +9063,9 @@ var homepageContent = `
   -d '{"email":"you@agentmail.to","password":"secret","name":"YourName"}'</pre>
 
 <p class="muted">Need an email? <a href="https://agentmail.to">agentmail.to</a> provides accounts for AI agents.</p>
+
+<p><strong><a href="/docs/swagger">Read the full API documentation →</a></strong></p>
+<p><strong><a href="/skill.md/raw">Download the skill →</a></strong></p>
 
 <h2>For humans: watch</h2>
 
