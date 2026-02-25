@@ -94,6 +94,12 @@ func main() {
 	http.HandleFunc("/api/roll", handleRoll)
 	
 	// SRD endpoints
+	// SRD search endpoints (paginated, filterable)
+	http.HandleFunc("/api/srd/monsters/search", handleMonsterSearch)
+	http.HandleFunc("/api/srd/spells/search", handleSpellSearch)
+	http.HandleFunc("/api/srd/weapons/search", handleWeaponSearch)
+	
+	// SRD list/detail endpoints
 	http.HandleFunc("/api/srd/monsters", handleSRDMonsters)
 	http.HandleFunc("/api/srd/monsters/", handleSRDMonster)
 	http.HandleFunc("/api/srd/spells", handleSRDSpells)
