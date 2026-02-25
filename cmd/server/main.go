@@ -19,7 +19,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const version = "0.3.1"
+const version = "0.4.0"
 
 var db *sql.DB
 
@@ -90,6 +90,20 @@ func main() {
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
+	
+	// SRD endpoints
+	http.HandleFunc("/api/srd/monsters", handleSRDMonsters)
+	http.HandleFunc("/api/srd/monsters/", handleSRDMonster)
+	http.HandleFunc("/api/srd/spells", handleSRDSpells)
+	http.HandleFunc("/api/srd/spells/", handleSRDSpell)
+	http.HandleFunc("/api/srd/classes", handleSRDClasses)
+	http.HandleFunc("/api/srd/classes/", handleSRDClass)
+	http.HandleFunc("/api/srd/races", handleSRDRaces)
+	http.HandleFunc("/api/srd/races/", handleSRDRace)
+	http.HandleFunc("/api/srd/weapons", handleSRDWeapons)
+	http.HandleFunc("/api/srd/armor", handleSRDArmor)
+	http.HandleFunc("/api/srd/", handleSRDIndex)
+	
 	http.HandleFunc("/api/", handleAPIRoot)
 	
 	// Pages
@@ -1102,6 +1116,286 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 func handleAbout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, wrapHTML("About - Agent RPG", aboutContent))
+}
+
+// ============================================================================
+// 5e SRD Data and Handlers
+// ============================================================================
+
+type SRDMonster struct {
+	Name      string   `json:"name"`
+	Size      string   `json:"size"`
+	Type      string   `json:"type"`
+	AC        int      `json:"ac"`
+	HP        int      `json:"hp"`
+	HitDice   string   `json:"hit_dice"`
+	Speed     int      `json:"speed"`
+	STR       int      `json:"str"`
+	DEX       int      `json:"dex"`
+	CON       int      `json:"con"`
+	INT       int      `json:"int"`
+	WIS       int      `json:"wis"`
+	CHA       int      `json:"cha"`
+	CR        string   `json:"cr"`
+	XP        int      `json:"xp"`
+	Actions   []SRDAction `json:"actions"`
+}
+
+type SRDAction struct {
+	Name        string `json:"name"`
+	AttackBonus int    `json:"attack_bonus"`
+	DamageDice  string `json:"damage_dice"`
+	DamageType  string `json:"damage_type"`
+}
+
+var srdMonsters = map[string]SRDMonster{
+	"goblin": {Name: "Goblin", Size: "Small", Type: "humanoid", AC: 15, HP: 7, HitDice: "2d6", Speed: 30, STR: 8, DEX: 14, CON: 10, INT: 10, WIS: 8, CHA: 8, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Scimitar", AttackBonus: 4, DamageDice: "1d6+2", DamageType: "slashing"}, {Name: "Shortbow", AttackBonus: 4, DamageDice: "1d6+2", DamageType: "piercing"}}},
+	"skeleton": {Name: "Skeleton", Size: "Medium", Type: "undead", AC: 13, HP: 13, HitDice: "2d8+4", Speed: 30, STR: 10, DEX: 14, CON: 15, INT: 6, WIS: 8, CHA: 5, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Shortsword", AttackBonus: 4, DamageDice: "1d6+2", DamageType: "piercing"}}},
+	"zombie": {Name: "Zombie", Size: "Medium", Type: "undead", AC: 8, HP: 22, HitDice: "3d8+9", Speed: 20, STR: 13, DEX: 6, CON: 16, INT: 3, WIS: 6, CHA: 5, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Slam", AttackBonus: 3, DamageDice: "1d6+1", DamageType: "bludgeoning"}}},
+	"wolf": {Name: "Wolf", Size: "Medium", Type: "beast", AC: 13, HP: 11, HitDice: "2d8+2", Speed: 40, STR: 12, DEX: 15, CON: 12, INT: 3, WIS: 12, CHA: 6, CR: "1/4", XP: 50, Actions: []SRDAction{{Name: "Bite", AttackBonus: 4, DamageDice: "2d4+2", DamageType: "piercing"}}},
+	"orc": {Name: "Orc", Size: "Medium", Type: "humanoid", AC: 13, HP: 15, HitDice: "2d8+6", Speed: 30, STR: 16, DEX: 12, CON: 16, INT: 7, WIS: 11, CHA: 10, CR: "1/2", XP: 100, Actions: []SRDAction{{Name: "Greataxe", AttackBonus: 5, DamageDice: "1d12+3", DamageType: "slashing"}}},
+	"giant_spider": {Name: "Giant Spider", Size: "Large", Type: "beast", AC: 14, HP: 26, HitDice: "4d10+4", Speed: 30, STR: 14, DEX: 16, CON: 12, INT: 2, WIS: 11, CHA: 4, CR: "1", XP: 200, Actions: []SRDAction{{Name: "Bite", AttackBonus: 5, DamageDice: "1d8+3", DamageType: "piercing"}}},
+	"owlbear": {Name: "Owlbear", Size: "Large", Type: "monstrosity", AC: 13, HP: 59, HitDice: "7d10+21", Speed: 40, STR: 20, DEX: 12, CON: 17, INT: 3, WIS: 12, CHA: 7, CR: "3", XP: 700, Actions: []SRDAction{{Name: "Beak", AttackBonus: 7, DamageDice: "1d10+5", DamageType: "piercing"}, {Name: "Claws", AttackBonus: 7, DamageDice: "2d8+5", DamageType: "slashing"}}},
+	"troll": {Name: "Troll", Size: "Large", Type: "giant", AC: 15, HP: 84, HitDice: "8d10+40", Speed: 30, STR: 18, DEX: 13, CON: 20, INT: 7, WIS: 9, CHA: 7, CR: "5", XP: 1800, Actions: []SRDAction{{Name: "Bite", AttackBonus: 7, DamageDice: "1d6+4", DamageType: "piercing"}, {Name: "Claw", AttackBonus: 7, DamageDice: "2d6+4", DamageType: "slashing"}}},
+	"young_red_dragon": {Name: "Young Red Dragon", Size: "Large", Type: "dragon", AC: 18, HP: 178, HitDice: "17d10+85", Speed: 40, STR: 23, DEX: 10, CON: 21, INT: 14, WIS: 11, CHA: 19, CR: "10", XP: 5900, Actions: []SRDAction{{Name: "Bite", AttackBonus: 10, DamageDice: "2d10+6", DamageType: "piercing"}, {Name: "Fire Breath", AttackBonus: 0, DamageDice: "16d6", DamageType: "fire"}}},
+	"beholder": {Name: "Beholder", Size: "Large", Type: "aberration", AC: 18, HP: 180, HitDice: "19d10+76", Speed: 0, STR: 10, DEX: 14, CON: 18, INT: 17, WIS: 15, CHA: 17, CR: "13", XP: 10000, Actions: []SRDAction{{Name: "Bite", AttackBonus: 5, DamageDice: "4d6", DamageType: "piercing"}}},
+}
+
+type SRDSpell struct {
+	Name        string `json:"name"`
+	Level       int    `json:"level"`
+	School      string `json:"school"`
+	CastingTime string `json:"casting_time"`
+	Range       string `json:"range"`
+	Components  string `json:"components"`
+	Duration    string `json:"duration"`
+	Description string `json:"description"`
+	DamageDice  string `json:"damage_dice,omitempty"`
+	DamageType  string `json:"damage_type,omitempty"`
+	SavingThrow string `json:"saving_throw,omitempty"`
+	Healing     string `json:"healing,omitempty"`
+}
+
+var srdSpells = map[string]SRDSpell{
+	"fire_bolt": {Name: "Fire Bolt", Level: 0, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "1d10", DamageType: "fire", Description: "Hurl a mote of fire at a creature or object."},
+	"sacred_flame": {Name: "Sacred Flame", Level: 0, School: "evocation", CastingTime: "1 action", Range: "60 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "1d8", DamageType: "radiant", SavingThrow: "DEX", Description: "Flame-like radiance descends on a creature."},
+	"eldritch_blast": {Name: "Eldritch Blast", Level: 0, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "1d10", DamageType: "force", Description: "A beam of crackling energy."},
+	"magic_missile": {Name: "Magic Missile", Level: 1, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "3d4+3", DamageType: "force", Description: "Three darts hit automatically."},
+	"cure_wounds": {Name: "Cure Wounds", Level: 1, School: "evocation", CastingTime: "1 action", Range: "Touch", Components: "V, S", Duration: "Instantaneous", Healing: "1d8+mod", Description: "A creature you touch regains hit points."},
+	"shield": {Name: "Shield", Level: 1, School: "abjuration", CastingTime: "1 reaction", Range: "Self", Components: "V, S", Duration: "1 round", Description: "+5 AC until start of next turn."},
+	"sleep": {Name: "Sleep", Level: 1, School: "enchantment", CastingTime: "1 action", Range: "90 feet", Components: "V, S, M", Duration: "1 minute", DamageDice: "5d8", Description: "Creatures fall unconscious (HP threshold)."},
+	"thunderwave": {Name: "Thunderwave", Level: 1, School: "evocation", CastingTime: "1 action", Range: "Self (15-foot cube)", Components: "V, S", Duration: "Instantaneous", DamageDice: "2d8", DamageType: "thunder", SavingThrow: "CON", Description: "Wave of thunderous force."},
+	"scorching_ray": {Name: "Scorching Ray", Level: 2, School: "evocation", CastingTime: "1 action", Range: "120 feet", Components: "V, S", Duration: "Instantaneous", DamageDice: "2d6", DamageType: "fire", Description: "Three rays of fire, 2d6 each."},
+	"hold_person": {Name: "Hold Person", Level: 2, School: "enchantment", CastingTime: "1 action", Range: "60 feet", Components: "V, S, M", Duration: "Concentration, 1 minute", SavingThrow: "WIS", Description: "Target humanoid paralyzed on failed save."},
+	"misty_step": {Name: "Misty Step", Level: 2, School: "conjuration", CastingTime: "1 bonus action", Range: "Self", Components: "V", Duration: "Instantaneous", Description: "Teleport up to 30 feet."},
+	"fireball": {Name: "Fireball", Level: 3, School: "evocation", CastingTime: "1 action", Range: "150 feet", Components: "V, S, M", Duration: "Instantaneous", DamageDice: "8d6", DamageType: "fire", SavingThrow: "DEX", Description: "20-foot-radius sphere of fire."},
+	"lightning_bolt": {Name: "Lightning Bolt", Level: 3, School: "evocation", CastingTime: "1 action", Range: "Self (100-foot line)", Components: "V, S, M", Duration: "Instantaneous", DamageDice: "8d6", DamageType: "lightning", SavingThrow: "DEX", Description: "100-foot line of lightning."},
+	"counterspell": {Name: "Counterspell", Level: 3, School: "abjuration", CastingTime: "1 reaction", Range: "60 feet", Components: "S", Duration: "Instantaneous", Description: "Interrupt spell of 3rd level or lower."},
+	"dimension_door": {Name: "Dimension Door", Level: 4, School: "conjuration", CastingTime: "1 action", Range: "500 feet", Components: "V", Duration: "Instantaneous", Description: "Teleport to visible/visualized spot."},
+	"cone_of_cold": {Name: "Cone of Cold", Level: 5, School: "evocation", CastingTime: "1 action", Range: "Self (60-foot cone)", Components: "V, S, M", Duration: "Instantaneous", DamageDice: "8d8", DamageType: "cold", SavingThrow: "CON", Description: "60-foot cone of cold."},
+}
+
+type SRDClass struct {
+	Name         string   `json:"name"`
+	HitDie       int      `json:"hit_die"`
+	Primary      string   `json:"primary_ability"`
+	Saves        []string `json:"saving_throws"`
+	ArmorProf    []string `json:"armor_proficiencies"`
+	WeaponProf   []string `json:"weapon_proficiencies"`
+	Spellcasting string   `json:"spellcasting_ability,omitempty"`
+}
+
+var srdClasses = map[string]SRDClass{
+	"barbarian": {Name: "Barbarian", HitDie: 12, Primary: "STR", Saves: []string{"STR", "CON"}, ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{"simple", "martial"}},
+	"bard": {Name: "Bard", HitDie: 8, Primary: "CHA", Saves: []string{"DEX", "CHA"}, ArmorProf: []string{"light"}, WeaponProf: []string{"simple", "hand crossbows", "longswords", "rapiers", "shortswords"}, Spellcasting: "CHA"},
+	"cleric": {Name: "Cleric", HitDie: 8, Primary: "WIS", Saves: []string{"WIS", "CHA"}, ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{"simple"}, Spellcasting: "WIS"},
+	"druid": {Name: "Druid", HitDie: 8, Primary: "WIS", Saves: []string{"INT", "WIS"}, ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{"clubs", "daggers", "darts", "javelins", "maces", "quarterstaffs", "scimitars", "sickles", "slings", "spears"}, Spellcasting: "WIS"},
+	"fighter": {Name: "Fighter", HitDie: 10, Primary: "STR or DEX", Saves: []string{"STR", "CON"}, ArmorProf: []string{"all armor", "shields"}, WeaponProf: []string{"simple", "martial"}},
+	"monk": {Name: "Monk", HitDie: 8, Primary: "DEX & WIS", Saves: []string{"STR", "DEX"}, ArmorProf: []string{}, WeaponProf: []string{"simple", "shortswords"}},
+	"paladin": {Name: "Paladin", HitDie: 10, Primary: "STR & CHA", Saves: []string{"WIS", "CHA"}, ArmorProf: []string{"all armor", "shields"}, WeaponProf: []string{"simple", "martial"}, Spellcasting: "CHA"},
+	"ranger": {Name: "Ranger", HitDie: 10, Primary: "DEX & WIS", Saves: []string{"STR", "DEX"}, ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{"simple", "martial"}, Spellcasting: "WIS"},
+	"rogue": {Name: "Rogue", HitDie: 8, Primary: "DEX", Saves: []string{"DEX", "INT"}, ArmorProf: []string{"light"}, WeaponProf: []string{"simple", "hand crossbows", "longswords", "rapiers", "shortswords"}},
+	"sorcerer": {Name: "Sorcerer", HitDie: 6, Primary: "CHA", Saves: []string{"CON", "CHA"}, ArmorProf: []string{}, WeaponProf: []string{"daggers", "darts", "slings", "quarterstaffs", "light crossbows"}, Spellcasting: "CHA"},
+	"warlock": {Name: "Warlock", HitDie: 8, Primary: "CHA", Saves: []string{"WIS", "CHA"}, ArmorProf: []string{"light"}, WeaponProf: []string{"simple"}, Spellcasting: "CHA"},
+	"wizard": {Name: "Wizard", HitDie: 6, Primary: "INT", Saves: []string{"INT", "WIS"}, ArmorProf: []string{}, WeaponProf: []string{"daggers", "darts", "slings", "quarterstaffs", "light crossbows"}, Spellcasting: "INT"},
+}
+
+type SRDRace struct {
+	Name        string         `json:"name"`
+	Size        string         `json:"size"`
+	Speed       int            `json:"speed"`
+	AbilityMods map[string]int `json:"ability_modifiers"`
+	Traits      []string       `json:"traits"`
+	Languages   []string       `json:"languages"`
+}
+
+var srdRaces = map[string]SRDRace{
+	"human": {Name: "Human", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 1, "DEX": 1, "CON": 1, "INT": 1, "WIS": 1, "CHA": 1}, Traits: []string{"Extra Language"}, Languages: []string{"Common", "one other"}},
+	"elf": {Name: "Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"DEX": 2}, Traits: []string{"Darkvision", "Keen Senses", "Fey Ancestry", "Trance"}, Languages: []string{"Common", "Elvish"}},
+	"high_elf": {Name: "High Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"DEX": 2, "INT": 1}, Traits: []string{"Darkvision", "Keen Senses", "Fey Ancestry", "Trance", "Cantrip"}, Languages: []string{"Common", "Elvish"}},
+	"dwarf": {Name: "Dwarf", Size: "Medium", Speed: 25, AbilityMods: map[string]int{"CON": 2}, Traits: []string{"Darkvision", "Dwarven Resilience", "Stonecunning"}, Languages: []string{"Common", "Dwarvish"}},
+	"hill_dwarf": {Name: "Hill Dwarf", Size: "Medium", Speed: 25, AbilityMods: map[string]int{"CON": 2, "WIS": 1}, Traits: []string{"Darkvision", "Dwarven Resilience", "Stonecunning", "Dwarven Toughness"}, Languages: []string{"Common", "Dwarvish"}},
+	"halfling": {Name: "Halfling", Size: "Small", Speed: 25, AbilityMods: map[string]int{"DEX": 2}, Traits: []string{"Lucky", "Brave", "Halfling Nimbleness"}, Languages: []string{"Common", "Halfling"}},
+	"dragonborn": {Name: "Dragonborn", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 2, "CHA": 1}, Traits: []string{"Draconic Ancestry", "Breath Weapon", "Damage Resistance"}, Languages: []string{"Common", "Draconic"}},
+	"gnome": {Name: "Gnome", Size: "Small", Speed: 25, AbilityMods: map[string]int{"INT": 2}, Traits: []string{"Darkvision", "Gnome Cunning"}, Languages: []string{"Common", "Gnomish"}},
+	"half_elf": {Name: "Half-Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"CHA": 2}, Traits: []string{"Darkvision", "Fey Ancestry", "Skill Versatility"}, Languages: []string{"Common", "Elvish"}},
+	"half_orc": {Name: "Half-Orc", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 2, "CON": 1}, Traits: []string{"Darkvision", "Menacing", "Relentless Endurance", "Savage Attacks"}, Languages: []string{"Common", "Orc"}},
+	"tiefling": {Name: "Tiefling", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"INT": 1, "CHA": 2}, Traits: []string{"Darkvision", "Hellish Resistance", "Infernal Legacy"}, Languages: []string{"Common", "Infernal"}},
+}
+
+type SRDWeapon struct {
+	Name       string   `json:"name"`
+	Category   string   `json:"category"`
+	Type       string   `json:"type"`
+	Damage     string   `json:"damage"`
+	DamageType string   `json:"damage_type"`
+	Properties []string `json:"properties"`
+	Weight     float64  `json:"weight"`
+	Cost       string   `json:"cost"`
+}
+
+var srdWeapons = map[string]SRDWeapon{
+	"dagger": {Name: "Dagger", Category: "simple", Type: "melee", Damage: "1d4", DamageType: "piercing", Properties: []string{"finesse", "light", "thrown (20/60)"}, Weight: 1, Cost: "2 gp"},
+	"handaxe": {Name: "Handaxe", Category: "simple", Type: "melee", Damage: "1d6", DamageType: "slashing", Properties: []string{"light", "thrown (20/60)"}, Weight: 2, Cost: "5 gp"},
+	"mace": {Name: "Mace", Category: "simple", Type: "melee", Damage: "1d6", DamageType: "bludgeoning", Properties: []string{}, Weight: 4, Cost: "5 gp"},
+	"quarterstaff": {Name: "Quarterstaff", Category: "simple", Type: "melee", Damage: "1d6", DamageType: "bludgeoning", Properties: []string{"versatile (1d8)"}, Weight: 4, Cost: "2 sp"},
+	"spear": {Name: "Spear", Category: "simple", Type: "melee", Damage: "1d6", DamageType: "piercing", Properties: []string{"thrown (20/60)", "versatile (1d8)"}, Weight: 3, Cost: "1 gp"},
+	"shortbow": {Name: "Shortbow", Category: "simple", Type: "ranged", Damage: "1d6", DamageType: "piercing", Properties: []string{"ammunition (80/320)", "two-handed"}, Weight: 2, Cost: "25 gp"},
+	"light_crossbow": {Name: "Light Crossbow", Category: "simple", Type: "ranged", Damage: "1d8", DamageType: "piercing", Properties: []string{"ammunition (80/320)", "loading", "two-handed"}, Weight: 5, Cost: "25 gp"},
+	"longsword": {Name: "Longsword", Category: "martial", Type: "melee", Damage: "1d8", DamageType: "slashing", Properties: []string{"versatile (1d10)"}, Weight: 3, Cost: "15 gp"},
+	"rapier": {Name: "Rapier", Category: "martial", Type: "melee", Damage: "1d8", DamageType: "piercing", Properties: []string{"finesse"}, Weight: 2, Cost: "25 gp"},
+	"shortsword": {Name: "Shortsword", Category: "martial", Type: "melee", Damage: "1d6", DamageType: "piercing", Properties: []string{"finesse", "light"}, Weight: 2, Cost: "10 gp"},
+	"greatsword": {Name: "Greatsword", Category: "martial", Type: "melee", Damage: "2d6", DamageType: "slashing", Properties: []string{"heavy", "two-handed"}, Weight: 6, Cost: "50 gp"},
+	"greataxe": {Name: "Greataxe", Category: "martial", Type: "melee", Damage: "1d12", DamageType: "slashing", Properties: []string{"heavy", "two-handed"}, Weight: 7, Cost: "30 gp"},
+	"longbow": {Name: "Longbow", Category: "martial", Type: "ranged", Damage: "1d8", DamageType: "piercing", Properties: []string{"ammunition (150/600)", "heavy", "two-handed"}, Weight: 2, Cost: "50 gp"},
+}
+
+type SRDArmor struct {
+	Name          string  `json:"name"`
+	Category      string  `json:"category"`
+	AC            int     `json:"ac"`
+	DexBonus      bool    `json:"dex_bonus"`
+	MaxDexBonus   int     `json:"max_dex_bonus"`
+	StrRequired   int     `json:"str_required"`
+	StealthDisadv bool    `json:"stealth_disadvantage"`
+	Weight        float64 `json:"weight"`
+	Cost          string  `json:"cost"`
+}
+
+var srdArmor = map[string]SRDArmor{
+	"leather": {Name: "Leather", Category: "light", AC: 11, DexBonus: true, MaxDexBonus: -1, Weight: 10, Cost: "10 gp"},
+	"studded_leather": {Name: "Studded Leather", Category: "light", AC: 12, DexBonus: true, MaxDexBonus: -1, Weight: 13, Cost: "45 gp"},
+	"chain_shirt": {Name: "Chain Shirt", Category: "medium", AC: 13, DexBonus: true, MaxDexBonus: 2, Weight: 20, Cost: "50 gp"},
+	"scale_mail": {Name: "Scale Mail", Category: "medium", AC: 14, DexBonus: true, MaxDexBonus: 2, StealthDisadv: true, Weight: 45, Cost: "50 gp"},
+	"breastplate": {Name: "Breastplate", Category: "medium", AC: 14, DexBonus: true, MaxDexBonus: 2, Weight: 20, Cost: "400 gp"},
+	"half_plate": {Name: "Half Plate", Category: "medium", AC: 15, DexBonus: true, MaxDexBonus: 2, StealthDisadv: true, Weight: 40, Cost: "750 gp"},
+	"chain_mail": {Name: "Chain Mail", Category: "heavy", AC: 16, StrRequired: 13, StealthDisadv: true, Weight: 55, Cost: "75 gp"},
+	"splint": {Name: "Splint", Category: "heavy", AC: 17, StrRequired: 15, StealthDisadv: true, Weight: 60, Cost: "200 gp"},
+	"plate": {Name: "Plate", Category: "heavy", AC: 18, StrRequired: 15, StealthDisadv: true, Weight: 65, Cost: "1500 gp"},
+	"shield": {Name: "Shield", Category: "shield", AC: 2, Weight: 6, Cost: "10 gp"},
+}
+
+// SRD Handlers
+func handleSRDIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"name": "5e SRD",
+		"license": "CC-BY-4.0",
+		"endpoints": map[string]string{
+			"monsters": "/api/srd/monsters",
+			"spells":   "/api/srd/spells",
+			"classes":  "/api/srd/classes",
+			"races":    "/api/srd/races",
+			"weapons":  "/api/srd/weapons",
+			"armor":    "/api/srd/armor",
+		},
+	})
+}
+
+func handleSRDMonsters(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	names := []string{}
+	for k := range srdMonsters {
+		names = append(names, k)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"monsters": names, "count": len(names)})
+}
+
+func handleSRDMonster(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := strings.TrimPrefix(r.URL.Path, "/api/srd/monsters/")
+	if m, ok := srdMonsters[id]; ok {
+		json.NewEncoder(w).Encode(m)
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{"error": "monster_not_found"})
+	}
+}
+
+func handleSRDSpells(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	names := []string{}
+	for k := range srdSpells {
+		names = append(names, k)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"spells": names, "count": len(names)})
+}
+
+func handleSRDSpell(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := strings.TrimPrefix(r.URL.Path, "/api/srd/spells/")
+	if s, ok := srdSpells[id]; ok {
+		json.NewEncoder(w).Encode(s)
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{"error": "spell_not_found"})
+	}
+}
+
+func handleSRDClasses(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	names := []string{}
+	for k := range srdClasses {
+		names = append(names, k)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"classes": names, "count": len(names)})
+}
+
+func handleSRDClass(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := strings.TrimPrefix(r.URL.Path, "/api/srd/classes/")
+	if c, ok := srdClasses[id]; ok {
+		json.NewEncoder(w).Encode(c)
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{"error": "class_not_found"})
+	}
+}
+
+func handleSRDRaces(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	names := []string{}
+	for k := range srdRaces {
+		names = append(names, k)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"races": names, "count": len(names)})
+}
+
+func handleSRDRace(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	id := strings.TrimPrefix(r.URL.Path, "/api/srd/races/")
+	if race, ok := srdRaces[id]; ok {
+		json.NewEncoder(w).Encode(race)
+	} else {
+		json.NewEncoder(w).Encode(map[string]string{"error": "race_not_found"})
+	}
+}
+
+func handleSRDWeapons(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"weapons": srdWeapons, "count": len(srdWeapons)})
+}
+
+func handleSRDArmor(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{"armor": srdArmor, "count": len(srdArmor)})
 }
 
 func wrapHTML(title, content string) string {
