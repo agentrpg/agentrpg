@@ -75,7 +75,7 @@ func main() {
 				log.Println("Connected to Postgres")
 				initDB()
 				seedCampaignTemplates()
-				// checkAndSeedSRD() // Disabled - use seed SQL
+				checkAndSeedSRD() // Auto-seed from 5e API if tables empty
 				loadSRDFromDB()
 			}
 		}
@@ -230,6 +230,98 @@ func initDB() {
 		ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS max_level INTEGER DEFAULT 1;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
+	
+	-- SRD Content Tables
+	CREATE TABLE IF NOT EXISTS monsters (
+		id SERIAL PRIMARY KEY,
+		slug VARCHAR(100) UNIQUE NOT NULL,
+		name VARCHAR(100) NOT NULL,
+		size VARCHAR(20),
+		type VARCHAR(50),
+		ac INT,
+		hp INT,
+		hit_dice VARCHAR(20),
+		speed INT,
+		str INT, dex INT, con INT, intl INT, wis INT, cha INT,
+		cr VARCHAR(10),
+		xp INT,
+		actions JSONB DEFAULT '[]',
+		source VARCHAR(50) DEFAULT 'srd',
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	
+	CREATE TABLE IF NOT EXISTS spells (
+		id SERIAL PRIMARY KEY,
+		slug VARCHAR(100) UNIQUE NOT NULL,
+		name VARCHAR(100) NOT NULL,
+		level INT,
+		school VARCHAR(50),
+		casting_time VARCHAR(50),
+		range VARCHAR(50),
+		components VARCHAR(50),
+		duration VARCHAR(100),
+		description TEXT,
+		damage_dice VARCHAR(20),
+		damage_type VARCHAR(30),
+		saving_throw VARCHAR(10),
+		healing VARCHAR(20),
+		source VARCHAR(50) DEFAULT 'srd',
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	
+	CREATE TABLE IF NOT EXISTS classes (
+		id SERIAL PRIMARY KEY,
+		slug VARCHAR(50) UNIQUE NOT NULL,
+		name VARCHAR(50) NOT NULL,
+		hit_die INT,
+		primary_ability VARCHAR(20),
+		saving_throws VARCHAR(50),
+		armor_proficiencies TEXT,
+		weapon_proficiencies TEXT,
+		spellcasting_ability VARCHAR(10),
+		source VARCHAR(50) DEFAULT 'srd',
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	
+	CREATE TABLE IF NOT EXISTS races (
+		id SERIAL PRIMARY KEY,
+		slug VARCHAR(50) UNIQUE NOT NULL,
+		name VARCHAR(50) NOT NULL,
+		speed INT DEFAULT 30,
+		size VARCHAR(20) DEFAULT 'Medium',
+		ability_bonuses JSONB DEFAULT '{}',
+		traits TEXT,
+		source VARCHAR(50) DEFAULT 'srd',
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	
+	CREATE TABLE IF NOT EXISTS weapons (
+		id SERIAL PRIMARY KEY,
+		slug VARCHAR(100) UNIQUE NOT NULL,
+		name VARCHAR(100) NOT NULL,
+		category VARCHAR(50),
+		damage_dice VARCHAR(20),
+		damage_type VARCHAR(30),
+		weight DECIMAL(5,2),
+		properties TEXT,
+		source VARCHAR(50) DEFAULT 'srd',
+		created_at TIMESTAMP DEFAULT NOW()
+	);
+	
+	CREATE TABLE IF NOT EXISTS armor (
+		id SERIAL PRIMARY KEY,
+		slug VARCHAR(100) UNIQUE NOT NULL,
+		name VARCHAR(100) NOT NULL,
+		category VARCHAR(50),
+		ac_base INT,
+		ac_dex_bonus BOOLEAN DEFAULT FALSE,
+		ac_max_bonus INT,
+		strength_requirement INT,
+		stealth_disadvantage BOOLEAN DEFAULT FALSE,
+		weight DECIMAL(5,2),
+		source VARCHAR(50) DEFAULT 'srd',
+		created_at TIMESTAMP DEFAULT NOW()
+	);
 	`
 	_, err := db.Exec(schema)
 	if err != nil {
