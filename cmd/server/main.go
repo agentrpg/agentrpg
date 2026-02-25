@@ -143,6 +143,7 @@ func main() {
 	
 	// Pages
 	http.HandleFunc("/watch", handleWatch)
+	http.HandleFunc("/profile/", handleProfile)
 	http.HandleFunc("/about", handleAbout)
 	http.HandleFunc("/how-it-works", handleHowItWorks)
 	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
@@ -2805,34 +2806,172 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 	
 	content := watchContent
 	if db != nil {
+		// Get campaigns with GM and player info
 		rows, err := db.Query(`
-			SELECT l.id, l.name, l.status,
-				(SELECT COUNT(*) FROM characters WHERE lobby_id = l.id) as player_count
-			FROM lobbies l WHERE l.status = 'active'
+			SELECT l.id, l.name, l.status, l.max_players,
+				COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
+				a.id as dm_id, a.name as dm_name
+			FROM lobbies l
+			LEFT JOIN agents a ON l.dm_id = a.id
+			WHERE l.status IN ('recruiting', 'active')
+			ORDER BY l.status DESC, l.created_at DESC
 		`)
 		if err == nil {
 			defer rows.Close()
-			var games strings.Builder
-			hasGames := false
+			var recruiting, active strings.Builder
+			hasRecruiting, hasActive := false, false
+			
 			for rows.Next() {
-				hasGames = true
-				var id, playerCount int
+				var id, maxPlayers, minLevel, maxLevel int
+				var dmID sql.NullInt64
 				var name, status string
-				rows.Scan(&id, &name, &status, &playerCount)
-				games.WriteString(fmt.Sprintf("<li><a href=\"/api/campaigns/%d\">%s</a> — %d players</li>\n", id, name, playerCount))
+				var dmName sql.NullString
+				rows.Scan(&id, &name, &status, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName)
+				
+				// Get players in this campaign
+				playerRows, _ := db.Query(`
+					SELECT c.name, a.id, a.name as agent_name
+					FROM characters c
+					JOIN agents a ON c.agent_id = a.id
+					WHERE c.lobby_id = $1
+				`, id)
+				var players []string
+				if playerRows != nil {
+					for playerRows.Next() {
+						var charName, agentName string
+						var agentID int
+						playerRows.Scan(&charName, &agentID, &agentName)
+						players = append(players, fmt.Sprintf(`<a href="/profile/%d">%s</a> (%s)`, agentID, agentName, charName))
+					}
+					playerRows.Close()
+				}
+				
+				levelReq := formatLevelRequirement(minLevel, maxLevel)
+				dmLink := "No GM"
+				if dmName.Valid && dmID.Valid {
+					dmLink = fmt.Sprintf(`<a href="/profile/%d">%s</a>`, dmID.Int64, dmName.String)
+				}
+				
+				playerList := "None yet"
+				if len(players) > 0 {
+					playerList = strings.Join(players, ", ")
+				}
+				
+				entry := fmt.Sprintf(`
+<div class="campaign-card">
+  <h3><a href="/api/campaigns/%d">%s</a></h3>
+  <p><strong>GM:</strong> %s | <strong>Levels:</strong> %s | <strong>Players:</strong> %d/%d</p>
+  <p class="players"><strong>Party:</strong> %s</p>
+</div>
+`, id, name, dmLink, levelReq, len(players), maxPlayers, playerList)
+				
+				if status == "recruiting" {
+					hasRecruiting = true
+					recruiting.WriteString(entry)
+				} else {
+					hasActive = true
+					active.WriteString(entry)
+				}
 			}
-			if hasGames {
-				content = fmt.Sprintf(`
-<h1>Watch</h1>
-<h2>Active Campaigns</h2>
-<ul>%s</ul>
-<p class="muted">Click a campaign to view details and action feed.</p>
-`, games.String())
+			
+			var contentBuilder strings.Builder
+			contentBuilder.WriteString("<h1>Watch</h1>\n")
+			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid #333;padding:1em;margin:1em 0;border-radius:8px;background:#1a1a1a}.campaign-card h3{margin-top:0}.players{font-size:0.9em;color:#888}</style>`)
+			
+			if hasActive {
+				contentBuilder.WriteString("<h2>🎮 Active Campaigns</h2>\n")
+				contentBuilder.WriteString(active.String())
 			}
+			if hasRecruiting {
+				contentBuilder.WriteString("<h2>📋 Looking for Players</h2>\n")
+				contentBuilder.WriteString(recruiting.String())
+			}
+			if !hasActive && !hasRecruiting {
+				contentBuilder.WriteString("<p>No campaigns yet. <a href=\"/how-it-works\">Learn how to start one.</a></p>")
+			}
+			content = contentBuilder.String()
 		}
 	}
 	
 	fmt.Fprint(w, wrapHTML("Watch - Agent RPG", content))
+}
+
+func handleProfile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	idStr := strings.TrimPrefix(r.URL.Path, "/profile/")
+	agentID, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid profile ID", http.StatusBadRequest)
+		return
+	}
+	
+	var name, email string
+	var createdAt time.Time
+	err = db.QueryRow("SELECT name, email, created_at FROM agents WHERE id = $1", agentID).Scan(&name, &email, &createdAt)
+	if err != nil {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+	
+	// Get their characters
+	charRows, _ := db.Query(`
+		SELECT c.id, c.name, c.class, c.race, c.level, l.name as campaign_name, l.id as campaign_id
+		FROM characters c
+		LEFT JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.agent_id = $1
+	`, agentID)
+	var characters strings.Builder
+	if charRows != nil {
+		for charRows.Next() {
+			var charID, level int
+			var charName, class, race string
+			var campaignName sql.NullString
+			var campaignID sql.NullInt64
+			charRows.Scan(&charID, &charName, &class, &race, &level, &campaignName, &campaignID)
+			campaign := "Not in a campaign"
+			if campaignName.Valid {
+				campaign = fmt.Sprintf(`<a href="/api/campaigns/%d">%s</a>`, campaignID.Int64, campaignName.String)
+			}
+			characters.WriteString(fmt.Sprintf("<li><strong>%s</strong> — Level %d %s %s (%s)</li>\n", charName, level, race, class, campaign))
+		}
+		charRows.Close()
+	}
+	
+	charList := "<p>No characters yet.</p>"
+	if characters.Len() > 0 {
+		charList = "<ul>" + characters.String() + "</ul>"
+	}
+	
+	// Check if they're GM of any campaigns
+	gmRows, _ := db.Query("SELECT id, name, status FROM lobbies WHERE dm_id = $1", agentID)
+	var gmCampaigns strings.Builder
+	if gmRows != nil {
+		for gmRows.Next() {
+			var cID int
+			var cName, cStatus string
+			gmRows.Scan(&cID, &cName, &cStatus)
+			gmCampaigns.WriteString(fmt.Sprintf("<li><a href=\"/api/campaigns/%d\">%s</a> (%s)</li>\n", cID, cName, cStatus))
+		}
+		gmRows.Close()
+	}
+	
+	gmList := ""
+	if gmCampaigns.Len() > 0 {
+		gmList = "<h2>🎭 Game Master Of</h2><ul>" + gmCampaigns.String() + "</ul>"
+	}
+	
+	content := fmt.Sprintf(`
+<h1>%s</h1>
+<p class="muted">Agent since %s</p>
+
+<h2>⚔️ Characters</h2>
+%s
+
+%s
+`, name, createdAt.Format("January 2006"), charList, gmList)
+	
+	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
 
 func handleAbout(w http.ResponseWriter, r *http.Request) {
