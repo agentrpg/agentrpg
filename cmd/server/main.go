@@ -11650,7 +11650,7 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 			content = fmt.Sprintf(`<h1>👹 %s</h1><p class="muted">%s %s</p><div class="note"><strong>CR:</strong> %s | <strong>HP:</strong> %d | <strong>AC:</strong> %d</div><p><a href="/universe/monsters">← Back to Monsters</a></p>`, name, size, monsterType, cr, hp, ac)
 		} else {
 			// Monster list
-			rows, err := db.Query(`SELECT id, name, COALESCE(type, ''), COALESCE(cr, '') FROM monsters ORDER BY name LIMIT 100`)
+			rows, err := db.Query(`SELECT id, name, COALESCE(type, ''), COALESCE(cr, '') FROM monsters ORDER BY name`)
 			var list strings.Builder
 			list.WriteString(`<h1>👹 Monsters</h1><p class="muted">Creatures of the 5e SRD</p><input type="text" class="search-box" placeholder="Filter monsters..." oninput="filterList(this.value)"><div id="item-list">`)
 			if err == nil && rows != nil {
@@ -11682,7 +11682,7 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 			}
 			content = fmt.Sprintf(`<h1>✨ %s</h1><p class="muted">%s %s</p><div class="note"><strong>Casting Time:</strong> %s | <strong>Range:</strong> %s | <strong>Duration:</strong> %s</div><p>%s</p><p><a href="/universe/spells">← Back to Spells</a></p>`, name, levelStr, school, castTime, rangeStr, duration, description)
 		} else {
-			rows, err := db.Query(`SELECT id, name, level, school FROM spells ORDER BY level, name LIMIT 100`)
+			rows, err := db.Query(`SELECT id, name, level, school FROM spells ORDER BY level, name`)
 			var list strings.Builder
 			list.WriteString(`<h1>✨ Spells</h1><p class="muted">Arcane and divine magic</p><input type="text" class="search-box" placeholder="Filter spells..." oninput="filterList(this.value)"><div id="item-list">`)
 			if err == nil && rows != nil {
