@@ -11703,16 +11703,23 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 		}
 		
 	case "classes":
-		rows, err := db.Query(`SELECT id, name, hit_die, COALESCE(description, '') FROM classes ORDER BY name`)
+		rows, err := db.Query(`SELECT id, name, COALESCE(hit_die, 8), COALESCE(primary_ability, ''), COALESCE(saving_throws, '') FROM classes ORDER BY name`)
 		var list strings.Builder
 		list.WriteString(`<h1>⚔️ Classes</h1><p class="muted">Character paths and professions</p><div class="category-grid">`)
 		if err == nil && rows != nil {
 			for rows.Next() {
 				var id, hitDie int
-				var name, desc string
-				rows.Scan(&id, &name, &hitDie, &desc)
-				if len(desc) > 100 {
-					desc = desc[:100] + "..."
+				var name, primaryAbility, savingThrows string
+				rows.Scan(&id, &name, &hitDie, &primaryAbility, &savingThrows)
+				desc := ""
+				if primaryAbility != "" {
+					desc = "Primary: " + primaryAbility
+				}
+				if savingThrows != "" {
+					if desc != "" {
+						desc += " • "
+					}
+					desc += "Saves: " + savingThrows
 				}
 				list.WriteString(fmt.Sprintf(`<div class="category-card"><h3>%s</h3><span class="count">Hit Die: d%d</span><p class="description">%s</p></div>`, name, hitDie, desc))
 			}
