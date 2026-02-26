@@ -305,70 +305,78 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] Conditions column in characters table (JSONB)
 - [x] Basic condition tracking (name + duration)
 - [x] Condition effects description lookup
+- [x] **Condition Mechanical Effects (v0.8.8):**
+  - [x] Helper functions: hasCondition, getCharConditions, isIncapacitated, canMove, autoFailsSave, isAutoCrit, getSaveDisadvantage
+  - [x] Incapacitated characters blocked from taking actions (except death saves)
+  - [x] Grappled/restrained/stunned/paralyzed/unconscious block movement (speed = 0)
+  - [x] Paralyzed/stunned/unconscious auto-fail STR/DEX saving throws
+  - [x] Exhaustion 3+ grants disadvantage on saving throws
+  - [x] Restrained grants disadvantage on DEX saves
+  - [x] Paralyzed/unconscious targets take auto-crits from melee attacks
 
 **What we need (all 15 PHB conditions with mechanical effects):**
-- [ ] **Blinded**
+- [x] **Blinded** (partial - disadvantage on attacks implemented in getAttackModifiers)
   - [ ] Auto-fail checks requiring sight
-  - [ ] Attack rolls have disadvantage
-  - [ ] Attacks against have advantage
+  - [x] Attack rolls have disadvantage
+  - [x] Attacks against have advantage
 - [ ] **Charmed**
   - [ ] Can't attack the charmer
   - [ ] Charmer has advantage on social checks
 - [ ] **Deafened**
   - [ ] Auto-fail checks requiring hearing
-- [ ] **Exhaustion (CRITICAL — 6 levels!)**
-  - [ ] Level 1: Disadvantage on ability checks
-  - [ ] Level 2: Speed halved
-  - [ ] Level 3: Disadvantage on attacks/saves
-  - [ ] Level 4: HP maximum halved
-  - [ ] Level 5: Speed reduced to 0
-  - [ ] Level 6: Death
-  - [ ] Cumulative tracking
-  - [ ] Long rest removes 1 level (with food/drink)
-- [ ] **Frightened**
-  - [ ] Disadvantage on ability checks/attacks while source visible
+- [x] **Exhaustion (CRITICAL — 6 levels!)** ✅ (v0.8.7 tracking + v0.8.8 effects)
+  - [x] Level 1: Disadvantage on ability checks (displayed in sheet)
+  - [x] Level 2: Speed halved (displayed in sheet)
+  - [x] Level 3: Disadvantage on attacks/saves (enforced in saving throws)
+  - [x] Level 4: HP maximum halved (displayed in sheet)
+  - [x] Level 5: Speed reduced to 0 (enforced in canMove)
+  - [x] Level 6: Death (displayed in sheet)
+  - [x] Cumulative tracking
+  - [x] Long rest removes 1 level (with food/drink)
+- [x] **Frightened** (partial - attack disadvantage implemented)
+  - [x] Disadvantage on ability checks/attacks while source visible
   - [ ] Can't willingly move closer to source
-- [ ] **Grappled**
-  - [ ] Speed becomes 0
+- [x] **Grappled** ✅ (v0.8.8)
+  - [x] Speed becomes 0 (enforced in canMove)
   - [ ] Ends if grappler incapacitated
   - [ ] Ends if effect moves target out of reach
-- [ ] **Incapacitated**
-  - [ ] Can't take actions or reactions
-- [ ] **Invisible**
+- [x] **Incapacitated** ✅ (v0.8.8)
+  - [x] Can't take actions or reactions (enforced in handleAction)
+- [x] **Invisible** (implemented in getAttackModifiers)
   - [ ] Impossible to see without special sense
-  - [ ] Attacks against have disadvantage
-  - [ ] Attack rolls have advantage
-- [ ] **Paralyzed**
-  - [ ] Incapacitated, can't move or speak
-  - [ ] Auto-fail STR/DEX saves
-  - [ ] Attacks have advantage
-  - [ ] Hits within 5ft are automatic crits
+  - [x] Attacks against have disadvantage
+  - [x] Attack rolls have advantage
+- [x] **Paralyzed** ✅ (v0.8.8)
+  - [x] Incapacitated, can't move or speak (enforced)
+  - [x] Auto-fail STR/DEX saves (enforced in handleGMSavingThrow)
+  - [x] Attacks have advantage (implemented in getAttackModifiers)
+  - [x] Hits within 5ft are automatic crits (enforced in resolveAction)
 - [ ] **Petrified**
   - [ ] Weight x10
-  - [ ] Incapacitated, can't move/speak, unaware
+  - [x] Incapacitated, can't move/speak, unaware (enforced via isIncapacitated)
   - [ ] Resistance to all damage
   - [ ] Immune to poison and disease
-- [ ] **Poisoned**
-  - [ ] Disadvantage on attack rolls
+- [x] **Poisoned** (partial - attack disadvantage implemented)
+  - [x] Disadvantage on attack rolls
   - [ ] Disadvantage on ability checks
-- [ ] **Prone**
-  - [ ] Disadvantage on attack rolls
-  - [ ] Attacks within 5ft have advantage
-  - [ ] Attacks from further have disadvantage
+- [x] **Prone** (partial - advantage/disadvantage implemented)
+  - [x] Disadvantage on attack rolls
+  - [x] Attacks within 5ft have advantage
+  - [ ] Attacks from further have disadvantage (always assumes melee currently)
   - [ ] Must crawl (1ft costs 2ft) or use movement to stand
-- [ ] **Restrained**
-  - [ ] Speed becomes 0
-  - [ ] Attack rolls have disadvantage
-  - [ ] Attacks against have advantage
-  - [ ] Disadvantage on DEX saves
-- [ ] **Stunned**
-  - [ ] Incapacitated, can't move
+- [x] **Restrained** ✅ (v0.8.8)
+  - [x] Speed becomes 0 (enforced in canMove)
+  - [x] Attack rolls have disadvantage (implemented in getAttackModifiers)
+  - [x] Attacks against have advantage (implemented in getAttackModifiers)
+  - [x] Disadvantage on DEX saves (enforced in handleGMSavingThrow)
+- [x] **Stunned** ✅ (v0.8.8)
+  - [x] Incapacitated, can't move (enforced)
   - [ ] Can only speak falteringly
-  - [ ] Auto-fail STR/DEX saves
-  - [ ] Attacks have advantage
-- [ ] **Unconscious**
-  - [ ] Incapacitated, can't move or speak, unaware
-  - [ ] Drop held items, fall prone
+  - [x] Auto-fail STR/DEX saves (enforced in handleGMSavingThrow)
+  - [x] Attacks have advantage (implemented in getAttackModifiers)
+- [x] **Unconscious** ✅ (v0.8.8)
+  - [x] Incapacitated, can't move or speak, unaware (enforced)
+  - [ ] Drop held items, fall prone (not automated)
   - [ ] Auto-fail STR/DEX saves
   - [ ] Attacks have advantage
   - [ ] Hits within 5ft are automatic crits
@@ -599,7 +607,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 
 ### P0 — Critical for Playable Games
 1. **Action Economy** — Without this, combat is broken ✅ (v0.8.6)
-2. **Conditions with Effects** — Especially exhaustion, prone, grappled
+2. **Conditions with Effects** — Especially exhaustion, prone, grappled ✅ (v0.8.8)
 3. **Short/Long Rest** — Recovery is fundamental ✅ (v0.8.7)
 4. **Hit Dice** — Healing resource management ✅ (v0.8.7)
 
