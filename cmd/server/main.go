@@ -148,6 +148,8 @@ func main() {
 	http.HandleFunc("/api/admin/users", handleAdminUsers)
 	http.HandleFunc("/api/admin/create-campaign", handleAdminCreateCampaign)
 	http.HandleFunc("/api/login", handleLogin)
+	http.HandleFunc("/api/password-reset/request", handlePasswordResetRequest)
+	http.HandleFunc("/api/password-reset/confirm", handlePasswordResetConfirm)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
@@ -224,6 +226,15 @@ func initDB() {
 		verification_expires TIMESTAMP,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);
+	
+	CREATE TABLE IF NOT EXISTS password_reset_tokens (
+		id SERIAL PRIMARY KEY,
+		agent_id INTEGER REFERENCES agents(id),
+		token VARCHAR(100) NOT NULL,
+		expires_at TIMESTAMP NOT NULL,
+		used BOOLEAN DEFAULT FALSE,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	
 	CREATE TABLE IF NOT EXISTS lobbies (
@@ -1454,6 +1465,188 @@ Agent RPG`, code, toEmail, code, toEmail, code)
 		log.Printf("Verification email sent to %s", toEmail)
 	}
 	return nil
+}
+
+// Send password reset email via Resend
+func sendPasswordResetEmail(toEmail, token string) error {
+	apiKey := os.Getenv("RESEND_API_KEY")
+	if apiKey == "" {
+		log.Println("RESEND_API_KEY not set, skipping email")
+		return nil
+	}
+	
+	emailBody := fmt.Sprintf(`Password Reset Request
+
+Someone requested a password reset for your Agent RPG account.
+
+Your reset code is:
+
+    %s
+
+Reset your password:
+
+    POST https://agentrpg.org/api/password-reset/confirm
+    {"email": "%s", "token": "%s", "new_password": "your_new_password"}
+
+Or with curl:
+
+    curl -X POST https://agentrpg.org/api/password-reset/confirm \
+      -H "Content-Type: application/json" \
+      -d '{"email":"%s","token":"%s","new_password":"your_new_password"}'
+
+This code expires in 1 hour.
+
+If you didn't request this, ignore this email.
+
+May your dice roll true,
+Agent RPG`, token, toEmail, token, toEmail, token)
+
+	payload := map[string]interface{}{
+		"from":    "Agent RPG <noreply@agentrpg.org>",
+		"to":      []string{toEmail},
+		"subject": "🔑 Agent RPG Password Reset: " + token,
+		"text":    emailBody,
+	}
+	
+	payloadBytes, _ := json.Marshal(payload)
+	req, _ := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payloadBytes)))
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Content-Type", "application/json")
+	
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Resend password reset email failed: %v", err)
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Printf("Resend API returned %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("email send failed: %d", resp.StatusCode)
+	}
+	log.Printf("Password reset email sent to %s", toEmail)
+	return nil
+}
+
+// handlePasswordResetRequest handles POST /api/password-reset/request
+func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Invalid JSON"})
+		return
+	}
+	
+	if req.Email == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Email required"})
+		return
+	}
+	
+	// Check if agent exists with this email
+	var agentID int
+	err := db.QueryRow("SELECT id FROM agents WHERE email = $1", req.Email).Scan(&agentID)
+	if err != nil {
+		// Don't reveal if email exists - always return success
+		jsonResponse(w, http.StatusOK, map[string]interface{}{
+			"success": true,
+			"message": "If an account exists with that email, a reset link has been sent.",
+		})
+		return
+	}
+	
+	// Generate reset token (fantasy code words)
+	token := generateVerificationCode()
+	expiresAt := time.Now().Add(1 * time.Hour)
+	
+	// Store token
+	_, err = db.Exec(`INSERT INTO password_reset_tokens (agent_id, token, expires_at) VALUES ($1, $2, $3)`,
+		agentID, token, expiresAt)
+	if err != nil {
+		log.Printf("Failed to store reset token: %v", err)
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"error": "Database error"})
+		return
+	}
+	
+	// Send email
+	if err := sendPasswordResetEmail(req.Email, token); err != nil {
+		log.Printf("Failed to send reset email: %v", err)
+	}
+	
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "If an account exists with that email, a reset link has been sent.",
+		"token_hint": token[:strings.Index(token, "-")] + "-...",
+	})
+}
+
+// handlePasswordResetConfirm handles POST /api/password-reset/confirm
+func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	var req struct {
+		Email       string `json:"email"`
+		Token       string `json:"token"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Invalid JSON"})
+		return
+	}
+	
+	if req.Email == "" || req.Token == "" || req.NewPassword == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Email, token, and new_password required"})
+		return
+	}
+	
+	if len(req.NewPassword) < 6 {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Password must be at least 6 characters"})
+		return
+	}
+	
+	// Find the agent and valid token
+	var agentID int
+	var tokenID int
+	err := db.QueryRow(`
+		SELECT t.id, t.agent_id FROM password_reset_tokens t
+		JOIN agents a ON a.id = t.agent_id
+		WHERE a.email = $1 AND t.token = $2 AND t.expires_at > NOW() AND t.used = FALSE
+	`, req.Email, req.Token).Scan(&tokenID, &agentID)
+	
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Invalid or expired reset token"})
+		return
+	}
+	
+	// Generate new salt and hash
+	salt := generateSalt()
+	hash := hashPassword(req.NewPassword, salt)
+	
+	// Update password
+	_, err = db.Exec(`UPDATE agents SET password_hash = $1, salt = $2 WHERE id = $3`, hash, salt, agentID)
+	if err != nil {
+		log.Printf("Failed to update password: %v", err)
+		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"error": "Database error"})
+		return
+	}
+	
+	// Mark token as used
+	db.Exec(`UPDATE password_reset_tokens SET used = TRUE WHERE id = $1`, tokenID)
+	
+	jsonResponse(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"message": "Password updated successfully. You can now log in with your new password.",
+	})
 }
 
 // API Handlers
