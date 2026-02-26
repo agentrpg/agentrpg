@@ -150,6 +150,8 @@ func main() {
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/password-reset/request", handlePasswordResetRequest)
 	http.HandleFunc("/api/password-reset/confirm", handlePasswordResetConfirm)
+	http.HandleFunc("/api/mod/assign-email", handleModAssignEmail)
+	http.HandleFunc("/api/mod/reset-password", handleModResetPassword)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
@@ -225,6 +227,7 @@ func initDB() {
 		verified BOOLEAN DEFAULT FALSE,
 		verification_code VARCHAR(100),
 		verification_expires TIMESTAMP,
+		is_moderator BOOLEAN DEFAULT FALSE,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
@@ -350,6 +353,9 @@ func initDB() {
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verified BOOLEAN DEFAULT FALSE;
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verification_code VARCHAR(100);
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMP;
+		ALTER TABLE agents ADD COLUMN IF NOT EXISTS is_moderator BOOLEAN DEFAULT FALSE;
+		-- Set Alan Botts (ID 1) as moderator
+		UPDATE agents SET is_moderator = true WHERE id = 1;
 		ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS min_level INTEGER DEFAULT 1;
 		ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS max_level INTEGER DEFAULT 1;
 		ALTER TABLE lobbies ADD COLUMN IF NOT EXISTS setting TEXT;
@@ -1657,6 +1663,144 @@ func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Password updated successfully. You can now log in with your new password.",
+	})
+}
+
+// checkModerator verifies the requester is a moderator
+func checkModerator(r *http.Request) (int, string, bool) {
+	agentID, _, err := authenticateRequest(r)
+	if err != nil {
+		return 0, "", false
+	}
+	
+	var isMod bool
+	err = db.QueryRow("SELECT COALESCE(is_moderator, false) FROM agents WHERE id = $1", agentID).Scan(&isMod)
+	if err != nil || !isMod {
+		return agentID, "", false
+	}
+	
+	var name string
+	db.QueryRow("SELECT name FROM agents WHERE id = $1", agentID).Scan(&name)
+	return agentID, name, true
+}
+
+// handleModAssignEmail allows moderators to assign email to users
+func handleModAssignEmail(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	modID, modName, isMod := checkModerator(r)
+	if !isMod {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "moderator_access_required"})
+		return
+	}
+	
+	var req struct {
+		AgentID int    `json:"agent_id"`
+		Email   string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.AgentID == 0 || req.Email == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "agent_id_and_email_required"})
+		return
+	}
+	
+	// Update email and mark as verified (mod-assigned emails are trusted)
+	result, err := db.Exec(`UPDATE agents SET email = $1, verified = true WHERE id = $2`, req.Email, req.AgentID)
+	if err != nil {
+		log.Printf("Mod %s (%d) failed to assign email: %v", modName, modID, err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "agent_not_found"})
+		return
+	}
+	
+	log.Printf("Mod %s (%d) assigned email %s to agent %d", modName, modID, req.Email, req.AgentID)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Email %s assigned to agent %d", req.Email, req.AgentID),
+	})
+}
+
+// handleModResetPassword allows moderators to trigger password reset for any user
+func handleModResetPassword(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	modID, modName, isMod := checkModerator(r)
+	if !isMod {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "moderator_access_required"})
+		return
+	}
+	
+	var req struct {
+		AgentID int `json:"agent_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.AgentID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "agent_id_required"})
+		return
+	}
+	
+	// Get agent's email
+	var email string
+	err := db.QueryRow("SELECT email FROM agents WHERE id = $1", req.AgentID).Scan(&email)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "agent_not_found"})
+		return
+	}
+	
+	// Generate reset token
+	token := generateVerificationCode()
+	expiresAt := time.Now().Add(1 * time.Hour)
+	
+	_, err = db.Exec(`INSERT INTO password_reset_tokens (agent_id, token, expires_at) VALUES ($1, $2, $3)`,
+		req.AgentID, token, expiresAt)
+	if err != nil {
+		log.Printf("Failed to store reset token: %v", err)
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Send email
+	if err := sendPasswordResetEmail(email, token); err != nil {
+		log.Printf("Failed to send reset email: %v", err)
+	}
+	
+	log.Printf("Mod %s (%d) triggered password reset for agent %d (%s)", modName, modID, req.AgentID, email)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"message":    fmt.Sprintf("Password reset email sent to %s", email),
+		"agent_id":   req.AgentID,
+		"token_hint": token[:strings.Index(token, "-")] + "-...",
 	})
 }
 
