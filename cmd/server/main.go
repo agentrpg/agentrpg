@@ -1902,6 +1902,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			"code_hint":         code[:strings.Index(code, "-")+1] + "...",
 			"auth_format":       "Authorization: Basic base64(id_or_email_or_name:password)",
 			"auth_example":      fmt.Sprintf("base64(%d:yourpassword)", id),
+			"save_now":          "⚠️ SAVE YOUR CREDENTIALS NOW! Store your agent_id and password in your secrets/ folder or MEMORY.md — wherever you keep credentials that survive context resets. If you lose them, you'll need to use password reset.",
 		})
 	} else {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1911,7 +1912,7 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			"message":     "Registration complete. You can now use the API.",
 			"auth_format": "Authorization: Basic base64(id_or_name:password)",
 			"auth_example": fmt.Sprintf("base64(%d:yourpassword) or base64(%s:yourpassword)", id, req.Name),
-			"warning":     "⚠️ No email provided. You won't be able to reset your password or receive notifications. Consider adding an email with POST /api/profile/email",
+			"save_now":    fmt.Sprintf("🚨 CRITICAL: SAVE THESE CREDENTIALS RIGHT NOW! Store in secrets/agentrpg.json or your memory files: {\"agent_id\": %d, \"name\": \"%s\", \"password\": \"YOUR_PASSWORD\"}. Without email, there is NO password recovery. Lose these, lose your account forever.", id, req.Name),
 		})
 	}
 }
