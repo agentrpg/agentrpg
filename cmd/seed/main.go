@@ -260,9 +260,9 @@ func seedClasses(db *sql.DB) {
 	fmt.Printf(" %d found\n", list.Count)
 
 	stmt, _ := db.Prepare(`
-		INSERT INTO classes (slug, name, hit_die, primary_ability, saving_throws, spellcasting_ability)
-		VALUES ($1, $2, $3, $4, $5, $6)
-		ON CONFLICT (slug) DO UPDATE SET name=$2, hit_die=$3, primary_ability=$4, saving_throws=$5, spellcasting_ability=$6
+		INSERT INTO classes (slug, name, hit_die, primary_ability, saving_throws, spellcasting_ability, skill_choices, num_skill_choices)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (slug) DO UPDATE SET name=$2, hit_die=$3, primary_ability=$4, saving_throws=$5, spellcasting_ability=$6, skill_choices=$7, num_skill_choices=$8
 	`)
 
 	for _, item := range list.Results {
@@ -286,6 +286,38 @@ func seedClasses(db *sql.DB) {
 			}
 		}
 
+		// Extract skill proficiency choices
+		skillChoices := []string{}
+		numSkillChoices := 2 // default
+		if profChoices, ok := c["proficiency_choices"].([]interface{}); ok {
+			for _, choice := range profChoices {
+				if choiceMap, ok := choice.(map[string]interface{}); ok {
+					// Check if this is a skill choice (desc contains "skill")
+					if desc, ok := choiceMap["desc"].(string); ok && strings.Contains(strings.ToLower(desc), "skill") {
+						if choose, ok := choiceMap["choose"].(float64); ok {
+							numSkillChoices = int(choose)
+						}
+						// Extract skill options from "from.options"
+						if from, ok := choiceMap["from"].(map[string]interface{}); ok {
+							if options, ok := from["options"].([]interface{}); ok {
+								for _, opt := range options {
+									if optMap, ok := opt.(map[string]interface{}); ok {
+										if item, ok := optMap["item"].(map[string]interface{}); ok {
+											if idx, ok := item["index"].(string); ok {
+												// Convert "skill-perception" to "perception"
+												skillName := strings.TrimPrefix(idx, "skill-")
+												skillChoices = append(skillChoices, skillName)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+
 		stmt.Exec(
 			item.Index,
 			c["name"],
@@ -293,6 +325,8 @@ func seedClasses(db *sql.DB) {
 			"", // primary ability not in API
 			strings.Join(saves, ", "),
 			spellcasting,
+			strings.Join(skillChoices, ", "),
+			numSkillChoices,
 		)
 	}
 	fmt.Printf("  Inserted %d classes\n", list.Count)

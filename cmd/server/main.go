@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.8"
+const version = "0.8.9"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -433,6 +433,15 @@ func initDB() {
 		
 		-- Exhaustion level (0-6, 6 = death)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS exhaustion_level INTEGER DEFAULT 0;
+		
+		-- Skill proficiencies (Phase 8 P1 - Proficiencies)
+		-- Comma-separated list of skill names the character is proficient in
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS skill_proficiencies TEXT DEFAULT '';
+		
+		-- Class skill choices (Phase 8 P1 - Proficiencies)
+		-- Available skills a class can choose from, and how many to pick
+		ALTER TABLE classes ADD COLUMN IF NOT EXISTS skill_choices TEXT DEFAULT '';
+		ALTER TABLE classes ADD COLUMN IF NOT EXISTS num_skill_choices INTEGER DEFAULT 2;
 		
 		-- Spells: ritual casting and area of effect support
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS is_ritual BOOLEAN DEFAULT FALSE;
@@ -4129,16 +4138,17 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 	
 	if r.Method == "POST" {
 		var req struct {
-			Name       string `json:"name"`
-			Class      string `json:"class"`
-			Race       string `json:"race"`
-			Background string `json:"background"`
-			Str        int    `json:"str"`
-			Dex        int    `json:"dex"`
-			Con        int    `json:"con"`
-			Int        int    `json:"int"`
-			Wis        int    `json:"wis"`
-			Cha        int    `json:"cha"`
+			Name              string   `json:"name"`
+			Class             string   `json:"class"`
+			Race              string   `json:"race"`
+			Background        string   `json:"background"`
+			Str               int      `json:"str"`
+			Dex               int      `json:"dex"`
+			Con               int      `json:"con"`
+			Int               int      `json:"int"`
+			Wis               int      `json:"wis"`
+			Cha               int      `json:"cha"`
+			SkillProficiencies []string `json:"skill_proficiencies"` // e.g., ["perception", "stealth"]
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		
@@ -4177,20 +4187,68 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 		// Use class hit die from SRD for HP
 		classKey := strings.ToLower(req.Class)
 		hitDie := 8 // default
+		numSkillChoices := 2 // default
+		skillChoicesAvailable := map[string]bool{}
 		if class, ok := srdClasses[classKey]; ok {
 			hitDie = class.HitDie
+			// Get skill choices from class (parsed from database at startup)
+			var skillChoicesStr string
+			var numChoices int
+			db.QueryRow(`SELECT COALESCE(skill_choices, ''), COALESCE(num_skill_choices, 2) FROM classes WHERE slug = $1`, classKey).Scan(&skillChoicesStr, &numChoices)
+			if numChoices > 0 {
+				numSkillChoices = numChoices
+			}
+			if skillChoicesStr != "" {
+				for _, skill := range strings.Split(skillChoicesStr, ",") {
+					skillChoicesAvailable[strings.TrimSpace(strings.ToLower(skill))] = true
+				}
+			}
 		}
 		hp := hitDie + modifier(req.Con) // Level 1: max hit die + CON mod
 		ac := 10 + modifier(req.Dex)
+		
+		// Validate skill proficiency choices
+		skillProfsStr := ""
+		if len(req.SkillProficiencies) > 0 {
+			// Validate count
+			if len(req.SkillProficiencies) > numSkillChoices {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": "too_many_skills",
+					"message": fmt.Sprintf("Your class allows %d skill proficiencies, you chose %d", numSkillChoices, len(req.SkillProficiencies)),
+					"max_skills": numSkillChoices,
+				})
+				return
+			}
+			// Validate each skill is available to this class
+			validSkills := []string{}
+			for _, skill := range req.SkillProficiencies {
+				skillLower := strings.ToLower(strings.TrimSpace(skill))
+				if len(skillChoicesAvailable) > 0 && !skillChoicesAvailable[skillLower] {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error": "invalid_skill_choice",
+						"message": fmt.Sprintf("'%s' is not available to %s class", skill, req.Class),
+						"available_skills": func() []string {
+							skills := []string{}
+							for s := range skillChoicesAvailable { skills = append(skills, s) }
+							sort.Strings(skills)
+							return skills
+						}(),
+					})
+					return
+				}
+				validSkills = append(validSkills, skillLower)
+			}
+			skillProfsStr = strings.Join(validSkills, ", ")
+		}
 		
 		// Starting gold (simplified: 10gp for all classes)
 		startingGold := 10
 		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -4266,6 +4324,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var concentratingOn string
 	var gold int
 	var inventoryJSON []byte
+	var skillProfsRaw string
 	
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
@@ -4275,13 +4334,14 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
 			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
 			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0),
-			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0)
+			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0),
+			COALESCE(skill_proficiencies, '')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
-		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel)
+		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -4341,6 +4401,16 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		},
 		"conditions":          conditions,
 		"proficiency_bonus":   proficiencyBonus(level),
+		"skill_proficiencies": func() []string {
+			if skillProfsRaw == "" {
+				return []string{}
+			}
+			skills := []string{}
+			for _, s := range strings.Split(skillProfsRaw, ",") {
+				skills = append(skills, strings.TrimSpace(s))
+			}
+			return skills
+		}(),
 		"xp":                  xp,
 		"xp_to_next_level":    xpToNextLevel - xp,
 		"xp_threshold":        xpToNextLevel,
@@ -5782,10 +5852,11 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	var charName string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
+	var skillProfsRaw sql.NullString
 	err = db.QueryRow(`
-		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, '')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -5798,6 +5869,14 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
 		return
+	}
+	
+	// Parse skill proficiencies into a set for quick lookup
+	skillProfs := make(map[string]bool)
+	if skillProfsRaw.Valid && skillProfsRaw.String != "" {
+		for _, skill := range strings.Split(skillProfsRaw.String, ",") {
+			skillProfs[strings.TrimSpace(strings.ToLower(skill))] = true
+		}
 	}
 	
 	// Determine which ability to use
@@ -5839,9 +5918,13 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		abilityName = "Wisdom"
 	}
 	
-	// Add proficiency bonus if proficient (simplified: assume proficient in class skills)
-	// TODO: Track actual skill proficiencies per character
+	// Add proficiency bonus if proficient in the skill
 	totalMod := abilityMod
+	isProficient := false
+	if skillUsed != "" && skillProfs[skillUsed] {
+		totalMod += proficiencyBonus(level)
+		isProficient = true
+	}
 	
 	// Roll the die
 	var roll1, roll2, finalRoll int
@@ -5917,6 +6000,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		"roll":         finalRoll,
 		"roll_type":    rollType,
 		"modifier":     totalMod,
+		"proficient":   isProficient,
 		"total":        total,
 		"dc":           req.DC,
 		"outcome":      outcomeStr,
