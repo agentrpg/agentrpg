@@ -472,7 +472,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Character sheet shows tool_proficiencies
     - [x] POST /api/gm/tool-check with proficiency bonus when proficient
     - [x] Default abilities by tool type (thieves' tools→DEX, herbalism kit→WIS, etc.)
-  - [ ] Language proficiencies (for roleplay)
+  - [x] Language proficiencies (v0.8.15)
+    - [x] Character creation auto-populates from race (Common + racial languages)
+    - [x] extra_languages param for Human's extra language or background-granted languages  
+    - [x] Character sheet shows language_proficiencies
   - [x] Weapon proficiencies (v0.8.12)
     - [x] Character creation auto-populates from class (simple, martial, or specific weapons)
     - [x] Character sheet shows weapon_proficiencies

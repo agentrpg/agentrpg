@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.14"
+const version = "0.8.15"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -461,6 +461,11 @@ func initDB() {
 		-- Expertise (Phase 8 P1 - Proficiencies)
 		-- Double proficiency bonus for these skills (Rogues at 1, Bards at 3)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS expertise TEXT DEFAULT '';
+		
+		-- Language proficiencies (Phase 8 P1 - Proficiencies)
+		-- Comma-separated list of languages the character knows
+		-- e.g., "Common, Elvish" - auto-populated from race, can add more
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS language_proficiencies TEXT DEFAULT '';
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -4253,6 +4258,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			SkillProficiencies []string `json:"skill_proficiencies"` // e.g., ["perception", "stealth"]
 			ToolProficiencies  []string `json:"tool_proficiencies"`  // e.g., ["thieves' tools", "herbalism kit"]
 			Expertise          []string `json:"expertise"`           // e.g., ["stealth", "thieves_tools"] - double prof bonus (Rogues level 1, Bards level 3)
+			ExtraLanguages     []string `json:"extra_languages"`     // e.g., ["Dwarvish"] - for Human's extra language or background-granted languages
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		
@@ -4417,11 +4423,41 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 		// Starting gold (simplified: 10gp for all classes)
 		startingGold := 10
 		
+		// Get language proficiencies from race (v0.8.15)
+		// All races get their racial languages, plus any extra_languages provided
+		languages := []string{}
+		if race, ok := srdRaces[raceKey]; ok {
+			for _, lang := range race.Languages {
+				// Skip "one other" placeholder for humans
+				if lang != "one other" {
+					languages = append(languages, lang)
+				}
+			}
+		}
+		// Add any extra languages (for humans, backgrounds, or feats)
+		for _, lang := range req.ExtraLanguages {
+			normalized := strings.TrimSpace(lang)
+			if normalized != "" {
+				// Check for duplicates
+				isDupe := false
+				for _, existing := range languages {
+					if strings.EqualFold(existing, normalized) {
+						isDupe = true
+						break
+					}
+				}
+				if !isDupe {
+					languages = append(languages, normalized)
+				}
+			}
+		}
+		languageProfsStr := strings.Join(languages, ", ")
+		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise, language_proficiencies)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr, languageProfsStr).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -4502,6 +4538,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var weaponProfsRaw string
 	var armorProfsRaw string
 	var expertiseRaw string
+	var languageProfsRaw string
 	
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
@@ -4515,14 +4552,14 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false),
 			COALESCE(tool_proficiencies, ''),
 			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, ''),
-			COALESCE(expertise, '')
+			COALESCE(expertise, ''), COALESCE(language_proficiencies, '')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
 		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
-		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw)
+		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -4631,6 +4668,16 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 				exp = append(exp, strings.TrimSpace(e))
 			}
 			return exp
+		}(),
+		"language_proficiencies": func() []string {
+			if languageProfsRaw == "" {
+				return []string{}
+			}
+			langs := []string{}
+			for _, l := range strings.Split(languageProfsRaw, ",") {
+				langs = append(langs, strings.TrimSpace(l))
+			}
+			return langs
 		}(),
 		"xp":                  xp,
 		"xp_to_next_level":    xpToNextLevel - xp,
