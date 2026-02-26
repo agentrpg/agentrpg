@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.6"
+const version = "0.8.7"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -4069,6 +4069,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		case "rest":
 			handleRest(w, r, charID)
 			return
+		case "short-rest":
+			handleShortRest(w, r, charID)
+			return
 		case "cover":
 			handleSetCover(w, r, charID)
 			return
@@ -4084,6 +4087,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var name, class, race, background string
 	var level, hp, maxHP, ac, str, dex, con, intl, wis, cha int
 	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
+	var hitDiceSpent, exhaustionLevel int
 	var isStable, isDead bool
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
@@ -4097,13 +4101,14 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
 			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
-			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0)
+			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0),
+			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0)
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
-		&gold, &inventoryJSON, &pendingASI)
+		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -4169,12 +4174,44 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		"gold":                gold,
 		"inventory":           inventory,
 		"pending_asi":         pendingASI,
+		"hit_dice": map[string]interface{}{
+			"die_type":   fmt.Sprintf("d%d", getHitDie(class)),
+			"total":      level,
+			"available":  level - hitDiceSpent,
+			"spent":      hitDiceSpent,
+		},
+		"exhaustion_level":    exhaustionLevel,
 	}
 	
 	// Add ASI prompt if they have points to spend
 	if pendingASI > 0 {
 		response["asi_available"] = true
 		response["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi with {\"ability\": \"str|dex|con|int|wis|cha\", \"points\": 1-2}", pendingASI, charID)
+	}
+	
+	// Add exhaustion effects if exhausted
+	if exhaustionLevel > 0 {
+		exhaustionEffects := []string{}
+		if exhaustionLevel >= 1 {
+			exhaustionEffects = append(exhaustionEffects, "Disadvantage on ability checks")
+		}
+		if exhaustionLevel >= 2 {
+			exhaustionEffects = append(exhaustionEffects, "Speed halved")
+		}
+		if exhaustionLevel >= 3 {
+			exhaustionEffects = append(exhaustionEffects, "Disadvantage on attack rolls and saving throws")
+		}
+		if exhaustionLevel >= 4 {
+			exhaustionEffects = append(exhaustionEffects, "HP maximum halved")
+		}
+		if exhaustionLevel >= 5 {
+			exhaustionEffects = append(exhaustionEffects, "Speed reduced to 0")
+		}
+		if exhaustionLevel >= 6 {
+			exhaustionEffects = append(exhaustionEffects, "DEATH")
+		}
+		response["exhaustion_effects"] = exhaustionEffects
+		response["exhaustion_warning"] = fmt.Sprintf("You have %d level(s) of exhaustion. Take a long rest to reduce by 1.", exhaustionLevel)
 	}
 	
 	if coverBonus > 0 {
@@ -10132,36 +10169,233 @@ func handleRemoveCondition(w http.ResponseWriter, r *http.Request, charID int) {
 // @Param Authorization header string true "Basic auth"
 // @Success 200 {object} map[string]interface{} "Spell slots restored"
 // @Router /characters/{id}/rest [post]
+// handleShortRest godoc
+// @Summary Take a short rest
+// @Description Spend hit dice to heal during a short rest (1+ hour). Warlock spell slots recover.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param request body object true "Hit dice to spend" example({"hit_dice": 2})
+// @Success 200 {object} map[string]interface{} "Short rest results"
+// @Failure 400 {object} map[string]interface{} "No hit dice available or invalid request"
+// @Security BasicAuth
+// @Router /characters/{id}/short-rest [post]
+func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Parse request - how many hit dice to spend
+	var req struct {
+		HitDice int `json:"hit_dice"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		req.HitDice = 1 // Default to 1 die if not specified
+	}
+	
+	// Get character info
+	var class string
+	var level, hp, maxHP, con, hitDiceSpent int
+	err := db.QueryRow(`
+		SELECT class, level, hp, max_hp, con, COALESCE(hit_dice_spent, 0) 
+		FROM characters WHERE id = $1
+	`, charID).Scan(&class, &level, &hp, &maxHP, &con, &hitDiceSpent)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Character not found",
+		})
+		return
+	}
+	
+	// Calculate available hit dice (total = level, available = level - spent)
+	hitDiceAvailable := level - hitDiceSpent
+	
+	// If no hit dice requested, just report status
+	if req.HitDice <= 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":             true,
+			"hit_dice_available":  hitDiceAvailable,
+			"hit_dice_total":      level,
+			"hit_die_type":        fmt.Sprintf("d%d", getHitDie(class)),
+			"hp":                  hp,
+			"max_hp":              maxHP,
+			"message":             "Short rest - no hit dice spent. Specify hit_dice to heal.",
+		})
+		return
+	}
+	
+	// Validate hit dice to spend
+	if req.HitDice > hitDiceAvailable {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":               "Not enough hit dice available",
+			"hit_dice_available":  hitDiceAvailable,
+			"hit_dice_requested":  req.HitDice,
+		})
+		return
+	}
+	
+	// Roll hit dice and heal
+	hitDieSize := getHitDie(class)
+	conMod := modifier(con)
+	totalHealing := 0
+	rolls := []int{}
+	
+	for i := 0; i < req.HitDice; i++ {
+		roll := rollDie(hitDieSize)
+		healing := roll + conMod
+		if healing < 1 {
+			healing = 1 // Minimum 1 HP per die
+		}
+		rolls = append(rolls, roll)
+		totalHealing += healing
+	}
+	
+	// Apply healing (can't exceed max HP)
+	newHP := hp + totalHealing
+	if newHP > maxHP {
+		newHP = maxHP
+	}
+	actualHealing := newHP - hp
+	
+	// Update character
+	db.Exec(`
+		UPDATE characters SET 
+			hp = $1, 
+			hit_dice_spent = hit_dice_spent + $2
+		WHERE id = $3
+	`, newHP, req.HitDice, charID)
+	
+	// Check if warlock - recover pact magic slots
+	warlockRecovery := ""
+	if strings.ToLower(class) == "warlock" {
+		db.Exec("UPDATE characters SET spell_slots_used = '{}' WHERE id = $1", charID)
+		warlockRecovery = "Pact Magic spell slots recovered!"
+	}
+	
+	response := map[string]interface{}{
+		"success":             true,
+		"hit_dice_spent":      req.HitDice,
+		"hit_dice_remaining":  hitDiceAvailable - req.HitDice,
+		"hit_die_type":        fmt.Sprintf("d%d", hitDieSize),
+		"rolls":               rolls,
+		"con_mod":             conMod,
+		"total_healing":       totalHealing,
+		"actual_healing":      actualHealing,
+		"hp":                  newHP,
+		"max_hp":              maxHP,
+		"message":             fmt.Sprintf("Short rest complete. Spent %d hit dice, healed %d HP.", req.HitDice, actualHealing),
+	}
+	
+	if warlockRecovery != "" {
+		response["warlock_recovery"] = warlockRecovery
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleLongRest godoc
+// @Summary Take a long rest
+// @Description Take a long rest (8 hours). Restores HP, spell slots, death saves. Recovers half hit dice. Removes 1 exhaustion level.
+// @Tags Characters
+// @Produce json
+// @Param id path int true "Character ID"
+// @Success 200 {object} map[string]interface{} "Long rest results"
+// @Failure 400 {object} map[string]interface{} "Long rest not available (need 24h between rests)"
+// @Security BasicAuth
+// @Router /characters/{id}/rest [post]
 func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 	w.Header().Set("Content-Type", "application/json")
 	
-	// Reset spell slots, HP, and death saves
+	// Get character info including last long rest
+	var class string
+	var level, con, hitDiceSpent, exhaustionLevel int
+	var lastLongRest sql.NullTime
+	err := db.QueryRow(`
+		SELECT class, level, con, COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0), last_long_rest
+		FROM characters WHERE id = $1
+	`, charID).Scan(&class, &level, &con, &hitDiceSpent, &exhaustionLevel, &lastLongRest)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Character not found",
+		})
+		return
+	}
+	
+	// Check 24-hour restriction (optional - can be disabled by GM)
+	if lastLongRest.Valid {
+		hoursSinceRest := time.Since(lastLongRest.Time).Hours()
+		if hoursSinceRest < 24 {
+			hoursRemaining := 24 - hoursSinceRest
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":           "Can only take one long rest per 24 hours",
+				"hours_remaining": int(hoursRemaining),
+				"last_rest":       lastLongRest.Time.Format(time.RFC3339),
+			})
+			return
+		}
+	}
+	
+	// Calculate hit dice recovery (half of total, minimum 1)
+	hitDiceRecovered := level / 2
+	if hitDiceRecovered < 1 {
+		hitDiceRecovered = 1
+	}
+	newHitDiceSpent := hitDiceSpent - hitDiceRecovered
+	if newHitDiceSpent < 0 {
+		newHitDiceSpent = 0
+	}
+	actualRecovered := hitDiceSpent - newHitDiceSpent
+	
+	// Reduce exhaustion by 1 (with food/drink - assumed)
+	newExhaustion := exhaustionLevel
+	if exhaustionLevel > 0 {
+		newExhaustion = exhaustionLevel - 1
+	}
+	
+	// Reset everything for long rest
 	db.Exec(`
 		UPDATE characters SET
+			hp = max_hp,
 			spell_slots_used = '{}',
 			death_save_successes = 0,
 			death_save_failures = 0,
 			is_stable = false,
 			concentrating_on = NULL,
-			conditions = '[]'
+			conditions = '[]',
+			hit_dice_spent = $2,
+			exhaustion_level = $3,
+			last_long_rest = NOW(),
+			action_used = false,
+			bonus_action_used = false,
+			reaction_used = false,
+			movement_remaining = 30
 		WHERE id = $1
-	`, charID)
+	`, charID, newHitDiceSpent, newExhaustion)
 	
-	// Restore HP to max
-	db.Exec("UPDATE characters SET hp = max_hp WHERE id = $1", charID)
-	
-	var class string
-	var level, hp, maxHP int
-	db.QueryRow("SELECT class, level, hp, max_hp FROM characters WHERE id = $1", charID).Scan(&class, &level, &hp, &maxHP)
+	// Get updated info for response
+	var hp, maxHP int
+	db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", charID).Scan(&hp, &maxHP)
 	
 	slots := getSpellSlots(class, level)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":      true,
-		"hp":           maxHP,
-		"spell_slots":  slots,
-		"message":      "Long rest complete. HP and spell slots restored.",
-	})
+	response := map[string]interface{}{
+		"success":              true,
+		"hp":                   maxHP,
+		"max_hp":               maxHP,
+		"spell_slots":          slots,
+		"hit_dice_recovered":   actualRecovered,
+		"hit_dice_available":   level - newHitDiceSpent,
+		"hit_dice_total":       level,
+		"hit_die_type":         fmt.Sprintf("d%d", getHitDie(class)),
+		"message":              "Long rest complete. HP and spell slots restored.",
+	}
+	
+	if exhaustionLevel > 0 {
+		response["exhaustion_reduced"] = true
+		response["exhaustion_level"] = newExhaustion
+		response["message"] = fmt.Sprintf("Long rest complete. HP and spell slots restored. Exhaustion reduced to %d.", newExhaustion)
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleConditionsList godoc

@@ -470,25 +470,29 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 
 ### Rest & Recovery
 
-**What we need:**
-- [ ] **Short Rest (CRITICAL)**
-  - [ ] 1+ hour duration
-  - [ ] Spend hit dice to heal
-  - [ ] Some abilities recover (Second Wind, Action Surge, etc.)
-  - [ ] Warlock spell slots recover
-- [ ] **Long Rest**
-  - [ ] 8 hours (6 hours sleep minimum for elves: 4)
-  - [ ] Recover all HP
-  - [ ] Recover all spell slots
-  - [ ] Recover half hit dice (minimum 1)
-  - [ ] Recover most class features
-  - [ ] Remove 1 exhaustion level (with food/drink)
-  - [ ] Only 1 per 24 hours
-- [ ] **Hit Dice Tracking**
-  - [ ] Total = character level
-  - [ ] Die type = class hit die
-  - [ ] Tracking spent vs available
-  - [ ] Recovery: half (round down, min 1) on long rest
+- [x] **Short Rest (v0.8.7)**
+  - [x] 1+ hour duration
+  - [x] Spend hit dice to heal (POST /api/characters/{id}/short-rest with hit_dice count)
+  - [ ] Some abilities recover (Second Wind, Action Surge, etc.) - future class features
+  - [x] Warlock spell slots recover (Pact Magic)
+- [x] **Long Rest (v0.8.7)**
+  - [x] 8 hours duration (enforced 24h between long rests)
+  - [x] Recover all HP
+  - [x] Recover all spell slots
+  - [x] Recover half hit dice (minimum 1)
+  - [ ] Recover most class features - future class features
+  - [x] Remove 1 exhaustion level (with food/drink assumed)
+  - [x] Only 1 per 24 hours (tracked via last_long_rest column)
+- [x] **Hit Dice Tracking (v0.8.7)**
+  - [x] Total = character level
+  - [x] Die type = class hit die (d12 barb, d10 fighter/paladin/ranger, d8 most, d6 sorc/wiz)
+  - [x] Tracking spent vs available (hit_dice_spent column)
+  - [x] Recovery: half (round down, min 1) on long rest
+  - [x] Displayed in character sheet (hit_dice object)
+- [x] **Exhaustion Tracking (v0.8.7)**
+  - [x] exhaustion_level column (0-6)
+  - [x] Displayed with cumulative effects in character sheet
+  - [x] Reduced by 1 on long rest
 
 ### Equipment & Economy
 
@@ -594,10 +598,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 ## Implementation Priority
 
 ### P0 — Critical for Playable Games
-1. **Action Economy** — Without this, combat is broken
+1. **Action Economy** — Without this, combat is broken ✅ (v0.8.6)
 2. **Conditions with Effects** — Especially exhaustion, prone, grappled
-3. **Short/Long Rest** — Recovery is fundamental
-4. **Hit Dice** — Healing resource management
+3. **Short/Long Rest** — Recovery is fundamental ✅ (v0.8.7)
+4. **Hit Dice** — Healing resource management ✅ (v0.8.7)
 
 ### P1 — Needed for Real Campaigns
 5. **Subclasses** — Characters need mechanical identity
@@ -628,4 +632,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.5**
+Current: **0.8.7**
