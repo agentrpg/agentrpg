@@ -396,11 +396,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] Concentration saves on damage
 
 **What we need:**
-- [ ] **Spell Components**
-  - [ ] V (Verbal) — Can't cast if silenced
-  - [ ] S (Somatic) — Need free hand
-  - [ ] M (Material) — Need component pouch/focus OR specific items
-  - [ ] Consumed materials tracking (remove from inventory)
+- [x] **Spell Components (v0.8.17)**
+  - [x] V (Verbal) — Can't cast if silenced
+  - [ ] S (Somatic) — Need free hand (tracked but not enforced yet)
+  - [x] M (Material) — Need component pouch/focus (arcane focus, holy symbol, druidic focus, musical instrument, wand, staff, rod, orb, crystal, totem, amulet, emblem)
+  - [ ] Consumed materials tracking (remove from inventory) — future enhancement
 - [ ] **Counterspell/Dispel Magic**
   - [ ] Reaction to counter (within 60ft, can see)
   - [ ] Auto-succeed if slot ≥ target spell level

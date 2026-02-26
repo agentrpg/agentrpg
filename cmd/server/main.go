@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.16"
+const version = "0.8.17"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1181,15 +1181,15 @@ func loadSRDFromDB() {
 	}
 
 	// Load spells (for resolveAction)
-	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0) FROM spells")
+	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, '') FROM spells")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape string
+			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape, components string
 			var level, aoeSize int
 			var isRitual bool
-			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize)
-			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize}
+			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components)
+			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components}
 		}
 		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
 	}
@@ -9919,6 +9919,17 @@ func resolveAction(action, description string, charID int) string {
 		saveDC := spellSaveDC(level, spellMod)
 		
 		if hasSpell {
+			// Check spell components (V, S, M) - v0.8.17
+			conditions := getCharConditions(charID)
+			var inventoryJSON []byte
+			db.QueryRow("SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1", charID).Scan(&inventoryJSON)
+			var inventory []map[string]interface{}
+			json.Unmarshal(inventoryJSON, &inventory)
+			
+			if compErr := checkSpellComponents(spell.Components, conditions, inventory); compErr != "" {
+				return compErr
+			}
+			
 			// Check if ritual casting is valid
 			if isRitualCast {
 				// Check if spell has ritual tag
@@ -10279,6 +10290,63 @@ func parseSpellFromDescription(desc string) string {
 		}
 	}
 	return ""
+}
+
+// checkSpellComponents validates if character can cast spell with V, S, M components
+// Returns: error message if blocked, empty string if OK
+func checkSpellComponents(components string, conditions []string, inventory []map[string]interface{}) string {
+	compLower := strings.ToLower(components)
+	hasV := strings.Contains(compLower, "v")
+	hasM := strings.Contains(compLower, "m")
+
+	// V (Verbal): Can't cast if silenced
+	if hasV {
+		for _, c := range conditions {
+			if strings.ToLower(c) == "silenced" {
+				return "Cannot cast - you are silenced and the spell requires verbal components (V)!"
+			}
+		}
+	}
+
+	// S (Somatic): Can't cast if both hands restrained (simplified: check for bound/restrained with no free hand)
+	// For now, we'll be lenient - just note if somatic is required but don't block
+	// Full implementation would track hand usage (weapon, shield, focus)
+
+	// M (Material): Need arcane focus, component pouch, or specific material
+	if hasM {
+		// Check inventory for spellcasting focus or component pouch
+		hasFocus := false
+		for _, item := range inventory {
+			itemName := ""
+			if name, ok := item["name"].(string); ok {
+				itemName = strings.ToLower(name)
+			} else if name, ok := item["item"].(string); ok {
+				itemName = strings.ToLower(name)
+			}
+			if strings.Contains(itemName, "arcane focus") ||
+				strings.Contains(itemName, "component pouch") ||
+				strings.Contains(itemName, "holy symbol") ||
+				strings.Contains(itemName, "druidic focus") ||
+				strings.Contains(itemName, "musical instrument") ||
+				strings.Contains(itemName, "spellcasting focus") ||
+				strings.Contains(itemName, "rod") ||
+				strings.Contains(itemName, "staff") ||
+				strings.Contains(itemName, "wand") ||
+				strings.Contains(itemName, "orb") ||
+				strings.Contains(itemName, "crystal") ||
+				strings.Contains(itemName, "totem") ||
+				strings.Contains(itemName, "amulet") ||
+				strings.Contains(itemName, "emblem") {
+				hasFocus = true
+				break
+			}
+		}
+		if !hasFocus {
+			return "Cannot cast - spell requires material components (M) but you have no spellcasting focus or component pouch! Add one to your inventory."
+		}
+	}
+
+	return "" // OK to cast
 }
 
 // Check if weapon has a property
