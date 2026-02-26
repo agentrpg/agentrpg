@@ -481,7 +481,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Character creation auto-populates from class (light, medium, heavy, shields, all armor)
     - [x] Character sheet shows armor_proficiencies
     - [x] isArmorProficient() helper for future armor penalty checks
-  - [ ] Expertise (double prof bonus) for Rogues/Bards
+  - [x] Expertise (double prof bonus) for Rogues/Bards (v0.8.13)
+    - [x] Character creation accepts expertise array (Rogues get 2 at level 1, Bards get 0 at creation)
+    - [x] Expertise must be from skill proficiencies OR thieves' tools
+    - [x] Skill checks apply double proficiency bonus for expertise skills
+    - [x] Tool checks apply double proficiency bonus for expertise tools
+    - [x] Character sheet shows expertise list
+    - [x] Check responses include expertise boolean
 - [x] **Inspiration** (v0.8.10)
   - [x] Binary flag (have it or don't)
   - [x] Spend for advantage on any d20 roll (use_inspiration parameter)
@@ -656,4 +662,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.12**
+Current: **0.8.13**

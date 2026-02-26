@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.12"
+const version = "0.8.13"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -457,6 +457,10 @@ func initDB() {
 		-- Armor proficiencies (Phase 8 P1 - Proficiencies)
 		-- Comma-separated list: "light, medium, heavy, shields" or "all armor"
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS armor_proficiencies TEXT DEFAULT '';
+		
+		-- Expertise (Phase 8 P1 - Proficiencies)
+		-- Double proficiency bonus for these skills (Rogues at 1, Bards at 3)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS expertise TEXT DEFAULT '';
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -4248,6 +4252,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			Cha               int      `json:"cha"`
 			SkillProficiencies []string `json:"skill_proficiencies"` // e.g., ["perception", "stealth"]
 			ToolProficiencies  []string `json:"tool_proficiencies"`  // e.g., ["thieves' tools", "herbalism kit"]
+			Expertise          []string `json:"expertise"`           // e.g., ["stealth", "thieves_tools"] - double prof bonus (Rogues level 1, Bards level 3)
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		
@@ -4362,14 +4367,61 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		
+		// Process expertise (v0.8.13)
+		// Rogues get 2 expertise at level 1, Bards get 2 at level 3 (not at creation)
+		expertiseStr := ""
+		if len(req.Expertise) > 0 {
+			// Only rogues get expertise at character creation (level 1)
+			if classKey != "rogue" {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "expertise_not_available",
+					"message": "Only Rogues can choose expertise at level 1. Bards gain expertise at level 3.",
+				})
+				return
+			}
+			// Rogues get exactly 2 expertise choices
+			if len(req.Expertise) > 2 {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "too_many_expertise",
+					"message": "Rogues can choose 2 expertise skills at level 1",
+				})
+				return
+			}
+			// Expertise must be from skills you're proficient in OR thieves' tools
+			validExpertise := []string{}
+			for _, exp := range req.Expertise {
+				expLower := strings.ToLower(strings.TrimSpace(exp))
+				expLower = strings.ReplaceAll(expLower, " ", "_")
+				expLower = strings.ReplaceAll(expLower, "'", "")
+				// Allow thieves' tools or any skill proficiency
+				isThievesTools := expLower == "thieves_tools" || expLower == "thievestools" || expLower == "thieves_tools"
+				isSkillProf := false
+				for _, skill := range req.SkillProficiencies {
+					if strings.ToLower(strings.ReplaceAll(skill, " ", "_")) == expLower {
+						isSkillProf = true
+						break
+					}
+				}
+				if !isThievesTools && !isSkillProf {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":   "invalid_expertise",
+						"message": fmt.Sprintf("'%s' must be a skill you're proficient in, or thieves' tools", exp),
+					})
+					return
+				}
+				validExpertise = append(validExpertise, expLower)
+			}
+			expertiseStr = strings.Join(validExpertise, ", ")
+		}
+		
 		// Starting gold (simplified: 10gp for all classes)
 		startingGold := 10
 		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -4449,6 +4501,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var toolProfsRaw string
 	var weaponProfsRaw string
 	var armorProfsRaw string
+	var expertiseRaw string
 	
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
@@ -4461,14 +4514,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0),
 			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false),
 			COALESCE(tool_proficiencies, ''),
-			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, '')
+			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, ''),
+			COALESCE(expertise, '')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
 		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
-		&weaponProfsRaw, &armorProfsRaw)
+		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -4567,6 +4621,16 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 				armor = append(armor, strings.TrimSpace(a))
 			}
 			return armor
+		}(),
+		"expertise": func() []string {
+			if expertiseRaw == "" {
+				return []string{}
+			}
+			exp := []string{}
+			for _, e := range strings.Split(expertiseRaw, ",") {
+				exp = append(exp, strings.TrimSpace(e))
+			}
+			return exp
 		}(),
 		"xp":                  xp,
 		"xp_to_next_level":    xpToNextLevel - xp,
@@ -6012,16 +6076,17 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		req.DC = 10 // Default DC
 	}
 	
-	// Get character stats (including inspiration)
+	// Get character stats (including inspiration and expertise)
 	var charName string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
 	var skillProfsRaw sql.NullString
+	var expertiseRaw sql.NullString
 	var hasInspiration bool
 	err = db.QueryRow(`
-		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false)
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false)
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &hasInspiration)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &expertiseRaw, &hasInspiration)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6041,6 +6106,14 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	if skillProfsRaw.Valid && skillProfsRaw.String != "" {
 		for _, skill := range strings.Split(skillProfsRaw.String, ",") {
 			skillProfs[strings.TrimSpace(strings.ToLower(skill))] = true
+		}
+	}
+	
+	// Parse expertise into a set (v0.8.13)
+	expertiseSkills := make(map[string]bool)
+	if expertiseRaw.Valid && expertiseRaw.String != "" {
+		for _, exp := range strings.Split(expertiseRaw.String, ",") {
+			expertiseSkills[strings.TrimSpace(strings.ToLower(exp))] = true
 		}
 	}
 	
@@ -6084,10 +6157,18 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Add proficiency bonus if proficient in the skill
+	// Double proficiency bonus if the character has expertise (v0.8.13)
 	totalMod := abilityMod
 	isProficient := false
+	hasExpertise := false
 	if skillUsed != "" && skillProfs[skillUsed] {
-		totalMod += proficiencyBonus(level)
+		if expertiseSkills[skillUsed] {
+			// Expertise: double proficiency bonus
+			totalMod += proficiencyBonus(level) * 2
+			hasExpertise = true
+		} else {
+			totalMod += proficiencyBonus(level)
+		}
 		isProficient = true
 	}
 	
@@ -6187,6 +6268,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		"roll_type":    rollType,
 		"modifier":     totalMod,
 		"proficient":   isProficient,
+		"expertise":    hasExpertise,
 		"total":        total,
 		"dc":           req.DC,
 		"outcome":      outcomeStr,
@@ -6275,17 +6357,18 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		req.DC = 15 // Default DC for tool checks
 	}
 	
-	// Get character stats
+	// Get character stats (including expertise for v0.8.13)
 	var charName string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
 	var toolProfsRaw string
+	var expertiseRaw string
 	var hasInspiration bool
 	err = db.QueryRow(`
 		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, 
-			COALESCE(tool_proficiencies, ''), COALESCE(inspiration, false)
+			COALESCE(tool_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false)
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &hasInspiration)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &expertiseRaw, &hasInspiration)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6305,6 +6388,14 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	if toolProfsRaw != "" {
 		for _, tool := range strings.Split(toolProfsRaw, ",") {
 			toolProfs[strings.TrimSpace(strings.ToLower(tool))] = true
+		}
+	}
+	
+	// Parse expertise (v0.8.13)
+	expertiseTools := make(map[string]bool)
+	if expertiseRaw != "" {
+		for _, exp := range strings.Split(expertiseRaw, ",") {
+			expertiseTools[strings.TrimSpace(strings.ToLower(exp))] = true
 		}
 	}
 	
@@ -6365,11 +6456,20 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		abilityName = "Dexterity"
 	}
 	
-	// Check for proficiency
+	// Check for proficiency and expertise (v0.8.13)
 	totalMod := abilityMod
 	isProficient := toolProfs[toolLower]
+	// Also check normalized versions (thieves' tools → thieves_tools)
+	normalizedTool := strings.ReplaceAll(toolLower, " ", "_")
+	normalizedTool = strings.ReplaceAll(normalizedTool, "'", "")
+	hasExpertise := expertiseTools[toolLower] || expertiseTools[normalizedTool]
 	if isProficient {
-		totalMod += proficiencyBonus(level)
+		if hasExpertise {
+			// Expertise: double proficiency bonus
+			totalMod += proficiencyBonus(level) * 2
+		} else {
+			totalMod += proficiencyBonus(level)
+		}
 	}
 	
 	// Handle inspiration
@@ -6460,6 +6560,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		"roll_type":    rollType,
 		"modifier":     totalMod,
 		"proficient":   isProficient,
+		"expertise":    hasExpertise,
 		"total":        total,
 		"dc":           req.DC,
 		"outcome":      outcomeStr,
