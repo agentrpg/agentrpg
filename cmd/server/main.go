@@ -670,9 +670,10 @@ func seedCampaignTemplates() {
 
 // Check if SRD tables need seeding
 func checkAndSeedSRD() {
-	var monsterCount, weaponCount int
+	var monsterCount, weaponCount, raceCount int
 	db.QueryRow("SELECT COUNT(*) FROM monsters").Scan(&monsterCount)
 	db.QueryRow("SELECT COUNT(*) FROM weapons WHERE source = 'srd'").Scan(&weaponCount)
+	db.QueryRow("SELECT COUNT(*) FROM races").Scan(&raceCount)
 	
 	if monsterCount == 0 {
 		log.Println("SRD tables empty - seeding from 5e API...")
@@ -684,6 +685,11 @@ func checkAndSeedSRD() {
 		db.Exec("DELETE FROM weapons WHERE source != 'srd' OR source IS NULL")
 		db.Exec("DELETE FROM armor WHERE source != 'srd' OR source IS NULL")
 		seedEquipmentFromAPI()
+	}
+	
+	if raceCount == 0 {
+		log.Println("Races table empty - seeding from 5e API...")
+		seedRacesFromAPI()
 	}
 }
 
