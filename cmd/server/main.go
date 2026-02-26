@@ -147,6 +147,7 @@ func main() {
 	http.HandleFunc("/api/admin/verify", handleAdminVerify)
 	http.HandleFunc("/api/admin/users", handleAdminUsers)
 	http.HandleFunc("/api/admin/create-campaign", handleAdminCreateCampaign)
+	http.HandleFunc("/api/admin/seed", handleAdminSeed)
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/password-reset/request", handlePasswordResetRequest)
 	http.HandleFunc("/api/password-reset/confirm", handlePasswordResetConfirm)
@@ -196,6 +197,8 @@ func main() {
 	http.HandleFunc("/api/universe/races/", handleUniverseRace)
 	http.HandleFunc("/api/universe/weapons", handleUniverseWeapons)
 	http.HandleFunc("/api/universe/armor", handleUniverseArmor)
+	http.HandleFunc("/api/universe/magic-items/", handleUniverseMagicItem)
+	http.HandleFunc("/api/universe/magic-items", handleUniverseMagicItems)
 	http.HandleFunc("/api/universe/consumables", handleUniverseConsumables)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
@@ -2124,6 +2127,215 @@ func handleAdminCreateCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "campaign_id": id})
+}
+
+// handleAdminSeed handles seeding of SRD data (races, magic items)
+func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	adminKey := os.Getenv("ADMIN_KEY")
+	if adminKey == "" || r.Header.Get("X-Admin-Key") != adminKey {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized"})
+		return
+	}
+	
+	results := map[string]interface{}{}
+	
+	// Ensure magic_items table exists
+	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS magic_items (
+			id SERIAL PRIMARY KEY,
+			slug VARCHAR(100) UNIQUE NOT NULL,
+			name VARCHAR(150) NOT NULL,
+			rarity VARCHAR(30),
+			type VARCHAR(50),
+			attunement BOOLEAN DEFAULT FALSE,
+			description TEXT,
+			source VARCHAR(50) DEFAULT 'srd',
+			created_at TIMESTAMP DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_magic_items_rarity ON magic_items(rarity);
+	`)
+	if err != nil {
+		results["table_create_warning"] = err.Error()
+	}
+	
+	// Seed races
+	racesAdded, racesErr := seedRacesFromAPI()
+	results["races_added"] = racesAdded
+	if racesErr != "" {
+		results["races_error"] = racesErr
+	}
+	
+	// Seed magic items
+	magicAdded, magicErr := seedMagicItemsFromAPI()
+	results["magic_items_added"] = magicAdded
+	if magicErr != "" {
+		results["magic_items_error"] = magicErr
+	}
+	
+	// Get final counts
+	var count int
+	db.QueryRow("SELECT COUNT(*) FROM races").Scan(&count)
+	results["total_races"] = count
+	db.QueryRow("SELECT COUNT(*) FROM magic_items").Scan(&count)
+	results["total_magic_items"] = count
+	db.QueryRow("SELECT COUNT(*) FROM monsters").Scan(&count)
+	results["total_monsters"] = count
+	db.QueryRow("SELECT COUNT(*) FROM spells").Scan(&count)
+	results["total_spells"] = count
+	
+	json.NewEncoder(w).Encode(results)
+}
+
+func seedRacesFromAPI() (int, string) {
+	resp, err := http.Get("https://www.dnd5eapi.co/api/2014/races")
+	if err != nil {
+		return 0, err.Error()
+	}
+	defer resp.Body.Close()
+	
+	var list struct {
+		Results []struct {
+			Index string `json:"index"`
+			Name  string `json:"name"`
+			URL   string `json:"url"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return 0, err.Error()
+	}
+	
+	added := 0
+	for _, item := range list.Results {
+		detailResp, err := http.Get("https://www.dnd5eapi.co" + item.URL)
+		if err != nil {
+			continue
+		}
+		
+		var detail map[string]interface{}
+		json.NewDecoder(detailResp.Body).Decode(&detail)
+		detailResp.Body.Close()
+		
+		abilityMods := map[string]int{}
+		if bonuses, ok := detail["ability_bonuses"].([]interface{}); ok {
+			for _, b := range bonuses {
+				if bonus, ok := b.(map[string]interface{}); ok {
+					if ability, ok := bonus["ability_score"].(map[string]interface{}); ok {
+						idx := strings.ToUpper(ability["index"].(string))
+						abilityMods[idx] = int(bonus["bonus"].(float64))
+					}
+				}
+			}
+		}
+		modsJSON, _ := json.Marshal(abilityMods)
+		
+		var traits []string
+		if traitArr, ok := detail["traits"].([]interface{}); ok {
+			for _, t := range traitArr {
+				if trait, ok := t.(map[string]interface{}); ok {
+					traits = append(traits, trait["name"].(string))
+				}
+			}
+		}
+		
+		size := "Medium"
+		if s, ok := detail["size"].(string); ok {
+			size = s
+		}
+		speed := 30
+		if s, ok := detail["speed"].(float64); ok {
+			speed = int(s)
+		}
+		
+		_, err = db.Exec(`
+			INSERT INTO races (slug, name, size, speed, ability_mods, traits)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (slug) DO UPDATE SET 
+				name=EXCLUDED.name, size=EXCLUDED.size, speed=EXCLUDED.speed,
+				ability_mods=EXCLUDED.ability_mods, traits=EXCLUDED.traits
+		`, item.Index, detail["name"], size, speed, string(modsJSON), strings.Join(traits, ", "))
+		if err == nil {
+			added++
+		}
+	}
+	return added, ""
+}
+
+func seedMagicItemsFromAPI() (int, string) {
+	resp, err := http.Get("https://www.dnd5eapi.co/api/2014/magic-items")
+	if err != nil {
+		return 0, err.Error()
+	}
+	defer resp.Body.Close()
+	
+	var list struct {
+		Results []struct {
+			Index string `json:"index"`
+			Name  string `json:"name"`
+			URL   string `json:"url"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
+		return 0, err.Error()
+	}
+	
+	added := 0
+	for _, item := range list.Results {
+		detailResp, err := http.Get("https://www.dnd5eapi.co" + item.URL)
+		if err != nil {
+			continue
+		}
+		
+		var detail map[string]interface{}
+		json.NewDecoder(detailResp.Body).Decode(&detail)
+		detailResp.Body.Close()
+		
+		rarity := "common"
+		if r, ok := detail["rarity"].(map[string]interface{}); ok {
+			if name, ok := r["name"].(string); ok {
+				rarity = strings.ToLower(name)
+			}
+		}
+		
+		itemType := "wondrous item"
+		if cat, ok := detail["equipment_category"].(map[string]interface{}); ok {
+			if name, ok := cat["name"].(string); ok {
+				itemType = strings.ToLower(name)
+			}
+		}
+		
+		desc := ""
+		attunement := false
+		if descArr, ok := detail["desc"].([]interface{}); ok {
+			var parts []string
+			for _, d := range descArr {
+				if s, ok := d.(string); ok {
+					parts = append(parts, s)
+					if strings.Contains(strings.ToLower(s), "requires attunement") {
+						attunement = true
+					}
+				}
+			}
+			desc = strings.Join(parts, "\n")
+			if len(desc) > 2000 {
+				desc = desc[:2000]
+			}
+		}
+		
+		_, err = db.Exec(`
+			INSERT INTO magic_items (slug, name, rarity, type, attunement, description)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (slug) DO UPDATE SET 
+				name=EXCLUDED.name, rarity=EXCLUDED.rarity, type=EXCLUDED.type,
+				attunement=EXCLUDED.attunement, description=EXCLUDED.description
+		`, item.Index, detail["name"], rarity, itemType, attunement, desc)
+		if err == nil {
+			added++
+		}
+	}
+	return added, ""
 }
 
 // handleLogin godoc
@@ -11158,12 +11370,13 @@ func handleUniverseIndex(w http.ResponseWriter, r *http.Request) {
 		"description": "Shared game content from the 5e SRD. GMs can also create campaign-specific items via /api/campaigns/{id}/items",
 		"license": "CC-BY-4.0",
 		"endpoints": map[string]string{
-			"monsters": "/api/universe/monsters",
-			"spells":   "/api/universe/spells",
-			"classes":  "/api/universe/classes",
-			"races":    "/api/universe/races",
-			"weapons":  "/api/universe/weapons",
-			"armor":    "/api/universe/armor",
+			"monsters":    "/api/universe/monsters",
+			"spells":      "/api/universe/spells",
+			"classes":     "/api/universe/classes",
+			"races":       "/api/universe/races",
+			"weapons":     "/api/universe/weapons",
+			"armor":       "/api/universe/armor",
+			"magic-items": "/api/universe/magic-items",
 		},
 	})
 }
@@ -11451,6 +11664,59 @@ func handleUniverseArmor(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"armor": armor, "count": len(armor)})
+}
+
+// handleUniverseMagicItems godoc
+// @Summary List all magic items
+// @Description Returns all SRD magic items with rarity, type, and description
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Magic items list with details"
+// @Router /universe/magic-items [get]
+func handleUniverseMagicItems(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	rows, err := db.Query("SELECT slug, name, rarity, type, attunement, description FROM magic_items ORDER BY rarity, name")
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error(), "count": 0})
+		return
+	}
+	defer rows.Close()
+	items := map[string]interface{}{}
+	for rows.Next() {
+		var slug, name, rarity, itemType, desc string
+		var attunement bool
+		rows.Scan(&slug, &name, &rarity, &itemType, &attunement, &desc)
+		items[slug] = map[string]interface{}{
+			"name": name, "rarity": rarity, "type": itemType, "attunement": attunement, "description": desc,
+		}
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"magic_items": items, "count": len(items)})
+}
+
+// handleUniverseMagicItem godoc
+// @Summary Get a specific magic item
+// @Description Returns details for a single magic item by slug
+// @Tags Universe
+// @Produce json
+// @Param slug path string true "Magic item slug"
+// @Success 200 {object} map[string]interface{} "Magic item details"
+// @Router /universe/magic-items/{slug} [get]
+func handleUniverseMagicItem(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	slug := strings.TrimPrefix(r.URL.Path, "/api/universe/magic-items/")
+	
+	var name, rarity, itemType, desc string
+	var attunement bool
+	err := db.QueryRow("SELECT name, rarity, type, attunement, description FROM magic_items WHERE slug = $1", slug).
+		Scan(&name, &rarity, &itemType, &attunement, &desc)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "magic item not found"})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"slug": slug, "name": name, "rarity": rarity, "type": itemType, "attunement": attunement, "description": desc,
+	})
 }
 
 // handleUniverseConsumables godoc
