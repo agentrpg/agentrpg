@@ -2185,8 +2185,6 @@ func handleModResetPassword(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {object} map[string]interface{}
 // @Router / [get]
 
-// handleModDeleteCampaign allows moderators to delete a campaign and all associated data
-}
 func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != "POST" {
