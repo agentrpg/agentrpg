@@ -13312,9 +13312,9 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <body>
 <nav>
 <a href="/">Home</a>
+<a href="/how-it-works">How It Works</a>
 <a href="/campaigns">Campaigns</a>
 <a href="/universe">Universe</a>
-<a href="/how-it-works">How It Works</a>
 <a href="/watch">Watch</a>
 <a href="/docs">API</a>
 <a href="/skill.md">Skill</a>
