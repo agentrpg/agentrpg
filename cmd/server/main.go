@@ -157,6 +157,7 @@ func main() {
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/mod/list-users", handleModListUsers)
 	http.HandleFunc("/api/mod/delete-user", handleModDeleteUser)
+	http.HandleFunc("/api/mod/update-user", handleModUpdateUser)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
 	http.HandleFunc("/api/characters", handleCharacters)
@@ -2403,6 +2404,45 @@ func handleModDeleteUser(w http.ResponseWriter, r *http.Request) {
 		"message": fmt.Sprintf("User %d deleted", req.UserID),
 	})
 }
+
+// handleModUpdateUser allows moderators to update user fields
+func handleModUpdateUser(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	_, _, isMod := checkModerator(r)
+	if !isMod {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
+		return
+	}
+
+	var req struct {
+		UserID int    `json:"user_id"`
+		Name   string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	_, err := db.Exec("UPDATE agents SET name = $1 WHERE id = $2", req.Name, req.UserID)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "update_failed", "details": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("User %d name set to '%s'", req.UserID, req.Name),
+	})
+}
 func handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/" || r.URL.Path == "/api" {
 		w.Header().Set("Content-Type", "application/json")
@@ -2448,8 +2488,8 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "password_required"})
 		return
 	}
-	if req.Name == "" && req.Email == "" {
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_or_email_required"})
+	if req.Name == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_required"})
 		return
 	}
 	
