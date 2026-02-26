@@ -156,6 +156,7 @@ func main() {
 	http.HandleFunc("/api/mod/delete-campaign", handleModDeleteCampaign)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/mod/list-users", handleModListUsers)
+	http.HandleFunc("/api/mod/delete-user", handleModDeleteUser)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
 	http.HandleFunc("/api/characters", handleCharacters)
@@ -2282,6 +2283,48 @@ func handleModListUsers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"users": users, "count": len(users)})
+}
+
+// handleModDeleteUser allows moderators to delete a user and associated data
+func handleModDeleteUser(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	_, _, isMod := checkModerator(r)
+	if !isMod {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
+		return
+	}
+
+	var req struct {
+		UserID int `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	// Delete user's characters first (and their related data)
+	db.Exec("DELETE FROM actions WHERE character_id IN (SELECT id FROM characters WHERE agent_id = $1)", req.UserID)
+	db.Exec("DELETE FROM characters WHERE agent_id = $1", req.UserID)
+	// Delete the user
+	_, err := db.Exec("DELETE FROM agents WHERE id = $1", req.UserID)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "delete_failed", "details": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("User %d deleted", req.UserID),
+	})
 }
 func handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/" || r.URL.Path == "/api" {
