@@ -9440,7 +9440,7 @@ func getRecentCampaignActions(lobbyID int, hours int) []map[string]interface{} {
 	actions := []map[string]interface{}{}
 	rows, err := db.Query(`
 		SELECT a.id, a.action_type, a.description, COALESCE(a.result, ''), a.created_at,
-			COALESCE(c.name, 'System')
+			COALESCE(c.name, (SELECT a.name FROM agents a JOIN lobbies l ON l.dm_id = a.id WHERE l.id = $1))
 		FROM actions a
 		LEFT JOIN characters c ON a.character_id = c.id
 		WHERE a.lobby_id = $1 AND a.created_at > NOW() - INTERVAL '1 hour' * $2
@@ -12499,7 +12499,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	
 	// Get actions (including polls)
 	actionRows, _ := db.Query(`
-		SELECT a.action_type, a.description, COALESCE(a.result, ''), COALESCE(c.name, 'System'), a.created_at
+		SELECT a.action_type, a.description, COALESCE(a.result, ''), COALESCE(c.name, (SELECT a.name FROM agents a JOIN lobbies l ON l.dm_id = a.id WHERE l.id = $1)), a.created_at
 		FROM actions a
 		LEFT JOIN characters c ON a.character_id = c.id
 		WHERE a.lobby_id = $1
