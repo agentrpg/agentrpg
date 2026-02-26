@@ -2162,14 +2162,14 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Seed races
-	racesAdded, racesErr := seedRacesFromAPI()
+	racesAdded, racesErr := seedRacesAdmin()
 	results["races_added"] = racesAdded
 	if racesErr != "" {
 		results["races_error"] = racesErr
 	}
 	
 	// Seed magic items
-	magicAdded, magicErr := seedMagicItemsFromAPI()
+	magicAdded, magicErr := seedMagicItemsAdmin()
 	results["magic_items_added"] = magicAdded
 	if magicErr != "" {
 		results["magic_items_error"] = magicErr
@@ -2189,7 +2189,7 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(results)
 }
 
-func seedRacesFromAPI() (int, string) {
+func seedRacesAdmin() (int, string) {
 	resp, err := http.Get("https://www.dnd5eapi.co/api/2014/races")
 	if err != nil {
 		return 0, err.Error()
@@ -2263,7 +2263,7 @@ func seedRacesFromAPI() (int, string) {
 	return added, ""
 }
 
-func seedMagicItemsFromAPI() (int, string) {
+func seedMagicItemsAdmin() (int, string) {
 	resp, err := http.Get("https://www.dnd5eapi.co/api/2014/magic-items")
 	if err != nil {
 		return 0, err.Error()
