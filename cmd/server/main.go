@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.7"
+const version = "0.8.8"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1248,6 +1248,154 @@ var conditionEffects = map[string]string{
 	"stunned":      "Incapacitated, can't move, can only speak falteringly. Auto-fail STR/DEX saves. Attacks have advantage.",
 	"unconscious":  "Incapacitated, can't move or speak, unaware. Drop items, fall prone. Auto-fail STR/DEX saves. Attacks have advantage, 5ft hits are crits.",
 	"exhaustion":   "Cumulative levels (1-6). 6 = death.",
+}
+
+// ============================================
+// CONDITION MECHANICAL EFFECTS (v0.8.8)
+// ============================================
+
+// hasCondition checks if a character has a specific condition
+func hasCondition(charID int, condition string) bool {
+	var conditionsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&conditionsJSON)
+	if err != nil {
+		return false
+	}
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	condition = strings.ToLower(condition)
+	for _, c := range conditions {
+		if strings.ToLower(c) == condition {
+			return true
+		}
+	}
+	return false
+}
+
+// getCharConditions returns all conditions for a character
+func getCharConditions(charID int) []string {
+	var conditionsJSON []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&conditionsJSON)
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	return conditions
+}
+
+// isIncapacitated checks if character cannot take actions or reactions
+// Per 5e: paralyzed, stunned, unconscious, petrified, and incapacitated all prevent actions
+func isIncapacitated(charID int) bool {
+	conditions := getCharConditions(charID)
+	for _, c := range conditions {
+		switch strings.ToLower(c) {
+		case "incapacitated", "paralyzed", "stunned", "unconscious", "petrified":
+			return true
+		}
+	}
+	return false
+}
+
+// canMove checks if character's speed is not reduced to 0 by conditions
+// Grappled, restrained, and stunned set speed to 0
+func canMove(charID int) bool {
+	conditions := getCharConditions(charID)
+	for _, c := range conditions {
+		switch strings.ToLower(c) {
+		case "grappled", "restrained", "stunned", "paralyzed", "unconscious", "petrified":
+			return false
+		}
+	}
+	// Also check exhaustion level 5
+	var exhaustion int
+	db.QueryRow("SELECT COALESCE(exhaustion_level, 0) FROM characters WHERE id = $1", charID).Scan(&exhaustion)
+	if exhaustion >= 5 {
+		return false
+	}
+	return true
+}
+
+// autoFailsSave checks if a condition causes automatic failure on a saving throw type
+// Paralyzed, stunned, unconscious auto-fail STR and DEX saves
+func autoFailsSave(charID int, ability string) bool {
+	conditions := getCharConditions(charID)
+	ability = strings.ToLower(ability)
+	if ability == "str" || ability == "strength" || ability == "dex" || ability == "dexterity" {
+		for _, c := range conditions {
+			switch strings.ToLower(c) {
+			case "paralyzed", "stunned", "unconscious":
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isAutoCrit checks if attack against target is automatically a critical hit
+// Paralyzed and unconscious targets: hits from within 5 feet are auto-crits
+func isAutoCrit(targetID int) bool {
+	conditions := getCharConditions(targetID)
+	for _, c := range conditions {
+		switch strings.ToLower(c) {
+		case "paralyzed", "unconscious":
+			return true
+		}
+	}
+	return false
+}
+
+// getSaveDisadvantage checks if conditions impose disadvantage on saves
+// Exhaustion 3+ gives disadvantage on all saves
+// Restrained gives disadvantage on DEX saves
+func getSaveDisadvantage(charID int, ability string) bool {
+	// Exhaustion level 3+
+	var exhaustion int
+	db.QueryRow("SELECT COALESCE(exhaustion_level, 0) FROM characters WHERE id = $1", charID).Scan(&exhaustion)
+	if exhaustion >= 3 {
+		return true
+	}
+	
+	// Restrained: disadvantage on DEX saves
+	ability = strings.ToLower(ability)
+	if ability == "dex" || ability == "dexterity" {
+		if hasCondition(charID, "restrained") {
+			return true
+		}
+	}
+	return false
+}
+
+// parseTargetFromDescription tries to find a character ID from action description
+// Looks for character names in the description (e.g., "attack goblin" → finds goblin's ID)
+func parseTargetFromDescription(description string, attackerID int) int {
+	// Get the lobby ID for this attacker
+	var lobbyID int
+	err := db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1", attackerID).Scan(&lobbyID)
+	if err != nil || lobbyID == 0 {
+		return 0
+	}
+	
+	// Get all characters in the same lobby
+	rows, err := db.Query("SELECT id, name FROM characters WHERE lobby_id = $1 AND id != $2", lobbyID, attackerID)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	
+	descLower := strings.ToLower(description)
+	
+	for rows.Next() {
+		var id int
+		var name string
+		rows.Scan(&id, &name)
+		
+		// Check if character name appears in description
+		if strings.Contains(descLower, strings.ToLower(name)) {
+			return id
+		}
+	}
+	
+	// Also check monster/NPC names from campaign document
+	// For now, return 0 if no character match found
+	return 0
 }
 
 // Spell slots by class and level (returns map of spell level -> slots)
@@ -5933,6 +6081,49 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		totalMod += proficiencyBonus(level)
 	}
 	
+	// CHECK: Auto-fail conditions (paralyzed, stunned, unconscious auto-fail STR/DEX saves)
+	if autoFailsSave(req.CharacterID, abilityShort) {
+		failReason := "condition"
+		conditions := getCharConditions(req.CharacterID)
+		for _, c := range conditions {
+			switch strings.ToLower(c) {
+			case "paralyzed", "stunned", "unconscious":
+				failReason = c
+				break
+			}
+		}
+		
+		fullResult := fmt.Sprintf("%s saving throw: AUTO-FAIL (character is %s)", abilityName, failReason)
+		desc := fmt.Sprintf("%s: %s saving throw (DC %d) - auto-fail (%s)", charName, abilityName, req.DC, failReason)
+		if req.Description != "" {
+			desc = fmt.Sprintf("%s: %s - %s saving throw (DC %d) - auto-fail (%s)", charName, req.Description, abilityName, req.DC, failReason)
+		}
+		
+		_, _ = db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, 'saving_throw', $3, $4)
+		`, campaignID, req.CharacterID, desc, fullResult)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        false,
+			"character":      charName,
+			"ability":        abilityName,
+			"auto_fail":      true,
+			"auto_fail_reason": failReason,
+			"dc":             req.DC,
+			"outcome":        "AUTO-FAIL",
+			"result":         fullResult,
+			"condition_note": fmt.Sprintf("%s is %s and automatically fails %s saving throws", charName, failReason, abilityName),
+		})
+		return
+	}
+	
+	// CHECK: Condition-based disadvantage (exhaustion 3+, restrained for DEX)
+	conditionDisadvantage := getSaveDisadvantage(req.CharacterID, abilityShort)
+	if conditionDisadvantage && !req.Advantage {
+		req.Disadvantage = true
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -5943,6 +6134,12 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
 		rollType = "disadvantage"
+	} else if req.Advantage && req.Disadvantage {
+		// Advantage and disadvantage cancel out
+		finalRoll = rollDie(20)
+		roll1 = finalRoll
+		roll2 = 0
+		rollType = "normal (advantage and disadvantage cancel)"
 	} else {
 		finalRoll = rollDie(20)
 		roll1 = finalRoll
@@ -8497,6 +8694,54 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// CHECK: Incapacitated condition blocks ALL actions (except death saves)
+	if req.Action != "death_save" && isIncapacitated(charID) {
+		conditions := getCharConditions(charID)
+		blockingCondition := "incapacitated"
+		for _, c := range conditions {
+			switch strings.ToLower(c) {
+			case "incapacitated", "paralyzed", "stunned", "unconscious", "petrified":
+				blockingCondition = c
+				break
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":           false,
+			"error":             "incapacitated",
+			"message":           fmt.Sprintf("You cannot take actions while %s", blockingCondition),
+			"blocking_condition": blockingCondition,
+			"hint":              "You must wait for the condition to end or be removed.",
+		})
+		return
+	}
+	
+	// CHECK: Movement blocked by certain conditions
+	if req.Action == "move" && !canMove(charID) {
+		conditions := getCharConditions(charID)
+		var blockingCondition string
+		for _, c := range conditions {
+			switch strings.ToLower(c) {
+			case "grappled", "restrained", "stunned", "paralyzed", "unconscious", "petrified":
+				blockingCondition = c
+				break
+			}
+		}
+		// Also check exhaustion 5
+		var exhaustion int
+		db.QueryRow("SELECT COALESCE(exhaustion_level, 0) FROM characters WHERE id = $1", charID).Scan(&exhaustion)
+		if exhaustion >= 5 {
+			blockingCondition = "exhaustion level 5"
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":           false,
+			"error":             "cannot_move",
+			"message":           fmt.Sprintf("Your speed is 0 due to %s", blockingCondition),
+			"blocking_condition": blockingCondition,
+			"hint":              "You must remove the condition before you can move.",
+		})
+		return
+	}
+	
 	// Check if in combat - action economy only enforced in combat
 	var inCombat bool
 	err = db.QueryRow("SELECT active FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&inCombat)
@@ -8646,6 +8891,22 @@ func resolveAction(action, description string, charID int) string {
 			hasDisadvantage = true
 		}
 		
+		// Check for auto-crit against paralyzed/unconscious targets
+		// Try to parse target from description (e.g., "attack goblin" or "attack the orc")
+		autoCrit := false
+		autoCritReason := ""
+		targetID := parseTargetFromDescription(description, charID)
+		if targetID > 0 && isAutoCrit(targetID) {
+			autoCrit = true
+			conditions := getCharConditions(targetID)
+			for _, c := range conditions {
+				if strings.ToLower(c) == "paralyzed" || strings.ToLower(c) == "unconscious" {
+					autoCritReason = c
+					break
+				}
+			}
+		}
+		
 		// Roll attack (advantage and disadvantage cancel out)
 		var attackRoll, roll1, roll2 int
 		rollType := "normal"
@@ -8665,6 +8926,22 @@ func resolveAction(action, description string, charID int) string {
 		rollInfo := ""
 		if rollType != "normal" {
 			rollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", rollType, roll1, roll2, attackRoll)
+		}
+		
+		// Auto-crit against paralyzed/unconscious targets (within 5ft assumed for melee)
+		if autoCrit && attackRoll != 1 {
+			// Critical hit - double damage dice
+			damageDice := "1d6"
+			if hasWeapon {
+				damageDice = weapon.Damage
+			}
+			dmg := rollDamage(damageDice, true) + damageMod
+			weaponName := "unarmed"
+			if hasWeapon {
+				weaponName = weapon.Name
+			}
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, rollInfo, dmg)
 		}
 		
 		if attackRoll == 20 {
@@ -13326,7 +13603,7 @@ var baseHTML = `<!DOCTYPE html>
   --border: #073642; --code-bg: #073642;
   --note-bg: #073642; --note-border: #586e75;
 }
-body { font-family: Georgia, serif; max-width: 720px; margin: 0 auto; padding: 1rem; line-height: 1.6; color: var(--fg); background: var(--bg); }
+body { font-family: Georgia, serif; max-width: 860px; margin: 0 auto; padding: 1rem; line-height: 1.6; color: var(--fg); background: var(--bg); }
 a { color: var(--link); }
 a:visited { color: var(--link-visited); }
 nav { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1.5rem; display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0; }
