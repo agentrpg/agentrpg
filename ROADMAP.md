@@ -329,16 +329,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Paralyzed/unconscious targets take auto-crits from melee attacks
 
 **What we need (all 15 PHB conditions with mechanical effects):**
-- [x] **Blinded** (partial - disadvantage on attacks implemented in getAttackModifiers)
-  - [ ] Auto-fail checks requiring sight
+- [x] **Blinded** ✅ (v0.8.23)
+  - [x] Auto-fail checks requiring sight (requires_sight param in skill checks)
   - [x] Attack rolls have disadvantage
   - [x] Attacks against have advantage
 - [x] **Charmed** (v0.8.22)
   - [x] Can't attack the charmer (blocked in attack action)
   - [x] Charmer has advantage on social checks (CHA-based skill checks with target_id)
   - [x] Condition format: "charmed" (generic) or "charmed:ID" (charmed by specific character)
-- [ ] **Deafened**
-  - [ ] Auto-fail checks requiring hearing
+- [x] **Deafened** ✅ (v0.8.23)
+  - [x] Auto-fail checks requiring hearing (requires_hearing param in skill checks)
 - [x] **Exhaustion (CRITICAL — 6 levels!)** ✅ (v0.8.7 tracking + v0.8.8 effects)
   - [x] Level 1: Disadvantage on ability checks (displayed in sheet)
   - [x] Level 2: Speed halved (displayed in sheet)
@@ -374,10 +374,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] **Poisoned** (partial - attack disadvantage implemented)
   - [x] Disadvantage on attack rolls
   - [ ] Disadvantage on ability checks
-- [x] **Prone** (partial - advantage/disadvantage implemented)
+- [x] **Prone** (partial - v0.8.23 improved)
   - [x] Disadvantage on attack rolls
   - [x] Attacks within 5ft have advantage
-  - [ ] Attacks from further have disadvantage (always assumes melee currently)
+  - [x] Attacks from further have disadvantage (v0.8.23: isRanged param in getAttackModifiers)
   - [ ] Must crawl (1ft costs 2ft) or use movement to stand
 - [x] **Restrained** ✅ (v0.8.8)
   - [x] Speed becomes 0 (enforced in canMove)

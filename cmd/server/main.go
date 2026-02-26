@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.22"
+const version = "0.8.23"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -6429,15 +6429,17 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		CharacterID    int    `json:"character_id"`
-		Skill          string `json:"skill"`           // e.g., "perception", "athletics"
-		Ability        string `json:"ability"`         // e.g., "str", "dex" - used if no skill
-		DC             int    `json:"dc"`              // Difficulty Class
-		Advantage      bool   `json:"advantage"`
-		Disadvantage   bool   `json:"disadvantage"`
-		Description    string `json:"description"`     // Optional context
-		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
-		TargetID       int    `json:"target_id"`       // Optional: target of the check (for charmed advantage)
+		CharacterID     int    `json:"character_id"`
+		Skill           string `json:"skill"`            // e.g., "perception", "athletics"
+		Ability         string `json:"ability"`          // e.g., "str", "dex" - used if no skill
+		DC              int    `json:"dc"`               // Difficulty Class
+		Advantage       bool   `json:"advantage"`
+		Disadvantage    bool   `json:"disadvantage"`
+		Description     string `json:"description"`      // Optional context
+		UseInspiration  bool   `json:"use_inspiration"`  // Spend inspiration for advantage
+		TargetID        int    `json:"target_id"`        // Optional: target of the check (for charmed advantage)
+		RequiresHearing bool   `json:"requires_hearing"` // v0.8.23: Auto-fail if deafened
+		RequiresSight   bool   `json:"requires_sight"`   // v0.8.23: Auto-fail if blinded
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6477,6 +6479,53 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	if charLobbyID != campaignID {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// v0.8.23: Check for auto-fail conditions (deafened/blinded)
+	skillUsedForCheck := strings.ToLower(strings.ReplaceAll(req.Skill, " ", "_"))
+	if req.RequiresHearing && hasCondition(req.CharacterID, "deafened") {
+		desc := fmt.Sprintf("%s: %s check (DC %d) - auto-fail (deafened)", charName, req.Skill, req.DC)
+		if req.Description != "" {
+			desc = fmt.Sprintf("%s: %s - %s check (DC %d) - auto-fail (deafened)", charName, req.Description, req.Skill, req.DC)
+		}
+		_, _ = db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, 'skill_check', $3, $4)
+		`, campaignID, req.CharacterID, desc, "AUTO-FAIL (deafened)")
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          false,
+			"character":        charName,
+			"check":            skillUsedForCheck,
+			"auto_fail":        true,
+			"auto_fail_reason": "deafened",
+			"outcome":          "AUTO-FAIL",
+			"result":           fmt.Sprintf("%s check: AUTO-FAIL (%s is deafened and cannot hear)", skillUsedForCheck, charName),
+			"condition_note":   fmt.Sprintf("%s is deafened and automatically fails checks requiring hearing", charName),
+		})
+		return
+	}
+	if req.RequiresSight && hasCondition(req.CharacterID, "blinded") {
+		desc := fmt.Sprintf("%s: %s check (DC %d) - auto-fail (blinded)", charName, req.Skill, req.DC)
+		if req.Description != "" {
+			desc = fmt.Sprintf("%s: %s - %s check (DC %d) - auto-fail (blinded)", charName, req.Description, req.Skill, req.DC)
+		}
+		_, _ = db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, 'skill_check', $3, $4)
+		`, campaignID, req.CharacterID, desc, "AUTO-FAIL (blinded)")
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          false,
+			"character":        charName,
+			"check":            skillUsedForCheck,
+			"auto_fail":        true,
+			"auto_fail_reason": "blinded",
+			"outcome":          "AUTO-FAIL",
+			"result":           fmt.Sprintf("%s check: AUTO-FAIL (%s is blinded and cannot see)", skillUsedForCheck, charName),
+			"condition_note":   fmt.Sprintf("%s is blinded and automatically fails checks requiring sight", charName),
+		})
 		return
 	}
 	
@@ -10863,7 +10912,8 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // Check if character has a condition that grants advantage/disadvantage
-func getAttackModifiers(charID int, targetConditions []string) (bool, bool) {
+// isRanged indicates if this is a ranged attack (affects prone handling)
+func getAttackModifiers(charID int, targetConditions []string, isRanged bool) (bool, bool) {
 	hasAdvantage := false
 	hasDisadvantage := false
 	
@@ -10891,9 +10941,12 @@ func getAttackModifiers(charID int, targetConditions []string) (bool, bool) {
 		case "invisible":
 			hasDisadvantage = true
 		case "prone":
-			// Prone gives advantage from within 5ft, disadvantage from further
-			// For now, assume melee (advantage)
-			hasAdvantage = true
+			// Prone: advantage from within 5ft (melee), disadvantage from further (ranged)
+			if isRanged {
+				hasDisadvantage = true
+			} else {
+				hasAdvantage = true
+			}
 		}
 	}
 	
@@ -10947,8 +11000,11 @@ func resolveAction(action, description string, charID int) string {
 			attackMod += proficiencyBonus(level)
 		}
 		
-		// Get condition-based advantage/disadvantage
-		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{})
+		// Determine if ranged attack (v0.8.23: for proper prone handling)
+		isRangedAttack := hasWeapon && weapon.Type == "ranged"
+		
+		// Get condition-based advantage/disadvantage (pass isRanged for prone handling)
+		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{}, isRangedAttack)
 		
 		// Override with explicit request
 		if requestedAdvantage {
@@ -11363,8 +11419,8 @@ func resolveAction(action, description string, charID int) string {
 			attackMod += proficiencyBonus(level)
 		}
 		
-		// Get condition-based advantage/disadvantage
-		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{})
+		// Get condition-based advantage/disadvantage (offhand is always melee, so not ranged)
+		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{}, false)
 		
 		// Check for explicit advantage/disadvantage in description
 		if requestedAdvantage {
