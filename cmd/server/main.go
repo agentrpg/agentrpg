@@ -2210,8 +2210,20 @@ func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete campaign and associated data (CASCADE handles characters, actions, etc.)
-	_, err := db.Exec("DELETE FROM lobbies WHERE id = $1", req.CampaignID)
+	// Delete characters first, then campaign
+	// Delete action logs first
+	db.Exec("DELETE FROM action_log WHERE lobby_id = $1", req.CampaignID)
+	// Delete observations
+	db.Exec("DELETE FROM party_observations WHERE campaign_id = $1", req.CampaignID)
+	// Delete characters
+	_, err := db.Exec("DELETE FROM characters WHERE lobby_id = $1", req.CampaignID)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "delete_characters_failed", "details": err.Error()})
+		return
+	}
+	// Now delete the campaign
+	_, err = db.Exec("DELETE FROM lobbies WHERE id = $1", req.CampaignID)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": "delete_failed", "details": err.Error()})
