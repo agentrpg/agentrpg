@@ -471,8 +471,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] POST /api/gm/tool-check with proficiency bonus when proficient
     - [x] Default abilities by tool type (thieves' tools→DEX, herbalism kit→WIS, etc.)
   - [ ] Language proficiencies (for roleplay)
-  - [ ] Weapon proficiencies (can use without penalty)
-  - [ ] Armor proficiencies (penalties for non-proficient)
+  - [x] Weapon proficiencies (v0.8.12)
+    - [x] Character creation auto-populates from class (simple, martial, or specific weapons)
+    - [x] Character sheet shows weapon_proficiencies
+    - [x] Attack rolls only add proficiency bonus when proficient with weapon
+    - [x] Opportunity attacks also check weapon proficiency
+    - [x] isWeaponProficient() helper handles "simple", "martial", and specific weapon names
+  - [x] Armor proficiencies (v0.8.12)
+    - [x] Character creation auto-populates from class (light, medium, heavy, shields, all armor)
+    - [x] Character sheet shows armor_proficiencies
+    - [x] isArmorProficient() helper for future armor penalty checks
   - [ ] Expertise (double prof bonus) for Rogues/Bards
 - [x] **Inspiration** (v0.8.10)
   - [x] Binary flag (have it or don't)
@@ -648,4 +656,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.10**
+Current: **0.8.12**

@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.11"
+const version = "0.8.12"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -449,6 +449,14 @@ func initDB() {
 		-- Comma-separated list of tool names the character is proficient in
 		-- e.g., "thieves' tools, herbalism kit, lute"
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS tool_proficiencies TEXT DEFAULT '';
+		
+		-- Weapon proficiencies (Phase 8 P1 - Proficiencies)
+		-- Comma-separated list: "simple, martial" or specific weapons "longswords, rapiers"
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS weapon_proficiencies TEXT DEFAULT '';
+		
+		-- Armor proficiencies (Phase 8 P1 - Proficiencies)
+		-- Comma-separated list: "light, medium, heavy, shields" or "all armor"
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS armor_proficiencies TEXT DEFAULT '';
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -1240,6 +1248,84 @@ func proficiencyBonus(level int) int {
 // Calculate spell save DC: 8 + proficiency bonus + spellcasting modifier
 func spellSaveDC(level int, spellcastingMod int) int {
 	return 8 + proficiencyBonus(level) + spellcastingMod
+}
+
+// Check if a character is proficient with a weapon
+// weaponProfsStr is comma-separated list from character: "simple, martial" or specific weapons
+// weaponKey is the SRD weapon key (e.g., "longsword", "dagger")
+func isWeaponProficient(weaponProfsStr string, weaponKey string) bool {
+	if weaponProfsStr == "" {
+		return false
+	}
+	
+	// Get weapon info to determine category
+	weapon, hasWeapon := srdWeapons[weaponKey]
+	
+	// Parse proficiency list
+	profs := strings.Split(strings.ToLower(weaponProfsStr), ",")
+	for _, prof := range profs {
+		prof = strings.TrimSpace(prof)
+		
+		// Check for category proficiency ("simple" or "martial")
+		if hasWeapon {
+			if prof == "simple" && weapon.Category == "simple" {
+				return true
+			}
+			if prof == "martial" && weapon.Category == "martial" {
+				return true
+			}
+		}
+		
+		// Check for specific weapon proficiency
+		// Normalize both for comparison (e.g., "light crossbow" -> "light crossbow", "light_crossbow" -> "light crossbow")
+		normalizedProf := strings.ReplaceAll(prof, "_", " ")
+		normalizedWeapon := strings.ReplaceAll(weaponKey, "_", " ")
+		normalizedWeapon = strings.ReplaceAll(normalizedWeapon, "-", " ")
+		
+		if normalizedProf == normalizedWeapon {
+			return true
+		}
+		
+		// Also check weapon name if available
+		if hasWeapon && strings.ToLower(weapon.Name) == normalizedProf {
+			return true
+		}
+	}
+	
+	return false
+}
+
+// Check if a character is proficient with armor
+// armorProfsStr is comma-separated list: "light, medium, shields" or "all armor, shields"
+// armorCategory is "light", "medium", "heavy", or "shield"
+func isArmorProficient(armorProfsStr string, armorCategory string) bool {
+	if armorProfsStr == "" {
+		return false
+	}
+	
+	profs := strings.Split(strings.ToLower(armorProfsStr), ",")
+	categoryLower := strings.ToLower(armorCategory)
+	
+	for _, prof := range profs {
+		prof = strings.TrimSpace(prof)
+		
+		// "all armor" covers light, medium, and heavy (but not shields)
+		if prof == "all armor" && (categoryLower == "light" || categoryLower == "medium" || categoryLower == "heavy") {
+			return true
+		}
+		
+		// Direct match
+		if prof == categoryLower {
+			return true
+		}
+		
+		// Handle plural forms
+		if prof == "shields" && categoryLower == "shield" {
+			return true
+		}
+	}
+	
+	return false
 }
 
 // Cover bonuses for AC
@@ -4264,14 +4350,26 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			toolProfsStr = strings.Join(normalizedTools, ", ")
 		}
 		
+		// Get weapon and armor proficiencies from class (v0.8.11)
+		weaponProfsStr := ""
+		armorProfsStr := ""
+		if class, ok := srdClasses[classKey]; ok {
+			if len(class.WeaponProf) > 0 {
+				weaponProfsStr = strings.ToLower(strings.Join(class.WeaponProf, ", "))
+			}
+			if len(class.ArmorProf) > 0 {
+				armorProfsStr = strings.ToLower(strings.Join(class.ArmorProf, ", "))
+			}
+		}
+		
 		// Starting gold (simplified: 10gp for all classes)
 		startingGold := 10
 		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -4348,8 +4446,10 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var gold int
 	var inventoryJSON []byte
 	var skillProfsRaw string
-	
 	var toolProfsRaw string
+	var weaponProfsRaw string
+	var armorProfsRaw string
+	
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
 			str, dex, con, intl, wis, cha,
@@ -4360,13 +4460,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0),
 			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0),
 			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false),
-			COALESCE(tool_proficiencies, '')
+			COALESCE(tool_proficiencies, ''),
+			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, '')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
-		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw)
+		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
+		&weaponProfsRaw, &armorProfsRaw)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -4445,6 +4547,26 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 				tools = append(tools, strings.TrimSpace(t))
 			}
 			return tools
+		}(),
+		"weapon_proficiencies": func() []string {
+			if weaponProfsRaw == "" {
+				return []string{}
+			}
+			weapons := []string{}
+			for _, w := range strings.Split(weaponProfsRaw, ",") {
+				weapons = append(weapons, strings.TrimSpace(w))
+			}
+			return weapons
+		}(),
+		"armor_proficiencies": func() []string {
+			if armorProfsRaw == "" {
+				return []string{}
+			}
+			armor := []string{}
+			for _, a := range strings.Split(armorProfsRaw, ",") {
+				armor = append(armor, strings.TrimSpace(a))
+			}
+			return armor
 		}(),
 		"xp":                  xp,
 		"xp_to_next_level":    xpToNextLevel - xp,
@@ -7836,10 +7958,11 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		var attackerLobbyID int
 		var str, dex, level int
 		var reactionUsed bool
+		var weaponProfsStr string
 		err = db.QueryRow(`
-			SELECT name, lobby_id, str, dex, level, COALESCE(reaction_used, false)
+			SELECT name, lobby_id, str, dex, level, COALESCE(reaction_used, false), COALESCE(weapon_proficiencies, '')
 			FROM characters WHERE id = $1
-		`, req.AttackerID).Scan(&attackerName, &attackerLobbyID, &str, &dex, &level, &reactionUsed)
+		`, req.AttackerID).Scan(&attackerName, &attackerLobbyID, &str, &dex, &level, &reactionUsed, &weaponProfsStr)
 		
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -7871,10 +7994,11 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		damageMod = modifier(str)
 		damageDice = "1d6"
 		weaponName = "unarmed strike"
+		weaponKey := ""
 		
 		// Check for weapon in request or default to equipped weapon
 		if req.Weapon != "" {
-			weaponKey := strings.ToLower(strings.ReplaceAll(req.Weapon, " ", "-"))
+			weaponKey = strings.ToLower(strings.ReplaceAll(req.Weapon, " ", "-"))
 			if weapon, ok := srdWeapons[weaponKey]; ok {
 				weaponName = weapon.Name
 				damageDice = weapon.Damage
@@ -7885,8 +8009,10 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		
-		// Add proficiency bonus
-		attackMod += proficiencyBonus(level)
+		// Add proficiency bonus only if proficient with the weapon (v0.8.11)
+		if weaponKey == "" || isWeaponProficient(weaponProfsStr, weaponKey) {
+			attackMod += proficiencyBonus(level)
+		}
 	}
 	
 	// Roll the attack
@@ -9425,11 +9551,12 @@ func getAttackModifiers(charID int, targetConditions []string) (bool, bool) {
 }
 
 func resolveAction(action, description string, charID int) string {
-	// Get character stats for modifiers
+	// Get character stats for modifiers (including weapon proficiencies for attack checks)
 	var str, dex, intl, wis, cha, level int
 	var class string
 	var conditionsJSON []byte
-	db.QueryRow("SELECT str, dex, intl, wis, cha, level, class, COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &level, &class, &conditionsJSON)
+	var weaponProfsStr string
+	db.QueryRow("SELECT str, dex, intl, wis, cha, level, class, COALESCE(conditions, '[]'), COALESCE(weapon_proficiencies, '') FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &level, &class, &conditionsJSON, &weaponProfsStr)
 	
 	var conditions []string
 	json.Unmarshal(conditionsJSON, &conditions)
@@ -9455,8 +9582,11 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		// Add proficiency bonus (simplified - assume proficient)
-		attackMod += proficiencyBonus(level)
+		// Add proficiency bonus only if proficient with the weapon (v0.8.11)
+		isProficient := isWeaponProficient(weaponProfsStr, weaponKey)
+		if isProficient {
+			attackMod += proficiencyBonus(level)
+		}
 		
 		// Get condition-based advantage/disadvantage
 		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{})
