@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.9"
+const version = "0.8.10"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -171,6 +171,7 @@ func main() {
 	http.HandleFunc("/api/gm/give-item", handleGMGiveItem)
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
+	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
 	http.HandleFunc("/api/characters/attune", handleCharacterAttune)
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
@@ -437,6 +438,11 @@ func initDB() {
 		-- Skill proficiencies (Phase 8 P1 - Proficiencies)
 		-- Comma-separated list of skill names the character is proficient in
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS skill_proficiencies TEXT DEFAULT '';
+		
+		-- Inspiration (Phase 8 P1 - Character Features)
+		-- Binary flag: character either has inspiration or doesn't
+		-- GM awards for good roleplay; spend for advantage on any d20 roll
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS inspiration BOOLEAN DEFAULT FALSE;
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -4319,7 +4325,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var level, hp, maxHP, ac, str, dex, con, intl, wis, cha int
 	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
 	var hitDiceSpent, exhaustionLevel int
-	var isStable, isDead bool
+	var isStable, isDead, hasInspiration bool
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
 	var gold int
@@ -4335,13 +4341,13 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
 			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0),
 			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0),
-			COALESCE(skill_proficiencies, '')
+			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false)
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
-		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw)
+		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -4424,6 +4430,12 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			"spent":      hitDiceSpent,
 		},
 		"exhaustion_level":    exhaustionLevel,
+		"inspiration":         hasInspiration,
+	}
+	
+	// Add inspiration tip if they have it
+	if hasInspiration {
+		response["inspiration_tip"] = "You have inspiration! Add use_inspiration:true to any skill check, saving throw, or attack to spend it for advantage."
 	}
 	
 	// Add ASI prompt if they have points to spend
@@ -5824,13 +5836,14 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		CharacterID  int    `json:"character_id"`
-		Skill        string `json:"skill"`        // e.g., "perception", "athletics"
-		Ability      string `json:"ability"`      // e.g., "str", "dex" - used if no skill
-		DC           int    `json:"dc"`           // Difficulty Class
-		Advantage    bool   `json:"advantage"`
-		Disadvantage bool   `json:"disadvantage"`
-		Description  string `json:"description"`  // Optional context
+		CharacterID    int    `json:"character_id"`
+		Skill          string `json:"skill"`           // e.g., "perception", "athletics"
+		Ability        string `json:"ability"`         // e.g., "str", "dex" - used if no skill
+		DC             int    `json:"dc"`              // Difficulty Class
+		Advantage      bool   `json:"advantage"`
+		Disadvantage   bool   `json:"disadvantage"`
+		Description    string `json:"description"`     // Optional context
+		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -5848,15 +5861,16 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		req.DC = 10 // Default DC
 	}
 	
-	// Get character stats
+	// Get character stats (including inspiration)
 	var charName string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
 	var skillProfsRaw sql.NullString
+	var hasInspiration bool
 	err = db.QueryRow(`
-		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, '')
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false)
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &hasInspiration)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -5926,6 +5940,24 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		isProficient = true
 	}
 	
+	// Handle inspiration: spend it for advantage
+	usedInspiration := false
+	if req.UseInspiration {
+		if hasInspiration {
+			// Consume inspiration and grant advantage
+			db.Exec(`UPDATE characters SET inspiration = false WHERE id = $1`, req.CharacterID)
+			req.Advantage = true
+			usedInspiration = true
+		} else {
+			// Character doesn't have inspiration to spend
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_inspiration",
+				"message": fmt.Sprintf("%s doesn't have inspiration to spend", charName),
+			})
+			return
+		}
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -5933,6 +5965,9 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	if req.Advantage && !req.Disadvantage {
 		roll1, roll2, finalRoll = rollWithAdvantage()
 		rollType = "advantage"
+		if usedInspiration {
+			rollType = "advantage (inspiration)"
+		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
 		rollType = "disadvantage"
@@ -5992,7 +6027,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1, $2, 'skill_check', $3, $4)
 	`, campaignID, req.CharacterID, desc, fullResult)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":      success,
 		"character":    charName,
 		"check":        checkName,
@@ -6009,7 +6044,12 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 			"die1": roll1,
 			"die2": roll2,
 		},
-	})
+	}
+	if usedInspiration {
+		response["used_inspiration"] = true
+		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this check", charName)
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleGMSavingThrow godoc
@@ -6053,12 +6093,13 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		CharacterID  int    `json:"character_id"`
-		Ability      string `json:"ability"`      // str, dex, con, int, wis, cha
-		DC           int    `json:"dc"`           // Difficulty Class
-		Advantage    bool   `json:"advantage"`
-		Disadvantage bool   `json:"disadvantage"`
-		Description  string `json:"description"`  // Optional context (e.g., "Fireball", "Dragon's Breath")
+		CharacterID    int    `json:"character_id"`
+		Ability        string `json:"ability"`         // str, dex, con, int, wis, cha
+		DC             int    `json:"dc"`              // Difficulty Class
+		Advantage      bool   `json:"advantage"`
+		Disadvantage   bool   `json:"disadvantage"`
+		Description    string `json:"description"`     // Optional context (e.g., "Fireball", "Dragon's Breath")
+		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6082,14 +6123,15 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		req.DC = 10 // Default DC
 	}
 	
-	// Get character stats and class
+	// Get character stats, class, and inspiration
 	var charName, className string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
+	var hasInspiration bool
 	err = db.QueryRow(`
-		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, class
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, class, COALESCE(inspiration, false)
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &className)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &className, &hasInspiration)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6208,6 +6250,24 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		req.Disadvantage = true
 	}
 	
+	// Handle inspiration: spend it for advantage
+	usedInspiration := false
+	if req.UseInspiration {
+		if hasInspiration {
+			// Consume inspiration and grant advantage
+			db.Exec(`UPDATE characters SET inspiration = false WHERE id = $1`, req.CharacterID)
+			req.Advantage = true
+			usedInspiration = true
+		} else {
+			// Character doesn't have inspiration to spend
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_inspiration",
+				"message": fmt.Sprintf("%s doesn't have inspiration to spend", charName),
+			})
+			return
+		}
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -6215,6 +6275,9 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if req.Advantage && !req.Disadvantage {
 		roll1, roll2, finalRoll = rollWithAdvantage()
 		rollType = "advantage"
+		if usedInspiration {
+			rollType = "advantage (inspiration)"
+		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
 		rollType = "disadvantage"
@@ -6281,7 +6344,7 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		VALUES ($1, $2, 'saving_throw', $3, $4)
 	`, campaignID, req.CharacterID, desc, fullResult)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":      success,
 		"character":    charName,
 		"ability":      abilityName,
@@ -6298,7 +6361,12 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			"die1": roll1,
 			"die2": roll2,
 		},
-	})
+	}
+	if usedInspiration {
+		response["used_inspiration"] = true
+		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this save", charName)
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleGMContestedCheck godoc
@@ -7875,6 +7943,127 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		"dc":           dc,
 		"targets":      results,
 		"total_damage": totalDamageDealt,
+	})
+}
+
+// handleGMInspiration godoc
+// @Summary Grant or revoke inspiration
+// @Description GM grants or revokes inspiration for a character. Inspiration can be spent for advantage on any d20 roll.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,grant=boolean} true "Grant (true) or revoke (false) inspiration"
+// @Success 200 {object} map[string]interface{} "Inspiration updated"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/inspiration [post]
+func handleGMInspiration(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID int  `json:"character_id"`
+		Grant       bool `json:"grant"` // true to grant, false to revoke
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Get character and verify they're in this campaign
+	var charName string
+	var charLobbyID int
+	var hasInspiration bool
+	err = db.QueryRow(`
+		SELECT name, lobby_id, COALESCE(inspiration, false) 
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &charLobbyID, &hasInspiration)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Check if this is a no-op
+	if req.Grant && hasInspiration {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("%s already has inspiration", charName),
+			"inspiration": true,
+			"changed": false,
+		})
+		return
+	}
+	if !req.Grant && !hasInspiration {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("%s doesn't have inspiration to revoke", charName),
+			"inspiration": false,
+			"changed": false,
+		})
+		return
+	}
+	
+	// Update inspiration
+	_, err = db.Exec(`UPDATE characters SET inspiration = $1 WHERE id = $2`, req.Grant, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Log the action
+	action := "granted"
+	if !req.Grant {
+		action = "revoked"
+	}
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'inspiration', $3, $4)`,
+		campaignID, req.CharacterID, fmt.Sprintf("GM %s inspiration", action), fmt.Sprintf("%s now %s inspiration", charName, map[bool]string{true: "has", false: "does not have"}[req.Grant]))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"character":   charName,
+		"inspiration": req.Grant,
+		"changed":     true,
+		"message":     fmt.Sprintf("Inspiration %s for %s", action, charName),
+		"tip":         fmt.Sprintf("%s can spend inspiration for advantage on any ability check, attack roll, or saving throw by adding use_inspiration:true to the roll request", charName),
 	})
 }
 
