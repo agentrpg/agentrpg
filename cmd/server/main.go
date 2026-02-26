@@ -384,6 +384,9 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS gold INTEGER DEFAULT 0;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS inventory JSONB DEFAULT '[]';
 		
+		-- Ability Score Improvements tracking (Character Advancement - roadmap item)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS pending_asi INTEGER DEFAULT 0;
+		
 		-- Turn timeout tracking (Timing & Cadence - roadmap item)
 		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 	EXCEPTION WHEN OTHERS THEN NULL;
@@ -3426,12 +3429,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		case "observations":
 			handleCharacterObservations(w, r, charID)
 			return
+		case "asi":
+			handleCharacterASI(w, r, charID)
+			return
 		}
 	}
 	
 	var name, class, race, background string
 	var level, hp, maxHP, ac, str, dex, con, intl, wis, cha int
-	var tempHP, deathSuccesses, deathFailures, coverBonus, xp int
+	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
 	var isStable, isDead bool
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
@@ -3445,13 +3451,13 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
 			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
-			COALESCE(gold, 0), COALESCE(inventory, '[]')
+			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0)
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
-		&gold, &inventoryJSON)
+		&gold, &inventoryJSON, &pendingASI)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -3516,6 +3522,13 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		"xp_threshold":        xpToNextLevel,
 		"gold":                gold,
 		"inventory":           inventory,
+		"pending_asi":         pendingASI,
+	}
+	
+	// Add ASI prompt if they have points to spend
+	if pendingASI > 0 {
+		response["asi_available"] = true
+		response["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi with {\"ability\": \"str|dex|con|int|wis|cha\", \"points\": 1-2}", pendingASI, charID)
 	}
 	
 	if coverBonus > 0 {
@@ -3584,7 +3597,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var charName, class, race, lobbyName, setting, lobbyStatus string
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
-	var deathSuccesses, deathFailures int
+	var deathSuccesses, deathFailures, pendingASI int
 	var isStable, isDead, reactionUsed bool
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
@@ -3593,7 +3606,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.temp_hp, 0), COALESCE(c.conditions, '[]'), COALESCE(c.spell_slots_used, '{}'),
 			COALESCE(c.concentrating_on, ''), COALESCE(c.death_save_successes, 0), COALESCE(c.death_save_failures, 0),
 			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false),
-			COALESCE(c.xp, 0), COALESCE(c.gold, 0)
+			COALESCE(c.xp, 0), COALESCE(c.gold, 0), COALESCE(c.pending_asi, 0)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -3602,7 +3615,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&str, &dex, &con, &intl, &wis, &cha,
 		&lobbyID, &lobbyName, &setting, &lobbyStatus,
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
-		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold)
+		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &pendingASI)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -3829,6 +3842,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"xp":                charXP,
 		"xp_to_next_level":  xpToNext,
 		"gold":              charGold,
+		"pending_asi":       pendingASI,
 		"stats": map[string]int{
 			"str": str, "dex": dex, "con": con,
 			"int": intl, "wis": wis, "cha": cha,
@@ -3837,6 +3851,12 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
 			"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
 		},
+	}
+	
+	// Add ASI notification if points available
+	if pendingASI > 0 {
+		characterInfo["asi_available"] = true
+		characterInfo["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi", pendingASI, charID)
 	}
 	
 	// Add concentration if active
@@ -5788,17 +5808,36 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 		
 		// Check for level up
 		if newLevel > currentLevel {
-			// Update level automatically
-			_, err = db.Exec(`UPDATE characters SET level = $1 WHERE id = $2`, newLevel, charID)
+			// Calculate ASI points earned (at levels 4, 8, 12, 16, 19)
+			asiLevels := []int{4, 8, 12, 16, 19}
+			asiEarned := 0
+			for _, asiLevel := range asiLevels {
+				if currentLevel < asiLevel && newLevel >= asiLevel {
+					asiEarned += 2 // Each ASI grants 2 points to distribute
+				}
+			}
+			
+			// Update level and pending ASI
+			if asiEarned > 0 {
+				_, err = db.Exec(`UPDATE characters SET level = $1, pending_asi = pending_asi + $2 WHERE id = $3`, newLevel, asiEarned, charID)
+			} else {
+				_, err = db.Exec(`UPDATE characters SET level = $1 WHERE id = $2`, newLevel, charID)
+			}
+			
 			if err == nil {
 				result["level_up"] = true
 				result["old_level"] = currentLevel
 				result["new_level"] = newLevel
+				if asiEarned > 0 {
+					result["asi_earned"] = asiEarned
+					result["asi_message"] = fmt.Sprintf("You earned %d ability score improvement points! Use POST /api/characters/{id}/asi to apply them.", asiEarned)
+				}
 				
 				levelUps = append(levelUps, map[string]interface{}{
 					"character_name": name,
 					"old_level":      currentLevel,
 					"new_level":      newLevel,
+					"asi_earned":     asiEarned,
 				})
 			}
 		} else {
@@ -8358,6 +8397,154 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, wrapHTML("Agent RPG", homepageContent))
+}
+
+// handleCharacterASI godoc
+// @Summary Apply Ability Score Improvement
+// @Description Spend pending ASI points to increase ability scores. Max 20 per ability.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param id path int true "Character ID"
+// @Param request body object{ability=string,points=integer} true "ASI application"
+// @Success 200 {object} map[string]interface{} "ASI applied"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not your character"
+// @Router /characters/{id}/asi [post]
+func handleCharacterASI(w http.ResponseWriter, r *http.Request, charID int) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Verify ownership
+	var ownerID, pendingASI int
+	var str, dex, con, intl, wis, cha int
+	err = db.QueryRow(`
+		SELECT agent_id, COALESCE(pending_asi, 0), str, dex, con, intl, wis, cha 
+		FROM characters WHERE id = $1
+	`, charID).Scan(&ownerID, &pendingASI, &str, &dex, &con, &intl, &wis, &cha)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	if pendingASI <= 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_asi_available",
+			"message": "You have no ability score improvement points to spend.",
+		})
+		return
+	}
+	
+	var req struct {
+		Ability string `json:"ability"`
+		Points  int    `json:"points"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.Points <= 0 || req.Points > pendingASI {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_points",
+			"message": fmt.Sprintf("Points must be between 1 and %d (your available ASI points)", pendingASI),
+		})
+		return
+	}
+	
+	// Validate ability and get current value
+	ability := strings.ToLower(req.Ability)
+	var currentVal int
+	var column string
+	switch ability {
+	case "str", "strength":
+		currentVal = str
+		column = "str"
+	case "dex", "dexterity":
+		currentVal = dex
+		column = "dex"
+	case "con", "constitution":
+		currentVal = con
+		column = "con"
+	case "int", "intelligence":
+		currentVal = intl
+		column = "intl"
+	case "wis", "wisdom":
+		currentVal = wis
+		column = "wis"
+	case "cha", "charisma":
+		currentVal = cha
+		column = "cha"
+	default:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_ability",
+			"message": "Ability must be one of: str, dex, con, int, wis, cha",
+		})
+		return
+	}
+	
+	// Check max (20)
+	newVal := currentVal + req.Points
+	if newVal > 20 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "exceeds_maximum",
+			"message": fmt.Sprintf("Cannot increase %s above 20. Current: %d, Requested increase: %d", ability, currentVal, req.Points),
+		})
+		return
+	}
+	
+	// Apply the ASI
+	query := fmt.Sprintf(`UPDATE characters SET %s = $1, pending_asi = pending_asi - $2 WHERE id = $3`, column)
+	_, err = db.Exec(query, newVal, req.Points, charID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Also update max_hp if CON was increased (level * CON modifier change)
+	if column == "con" {
+		var level, maxHP int
+		db.QueryRow(`SELECT level, max_hp FROM characters WHERE id = $1`, charID).Scan(&level, &maxHP)
+		oldMod := modifier(currentVal)
+		newMod := modifier(newVal)
+		if newMod > oldMod {
+			hpIncrease := level * (newMod - oldMod)
+			db.Exec(`UPDATE characters SET max_hp = max_hp + $1, hp = hp + $1 WHERE id = $2`, hpIncrease, charID)
+		}
+	}
+	
+	// Recalculate AC if DEX was increased (only if not wearing heavy armor - simplified, assume yes)
+	// For now we'll leave AC calculation to be handled by equipment system
+	
+	remainingASI := pendingASI - req.Points
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"ability":       column,
+		"old_value":     currentVal,
+		"new_value":     newVal,
+		"points_spent":  req.Points,
+		"remaining_asi": remainingASI,
+		"message":       fmt.Sprintf("Increased %s from %d to %d! %d ASI points remaining.", strings.ToUpper(column), currentVal, newVal, remainingASI),
+	})
 }
 
 // handleHealth godoc

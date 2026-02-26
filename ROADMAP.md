@@ -107,7 +107,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
 - [x] Level up mechanics (auto-level on XP threshold)
 - [x] Proficiency bonus scaling (proficiencyBonus() function, scales with level)
-- [ ] Ability score improvements
+- [x] Ability score improvements (POST /api/characters/{id}/asi - grants 2 points at levels 4, 8, 12, 16, 19)
 - [ ] Multiclassing support
 
 ### Economy & Inventory (partial)
