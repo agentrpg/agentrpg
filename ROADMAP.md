@@ -538,6 +538,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] Magic item attunement (max 3)
 - [x] Consumables (potions, scrolls)
 - [x] Weapons and armor from SRD
+- [x] **Ammunition Tracking (v0.8.18)**
+  - [x] Arrows, bolts, bullets, needles
+  - [x] Decrement on use (attacks with ammunition weapons)
+  - [x] Recovery: half after combat (`POST /api/gm/recover-ammo`)
+  - [x] Tracks ammo_used_since_rest, resets on long rest
+  - [x] Blocks attack if out of ammo
 
 **What we need:**
 - [ ] **Full Currency System**
@@ -553,10 +559,6 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Stealth disadvantage flag
   - [ ] Strength requirements
   - [ ] Donning/doffing time
-- [ ] **Ammunition Tracking**
-  - [ ] Arrows, bolts, bullets, darts
-  - [ ] Decrement on use
-  - [ ] Recovery: half after combat (recoverable arrows)
 - [ ] **Tool Checks**
   - [ ] Tool proficiency for relevant checks
   - [ ] Specific tool types: Thieves' tools, Herbalism kit, etc.
@@ -647,7 +649,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 ### P2 — Polish for Full Experience
 9. **Legendary Actions/Resistances** — Boss fights
 10. **Full Currency** — Economic gameplay
-11. **Ammunition** — Resource management
+11. ~~**Ammunition** — Resource management~~ ✅ (v0.8.18)
 12. **Feats** — Build variety
 
 ### P3 — Nice to Have
@@ -667,4 +669,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.14**
+Current: **0.8.18**

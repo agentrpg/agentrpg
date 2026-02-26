@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.17"
+const version = "0.8.18"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -170,6 +170,7 @@ func main() {
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/gm/gold", handleGMGold)
 	http.HandleFunc("/api/gm/give-item", handleGMGiveItem)
+	http.HandleFunc("/api/gm/recover-ammo", handleGMRecoverAmmo)
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
@@ -466,6 +467,10 @@ func initDB() {
 		-- Comma-separated list of languages the character knows
 		-- e.g., "Common, Elvish" - auto-populated from race, can add more
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS language_proficiencies TEXT DEFAULT '';
+		
+		-- Ammunition tracking (v0.8.18)
+		-- Tracks ammo used since last rest for recovery calculation
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS ammo_used_since_rest INTEGER DEFAULT 0;
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -7981,6 +7986,116 @@ func handleGMGiveItem(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGMRecoverAmmo godoc
+// @Summary Recover ammunition after combat
+// @Description GM triggers ammunition recovery for a character. Recovers half of ammo used since last rest.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,ammo_type=string} true "Recovery details (ammo_type: arrows, bolts, needles, bullets)"
+// @Success 200 {object} map[string]interface{} "Recovery result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/recover-ammo [post]
+func handleGMRecoverAmmo(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		AmmoType    string `json:"ammo_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id_required"})
+		return
+	}
+	
+	// Default ammo type
+	if req.AmmoType == "" {
+		req.AmmoType = "arrows"
+	}
+	
+	// Verify character is in GM's campaign
+	var charName string
+	var charCampaignID int
+	err = db.QueryRow(`SELECT name, lobby_id FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &charCampaignID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charCampaignID != campaignID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_your_campaign",
+			"message": "Character is not in your campaign",
+		})
+		return
+	}
+	
+	// Recover ammo
+	recovered, err := recoverAmmo(req.CharacterID, req.AmmoType)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	if recovered == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"recovered":     0,
+			"ammo_type":     req.AmmoType,
+			"character":     charName,
+			"message":       fmt.Sprintf("%s had no ammunition to recover", charName),
+		})
+		return
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"recovered":     recovered,
+		"ammo_type":     req.AmmoType,
+		"character":     charName,
+		"message":       fmt.Sprintf("%s recovered %d %s", charName, recovered, req.AmmoType),
+	})
+}
+
 // handleGMOpportunityAttack godoc
 // @Summary Trigger an opportunity attack
 // @Description GM triggers an opportunity attack when a creature leaves another's reach. Uses the attacker's reaction.
@@ -9786,6 +9901,15 @@ func resolveAction(action, description string, charID int) string {
 		weaponKey := parseWeaponFromDescription(description)
 		weapon, hasWeapon := srdWeapons[weaponKey]
 		
+		// Check ammunition for ranged weapons (v0.8.18)
+		if hasWeapon && containsProperty(weapon.Properties, "ammunition") {
+			ammoType := getAmmoTypeForWeapon(weaponKey)
+			hasAmmo, ammoErr := checkAndUseAmmo(charID, ammoType)
+			if !hasAmmo {
+				return ammoErr
+			}
+		}
+		
 		// Determine attack modifier (STR for melee, DEX for ranged/finesse)
 		attackMod := modifier(str)
 		damageMod := modifier(str)
@@ -10357,6 +10481,156 @@ func containsProperty(props []string, prop string) bool {
 		}
 	}
 	return false
+}
+
+// AMMUNITION TRACKING (v0.8.18)
+
+// getAmmoTypeForWeapon returns the ammunition type needed for a weapon, or "" if none
+func getAmmoTypeForWeapon(weaponKey string) string {
+	// Map weapon keys to their ammunition type
+	ammoMap := map[string]string{
+		"shortbow":       "arrows",
+		"longbow":        "arrows",
+		"light_crossbow": "bolts",
+		"heavy_crossbow": "bolts",
+		"hand_crossbow":  "bolts",
+		"blowgun":        "needles",
+		"sling":          "bullets",
+	}
+	return ammoMap[weaponKey]
+}
+
+// checkAndUseAmmo checks if character has ammunition and decrements it
+// Returns (success, message)
+func checkAndUseAmmo(charID int, ammoType string) (bool, string) {
+	if ammoType == "" {
+		return true, "" // No ammo needed
+	}
+	
+	// Get inventory
+	var inventoryJSON []byte
+	db.QueryRow("SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1", charID).Scan(&inventoryJSON)
+	var inventory []map[string]interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
+	
+	// Find ammo in inventory
+	ammoNames := map[string][]string{
+		"arrows":  {"arrows", "arrow", "quiver of arrows"},
+		"bolts":   {"bolts", "bolt", "crossbow bolts", "crossbow bolt"},
+		"needles": {"needles", "needle", "blowgun needles", "blowgun needle"},
+		"bullets": {"bullets", "bullet", "sling bullets", "sling bullet"},
+	}
+	
+	validNames := ammoNames[ammoType]
+	if validNames == nil {
+		validNames = []string{ammoType}
+	}
+	
+	// Find and decrement ammo
+	found := false
+	for i, item := range inventory {
+		if name, ok := item["name"].(string); ok {
+			nameLower := strings.ToLower(name)
+			for _, validName := range validNames {
+				if nameLower == validName {
+					// Check quantity
+					qty := 1
+					if q, ok := item["quantity"].(float64); ok {
+						qty = int(q)
+					}
+					if qty <= 0 {
+						continue // Empty, try next
+					}
+					
+					// Decrement
+					if qty == 1 {
+						// Remove item entirely
+						inventory = append(inventory[:i], inventory[i+1:]...)
+					} else {
+						inventory[i]["quantity"] = float64(qty - 1)
+					}
+					
+					// Update inventory
+					updatedInv, _ := json.Marshal(inventory)
+					db.Exec("UPDATE characters SET inventory = $1, ammo_used_since_rest = ammo_used_since_rest + 1 WHERE id = $2", updatedInv, charID)
+					
+					found = true
+					break
+				}
+			}
+		}
+		if found {
+			break
+		}
+	}
+	
+	if !found {
+		return false, fmt.Sprintf("Out of %s! You need ammunition to attack with this weapon.", ammoType)
+	}
+	
+	return true, ""
+}
+
+// recoverAmmo recovers half of ammunition used since last rest
+// Returns number of ammo recovered
+func recoverAmmo(charID int, ammoType string) (int, error) {
+	// Get ammo used since rest
+	var ammoUsed int
+	err := db.QueryRow("SELECT COALESCE(ammo_used_since_rest, 0) FROM characters WHERE id = $1", charID).Scan(&ammoUsed)
+	if err != nil {
+		return 0, err
+	}
+	
+	if ammoUsed == 0 {
+		return 0, nil
+	}
+	
+	// Recover half (round down)
+	recovered := ammoUsed / 2
+	if recovered == 0 && ammoUsed > 0 {
+		recovered = 1 // Always recover at least 1 if any were used
+	}
+	
+	// Get inventory and add recovered ammo
+	var inventoryJSON []byte
+	db.QueryRow("SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1", charID).Scan(&inventoryJSON)
+	var inventory []map[string]interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
+	
+	// Find existing ammo stack or create new one
+	ammoName := ammoType
+	if ammoName == "" {
+		ammoName = "arrows" // Default
+	}
+	
+	found := false
+	for i, item := range inventory {
+		if name, ok := item["name"].(string); ok {
+			if strings.ToLower(name) == ammoName {
+				qty := 0
+				if q, ok := item["quantity"].(float64); ok {
+					qty = int(q)
+				}
+				inventory[i]["quantity"] = float64(qty + recovered)
+				found = true
+				break
+			}
+		}
+	}
+	
+	if !found {
+		// Add new stack
+		inventory = append(inventory, map[string]interface{}{
+			"name":     ammoName,
+			"quantity": float64(recovered),
+		})
+	}
+	
+	// Update inventory and reset counter
+	updatedInv, _ := json.Marshal(inventory)
+	db.Exec("UPDATE characters SET inventory = $1, ammo_used_since_rest = 0 WHERE id = $2", updatedInv, charID)
+	
+	return recovered, nil
 }
 
 // Roll damage dice (e.g., "2d6", "1d8+2")
@@ -11758,7 +12032,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			action_used = false,
 			bonus_action_used = false,
 			reaction_used = false,
-			movement_remaining = 30
+			movement_remaining = 30,
+			ammo_used_since_rest = 0
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -13536,6 +13811,11 @@ var srdWeapons = map[string]SRDWeapon{
 	"greatsword": {Name: "Greatsword", Category: "martial", Type: "melee", Damage: "2d6", DamageType: "slashing", Properties: []string{"heavy", "two-handed"}, Weight: 6, Cost: "50 gp"},
 	"greataxe": {Name: "Greataxe", Category: "martial", Type: "melee", Damage: "1d12", DamageType: "slashing", Properties: []string{"heavy", "two-handed"}, Weight: 7, Cost: "30 gp"},
 	"longbow": {Name: "Longbow", Category: "martial", Type: "ranged", Damage: "1d8", DamageType: "piercing", Properties: []string{"ammunition (150/600)", "heavy", "two-handed"}, Weight: 2, Cost: "50 gp"},
+	// Additional ranged weapons with ammunition (v0.8.18)
+	"hand_crossbow": {Name: "Hand Crossbow", Category: "martial", Type: "ranged", Damage: "1d6", DamageType: "piercing", Properties: []string{"ammunition (30/120)", "light", "loading"}, Weight: 3, Cost: "75 gp"},
+	"heavy_crossbow": {Name: "Heavy Crossbow", Category: "martial", Type: "ranged", Damage: "1d10", DamageType: "piercing", Properties: []string{"ammunition (100/400)", "heavy", "loading", "two-handed"}, Weight: 18, Cost: "50 gp"},
+	"blowgun": {Name: "Blowgun", Category: "martial", Type: "ranged", Damage: "1", DamageType: "piercing", Properties: []string{"ammunition (25/100)", "loading"}, Weight: 1, Cost: "10 gp"},
+	"sling": {Name: "Sling", Category: "simple", Type: "ranged", Damage: "1d4", DamageType: "bludgeoning", Properties: []string{"ammunition (30/120)"}, Weight: 0, Cost: "1 sp"},
 }
 
 type SRDArmor struct {
