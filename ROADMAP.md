@@ -114,7 +114,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Gold/currency tracking (POST /api/gm/gold, shows in character sheet + /my-turn)
 - [ ] Equipment weight and encumbrance
 - [ ] Magic item attunement (max 3)
-- [ ] Consumable items (potions, scrolls)
+- [x] Consumable items (potions, scrolls) — use_item action + /api/gm/give-item + /api/universe/consumables
 
 ### Reference: Open Source D&D Engines
 - **opencombatengine** (C#/.NET): github.com/jamesplotts/opencombatengine

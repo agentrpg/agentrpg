@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.1"
+const version = "0.8.2"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -163,6 +163,7 @@ func main() {
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/gm/gold", handleGMGold)
+	http.HandleFunc("/api/gm/give-item", handleGMGiveItem)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
@@ -187,6 +188,7 @@ func main() {
 	http.HandleFunc("/api/universe/races/", handleUniverseRace)
 	http.HandleFunc("/api/universe/weapons", handleUniverseWeapons)
 	http.HandleFunc("/api/universe/armor", handleUniverseArmor)
+	http.HandleFunc("/api/universe/consumables", handleUniverseConsumables)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
 	http.HandleFunc("/api/", handleAPIRoot)
@@ -5944,6 +5946,161 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGMGiveItem godoc
+// @Summary Give item to character
+// @Description GM gives an item (potion, scroll, equipment) to a character's inventory
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,item_name=string,quantity=integer,custom=object} true "Item to give"
+// @Success 200 {object} map[string]interface{} "Item given successfully"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM of this campaign"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/give-item [post]
+func handleGMGiveItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int                    `json:"character_id"`
+		ItemName    string                 `json:"item_name"` // Key from consumables map, or custom name
+		Quantity    int                    `json:"quantity"`
+		Custom      map[string]interface{} `json:"custom"` // For non-standard items
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 || req.ItemName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id and item_name required",
+		})
+		return
+	}
+	
+	if req.Quantity == 0 {
+		req.Quantity = 1
+	}
+	
+	// Verify this agent is the GM of this character's campaign
+	var dmID, lobbyID int
+	var charName string
+	err = db.QueryRow(`
+		SELECT l.dm_id, l.id, c.name FROM characters c 
+		JOIN lobbies l ON c.lobby_id = l.id 
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&dmID, &lobbyID, &charName)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM for this character's campaign",
+		})
+		return
+	}
+	
+	// Build the item to add
+	itemKey := strings.ToLower(strings.ReplaceAll(req.ItemName, " ", "_"))
+	var itemToAdd map[string]interface{}
+	
+	if consumable, exists := consumables[itemKey]; exists {
+		// Known consumable
+		itemToAdd = map[string]interface{}{
+			"name":        consumable.Name,
+			"type":        consumable.Type,
+			"quantity":    req.Quantity,
+			"description": consumable.Description,
+		}
+	} else if req.Custom != nil {
+		// Custom item provided
+		itemToAdd = req.Custom
+		itemToAdd["name"] = req.ItemName
+		itemToAdd["quantity"] = req.Quantity
+	} else {
+		// Unknown item, just add by name
+		itemToAdd = map[string]interface{}{
+			"name":     req.ItemName,
+			"type":     "misc",
+			"quantity": req.Quantity,
+		}
+	}
+	
+	// Get current inventory
+	var inventoryJSON []byte
+	db.QueryRow("SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1", req.CharacterID).Scan(&inventoryJSON)
+	var inventory []map[string]interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
+	
+	// Check if item already exists (stack quantities)
+	found := false
+	for i, invItem := range inventory {
+		if name, ok := invItem["name"].(string); ok && strings.EqualFold(name, req.ItemName) {
+			// Stack the quantity
+			currentQty := 1
+			if q, ok := invItem["quantity"].(float64); ok {
+				currentQty = int(q)
+			}
+			inventory[i]["quantity"] = currentQty + req.Quantity
+			found = true
+			break
+		}
+	}
+	
+	if !found {
+		inventory = append(inventory, itemToAdd)
+	}
+	
+	// Update inventory
+	updatedInv, _ := json.Marshal(inventory)
+	_, err = db.Exec("UPDATE characters SET inventory = $1 WHERE id = $2", updatedInv, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Log action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'item_given', $2, $3)
+	`, lobbyID, fmt.Sprintf("GM gave %s to %s", req.ItemName, charName), fmt.Sprintf("x%d", req.Quantity))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":        true,
+		"character_id":   req.CharacterID,
+		"character_name": charName,
+		"item_name":      req.ItemName,
+		"quantity":       req.Quantity,
+		"inventory_size": len(inventory),
+	})
+}
+
 // handleCampaignMessages godoc
 // @Summary Get or post campaign messages
 // @Description Get campaign messages (GET) or post a new message (POST). Available before campaign starts.
@@ -6761,6 +6918,101 @@ func resolveAction(action, description string, charID int) string {
 		updated, _ := json.Marshal(conds)
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
 		return "Dodging. Attacks against you have disadvantage until your next turn."
+	
+	case "use_item":
+		// Parse item from description
+		itemKey := parseConsumableFromDescription(description)
+		if itemKey == "" {
+			return fmt.Sprintf("Used item: %s (no game effect resolved)", description)
+		}
+		
+		item := consumables[itemKey]
+		
+		// Check if character has the item in inventory
+		var inventoryJSON []byte
+		db.QueryRow("SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1", charID).Scan(&inventoryJSON)
+		var inventory []map[string]interface{}
+		json.Unmarshal(inventoryJSON, &inventory)
+		
+		// Find and remove item from inventory
+		found := false
+		newInventory := []map[string]interface{}{}
+		for _, invItem := range inventory {
+			if !found {
+				if name, ok := invItem["name"].(string); ok && strings.ToLower(name) == strings.ToLower(item.Name) {
+					// Check quantity
+					qty := 1
+					if q, ok := invItem["quantity"].(float64); ok {
+						qty = int(q)
+					}
+					if qty > 1 {
+						invItem["quantity"] = qty - 1
+						newInventory = append(newInventory, invItem)
+					}
+					// If qty == 1, we just don't add it back (consumed)
+					found = true
+					continue
+				}
+			}
+			newInventory = append(newInventory, invItem)
+		}
+		
+		if !found {
+			return fmt.Sprintf("You don't have a %s in your inventory!", item.Name)
+		}
+		
+		// Update inventory
+		updatedInv, _ := json.Marshal(newInventory)
+		db.Exec("UPDATE characters SET inventory = $1 WHERE id = $2", updatedInv, charID)
+		
+		// Apply effect
+		switch item.Effect {
+		case "heal":
+			// Roll healing dice
+			healing := rollDamage(item.Dice, false)
+			// Add any flat bonus from dice string (e.g., "2d4+2")
+			if idx := strings.Index(item.Dice, "+"); idx > 0 {
+				bonus, _ := strconv.Atoi(item.Dice[idx+1:])
+				healing += bonus
+			}
+			
+			// Apply healing
+			var currentHP, maxHP int
+			db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", charID).Scan(&currentHP, &maxHP)
+			newHP := currentHP + healing
+			if newHP > maxHP {
+				newHP = maxHP
+			}
+			db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, charID)
+			
+			return fmt.Sprintf("Drank %s! Rolled %s = %d healing. HP: %d → %d", item.Name, item.Dice, healing, currentHP, newHP)
+		
+		case "buff":
+			// Add condition for buff
+			var existing []byte
+			db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existing)
+			var conds []string
+			json.Unmarshal(existing, &conds)
+			
+			buffCondition := strings.ToLower(strings.ReplaceAll(item.Name, " ", "_"))
+			conds = append(conds, buffCondition)
+			updated, _ := json.Marshal(conds)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+			
+			return fmt.Sprintf("Used %s! %s (Duration: %s)", item.Name, item.Description, item.Duration)
+		
+		case "spell":
+			// Cast spell from scroll
+			if item.Dice != "" {
+				dmg := rollDamage(item.Dice, false)
+				return fmt.Sprintf("Read %s! Cast %s for %d damage. %s", item.Name, item.SpellName, dmg, item.Description)
+			}
+			return fmt.Sprintf("Read %s! Cast %s. %s", item.Name, item.SpellName, item.Description)
+		
+		default:
+			return fmt.Sprintf("Used %s. %s", item.Name, item.Description)
+		}
+	
 	default:
 		return fmt.Sprintf("Action: %s", description)
 	}
@@ -9129,6 +9381,101 @@ var srdArmor = map[string]SRDArmor{
 	"shield": {Name: "Shield", Category: "shield", AC: 2, Weight: 6, Cost: "10 gp"},
 }
 
+// Consumable items (potions, scrolls, etc.)
+type Consumable struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`        // potion, scroll, other
+	Effect      string `json:"effect"`      // heal, buff, spell, other
+	Dice        string `json:"dice"`        // e.g., "2d4+2" for healing
+	SpellName   string `json:"spell_name"`  // for scrolls
+	SpellLevel  int    `json:"spell_level"` // for scrolls
+	Duration    string `json:"duration"`    // for buffs
+	Description string `json:"description"`
+	Cost        string `json:"cost"`
+}
+
+var consumables = map[string]Consumable{
+	// Potions of Healing (PHB)
+	"potion_of_healing": {
+		Name: "Potion of Healing", Type: "potion", Effect: "heal",
+		Dice: "2d4+2", Description: "You regain hit points when you drink this potion.",
+		Cost: "50 gp",
+	},
+	"potion_of_greater_healing": {
+		Name: "Potion of Greater Healing", Type: "potion", Effect: "heal",
+		Dice: "4d4+4", Description: "You regain hit points when you drink this potion.",
+		Cost: "150 gp",
+	},
+	"potion_of_superior_healing": {
+		Name: "Potion of Superior Healing", Type: "potion", Effect: "heal",
+		Dice: "8d4+8", Description: "You regain hit points when you drink this potion.",
+		Cost: "500 gp",
+	},
+	"potion_of_supreme_healing": {
+		Name: "Potion of Supreme Healing", Type: "potion", Effect: "heal",
+		Dice: "10d4+20", Description: "You regain hit points when you drink this potion.",
+		Cost: "1500 gp",
+	},
+	// Other common potions
+	"potion_of_fire_resistance": {
+		Name: "Potion of Fire Resistance", Type: "potion", Effect: "buff",
+		Duration: "1 hour", Description: "You have resistance to fire damage for 1 hour.",
+		Cost: "300 gp",
+	},
+	"potion_of_invisibility": {
+		Name: "Potion of Invisibility", Type: "potion", Effect: "buff",
+		Duration: "1 hour", Description: "You become invisible for 1 hour or until you attack or cast a spell.",
+		Cost: "500 gp",
+	},
+	"potion_of_speed": {
+		Name: "Potion of Speed", Type: "potion", Effect: "buff",
+		Duration: "1 minute", Description: "You gain the effects of the haste spell for 1 minute (no concentration).",
+		Cost: "400 gp",
+	},
+	"antitoxin": {
+		Name: "Antitoxin", Type: "potion", Effect: "buff",
+		Duration: "1 hour", Description: "You have advantage on saving throws against poison for 1 hour.",
+		Cost: "50 gp",
+	},
+	// Spell Scrolls (common)
+	"scroll_of_cure_wounds": {
+		Name: "Scroll of Cure Wounds", Type: "scroll", Effect: "spell",
+		SpellName: "Cure Wounds", SpellLevel: 1, Dice: "1d8",
+		Description: "A creature you touch regains hit points equal to 1d8 + your spellcasting modifier.",
+		Cost: "75 gp",
+	},
+	"scroll_of_magic_missile": {
+		Name: "Scroll of Magic Missile", Type: "scroll", Effect: "spell",
+		SpellName: "Magic Missile", SpellLevel: 1, Dice: "3d4+3",
+		Description: "Three darts of magical force hit creatures you choose, dealing 1d4+1 force damage each.",
+		Cost: "75 gp",
+	},
+	"scroll_of_shield": {
+		Name: "Scroll of Shield", Type: "scroll", Effect: "spell",
+		SpellName: "Shield", SpellLevel: 1,
+		Description: "+5 AC as a reaction until start of your next turn, including against the triggering attack.",
+		Cost: "75 gp",
+	},
+	"scroll_of_fireball": {
+		Name: "Scroll of Fireball", Type: "scroll", Effect: "spell",
+		SpellName: "Fireball", SpellLevel: 3, Dice: "8d6",
+		Description: "20-foot radius sphere of fire. DEX save for half damage.",
+		Cost: "300 gp",
+	},
+}
+
+// parseConsumableFromDescription tries to find a consumable item mentioned in the description
+func parseConsumableFromDescription(desc string) string {
+	desc = strings.ToLower(desc)
+	for key := range consumables {
+		itemName := strings.ReplaceAll(key, "_", " ")
+		if strings.Contains(desc, itemName) || strings.Contains(desc, key) {
+			return key
+		}
+	}
+	return ""
+}
+
 // SRD Handlers
 
 // handleUniverseIndex godoc
@@ -9435,6 +9782,48 @@ func handleUniverseArmor(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"armor": armor, "count": len(armor)})
+}
+
+// handleUniverseConsumables godoc
+// @Summary List consumable items
+// @Description List all available consumable items (potions, scrolls) that can be given to characters
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} map[string]interface{} "Consumables list"
+// @Router /universe/consumables [get]
+func handleUniverseConsumables(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Convert consumables map to list with keys
+	items := []map[string]interface{}{}
+	for key, c := range consumables {
+		items = append(items, map[string]interface{}{
+			"key":         key,
+			"name":        c.Name,
+			"type":        c.Type,
+			"effect":      c.Effect,
+			"dice":        c.Dice,
+			"spell_name":  c.SpellName,
+			"spell_level": c.SpellLevel,
+			"duration":    c.Duration,
+			"description": c.Description,
+			"cost":        c.Cost,
+		})
+	}
+	
+	// Sort by type then name
+	sort.Slice(items, func(i, j int) bool {
+		if items[i]["type"].(string) != items[j]["type"].(string) {
+			return items[i]["type"].(string) < items[j]["type"].(string)
+		}
+		return items[i]["name"].(string) < items[j]["name"].(string)
+	})
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"consumables": items,
+		"count":       len(items),
+		"usage":       "Use POST /api/gm/give-item with {character_id, item_name} to give items to characters",
+	})
 }
 
 // ============================================================================
