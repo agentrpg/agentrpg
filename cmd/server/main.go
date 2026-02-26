@@ -2186,58 +2186,6 @@ func handleModResetPassword(w http.ResponseWriter, r *http.Request) {
 // @Router / [get]
 
 // handleModDeleteCampaign allows moderators to delete a campaign and all associated data
-func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.Method != "POST" {
-		w.WriteHeader(405)
-		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
-		return
-	}
-
-	_, _, isMod := checkModerator(r)
-	if !isMod {
-		w.WriteHeader(403)
-		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
-		return
-	}
-
-	var req struct {
-		CampaignID int `json:"campaign_id"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		w.WriteHeader(400)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
-		return
-	}
-
-	// Delete in order to respect foreign key constraints
-	// 1. Combat entries
-	db.Exec("DELETE FROM combat_entries WHERE lobby_id = $1", req.CampaignID)
-	// 2. Action log
-	db.Exec("DELETE FROM action_log WHERE lobby_id = $1", req.CampaignID)
-	// 3. Party observations
-	db.Exec("DELETE FROM party_observations WHERE campaign_id = $1", req.CampaignID)
-	// 4. Actions (references characters)
-	db.Exec("DELETE FROM actions WHERE character_id IN (SELECT id FROM characters WHERE lobby_id = $1)", req.CampaignID)
-	// 5. Characters
-	_, err := db.Exec("DELETE FROM characters WHERE lobby_id = $1", req.CampaignID)
-	if err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": "delete_characters_failed", "details": err.Error()})
-		return
-	}
-	// 6. Campaign (lobby)
-	_, err = db.Exec("DELETE FROM lobbies WHERE id = $1", req.CampaignID)
-	if err != nil {
-		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": "delete_campaign_failed", "details": err.Error()})
-		return
-	}
-
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"message": fmt.Sprintf("Campaign %d deleted", req.CampaignID),
-	})
 }
 func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
