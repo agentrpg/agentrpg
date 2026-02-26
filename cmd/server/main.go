@@ -11650,16 +11650,18 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 			content = fmt.Sprintf(`<h1>👹 %s</h1><p class="muted">%s %s, %s</p><div class="note"><strong>CR:</strong> %s | <strong>HP:</strong> %d | <strong>AC:</strong> %d</div><p>%s</p><p><a href="/universe/monsters">← Back to Monsters</a></p>`, name, size, monsterType, alignment, cr, hp, ac, description)
 		} else {
 			// Monster list
-			rows, _ := db.Query(`SELECT id, name, type, challenge_rating FROM monsters ORDER BY name LIMIT 100`)
+			rows, err := db.Query(`SELECT id, name, type, challenge_rating FROM monsters ORDER BY name LIMIT 100`)
 			var list strings.Builder
 			list.WriteString(`<h1>👹 Monsters</h1><p class="muted">Creatures of the 5e SRD</p><input type="text" class="search-box" placeholder="Filter monsters..." oninput="filterList(this.value)"><div id="item-list">`)
-			for rows.Next() {
-				var id int
-				var name, monsterType, cr string
-				rows.Scan(&id, &name, &monsterType, &cr)
-				list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><a href="/universe/monsters/%d">%s</a> <span class="muted">CR %s %s</span></div>`, strings.ToLower(name), id, name, cr, monsterType))
+			if err == nil && rows != nil {
+				for rows.Next() {
+					var id int
+					var name, monsterType, cr string
+					rows.Scan(&id, &name, &monsterType, &cr)
+					list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><a href="/universe/monsters/%d">%s</a> <span class="muted">CR %s %s</span></div>`, strings.ToLower(name), id, name, cr, monsterType))
+				}
+				rows.Close()
 			}
-			rows.Close()
 			list.WriteString(`</div><script>function filterList(q){document.querySelectorAll('.list-item').forEach(el=>{el.style.display=el.dataset.name.includes(q.toLowerCase())?'block':'none'})}</script>`)
 			content = list.String()
 		}
@@ -11680,73 +11682,81 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 			}
 			content = fmt.Sprintf(`<h1>✨ %s</h1><p class="muted">%s %s</p><div class="note"><strong>Casting Time:</strong> %s | <strong>Range:</strong> %s | <strong>Duration:</strong> %s</div><p>%s</p><p><a href="/universe/spells">← Back to Spells</a></p>`, name, levelStr, school, castTime, rangeStr, duration, description)
 		} else {
-			rows, _ := db.Query(`SELECT id, name, level, school FROM spells ORDER BY level, name LIMIT 100`)
+			rows, err := db.Query(`SELECT id, name, level, school FROM spells ORDER BY level, name LIMIT 100`)
 			var list strings.Builder
 			list.WriteString(`<h1>✨ Spells</h1><p class="muted">Arcane and divine magic</p><input type="text" class="search-box" placeholder="Filter spells..." oninput="filterList(this.value)"><div id="item-list">`)
-			for rows.Next() {
-				var id, level int
-				var name, school string
-				rows.Scan(&id, &name, &level, &school)
-				levelStr := "Cantrip"
-				if level > 0 {
-					levelStr = fmt.Sprintf("Lvl %d", level)
+			if err == nil && rows != nil {
+				for rows.Next() {
+					var id, level int
+					var name, school string
+					rows.Scan(&id, &name, &level, &school)
+					levelStr := "Cantrip"
+					if level > 0 {
+						levelStr = fmt.Sprintf("Lvl %d", level)
+					}
+					list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><a href="/universe/spells/%d">%s</a> <span class="muted">%s %s</span></div>`, strings.ToLower(name), id, name, levelStr, school))
 				}
-				list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><a href="/universe/spells/%d">%s</a> <span class="muted">%s %s</span></div>`, strings.ToLower(name), id, name, levelStr, school))
+				rows.Close()
 			}
-			rows.Close()
 			list.WriteString(`</div><script>function filterList(q){document.querySelectorAll('.list-item').forEach(el=>{el.style.display=el.dataset.name.includes(q.toLowerCase())?'block':'none'})}</script>`)
 			content = list.String()
 		}
 		
 	case "classes":
-		rows, _ := db.Query(`SELECT id, name, hit_die, COALESCE(description, '') FROM classes ORDER BY name`)
+		rows, err := db.Query(`SELECT id, name, hit_die, COALESCE(description, '') FROM classes ORDER BY name`)
 		var list strings.Builder
 		list.WriteString(`<h1>⚔️ Classes</h1><p class="muted">Character paths and professions</p><div class="category-grid">`)
-		for rows.Next() {
-			var id, hitDie int
-			var name, desc string
-			rows.Scan(&id, &name, &hitDie, &desc)
-			if len(desc) > 100 {
-				desc = desc[:100] + "..."
+		if err == nil && rows != nil {
+			for rows.Next() {
+				var id, hitDie int
+				var name, desc string
+				rows.Scan(&id, &name, &hitDie, &desc)
+				if len(desc) > 100 {
+					desc = desc[:100] + "..."
+				}
+				list.WriteString(fmt.Sprintf(`<div class="category-card"><h3>%s</h3><span class="count">Hit Die: d%d</span><p class="description">%s</p></div>`, name, hitDie, desc))
 			}
-			list.WriteString(fmt.Sprintf(`<div class="category-card"><h3>%s</h3><span class="count">Hit Die: d%d</span><p class="description">%s</p></div>`, name, hitDie, desc))
+			rows.Close()
 		}
-		rows.Close()
 		list.WriteString(`</div>`)
 		content = list.String()
 		
 	case "weapons":
-		rows, _ := db.Query(`SELECT name, category, damage, damage_type, COALESCE(properties, '') FROM weapons ORDER BY category, name`)
+		rows, err := db.Query(`SELECT name, category, damage, damage_type, COALESCE(properties, '') FROM weapons ORDER BY category, name`)
 		var list strings.Builder
 		list.WriteString(`<h1>🗡️ Weapons</h1><p class="muted">Instruments of war</p><input type="text" class="search-box" placeholder="Filter weapons..." oninput="filterList(this.value)"><div id="item-list">`)
-		for rows.Next() {
-			var name, category, damage, damageType, props string
-			rows.Scan(&name, &category, &damage, &damageType, &props)
-			list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><strong>%s</strong> <span class="muted">%s • %s %s</span></div>`, strings.ToLower(name), name, category, damage, damageType))
+		if err == nil && rows != nil {
+			for rows.Next() {
+				var name, category, damage, damageType, props string
+				rows.Scan(&name, &category, &damage, &damageType, &props)
+				list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><strong>%s</strong> <span class="muted">%s • %s %s</span></div>`, strings.ToLower(name), name, category, damage, damageType))
+			}
+			rows.Close()
 		}
-		rows.Close()
 		list.WriteString(`</div><script>function filterList(q){document.querySelectorAll('.list-item').forEach(el=>{el.style.display=el.dataset.name.includes(q.toLowerCase())?'block':'none'})}</script>`)
 		content = list.String()
 		
 	case "armor":
-		rows, _ := db.Query(`SELECT name, category, base_ac, COALESCE(stealth_disadvantage, false), COALESCE(str_requirement, 0) FROM armor ORDER BY category, base_ac`)
+		rows, err := db.Query(`SELECT name, category, base_ac, COALESCE(stealth_disadvantage, false), COALESCE(str_requirement, 0) FROM armor ORDER BY category, base_ac`)
 		var list strings.Builder
 		list.WriteString(`<h1>🛡️ Armor</h1><p class="muted">Protection for adventurers</p><div id="item-list">`)
-		for rows.Next() {
-			var name, category string
-			var baseAC, strReq int
-			var stealthDis bool
-			rows.Scan(&name, &category, &baseAC, &stealthDis, &strReq)
-			extras := ""
-			if stealthDis {
-				extras += " Stealth disadvantage"
+		if err == nil && rows != nil {
+			for rows.Next() {
+				var name, category string
+				var baseAC, strReq int
+				var stealthDis bool
+				rows.Scan(&name, &category, &baseAC, &stealthDis, &strReq)
+				extras := ""
+				if stealthDis {
+					extras += " Stealth disadvantage"
+				}
+				if strReq > 0 {
+					extras += fmt.Sprintf(" Str %d required", strReq)
+				}
+				list.WriteString(fmt.Sprintf(`<div class="list-item"><strong>%s</strong> <span class="muted">%s • AC %d%s</span></div>`, name, category, baseAC, extras))
 			}
-			if strReq > 0 {
-				extras += fmt.Sprintf(" Str %d required", strReq)
-			}
-			list.WriteString(fmt.Sprintf(`<div class="list-item"><strong>%s</strong> <span class="muted">%s • AC %d%s</span></div>`, name, category, baseAC, extras))
+			rows.Close()
 		}
-		rows.Close()
 		list.WriteString(`</div>`)
 		content = list.String()
 		
