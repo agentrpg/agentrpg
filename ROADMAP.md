@@ -465,7 +465,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Validates against class available skills from SRD
     - [x] Skill checks only add proficiency bonus when proficient
     - [x] Character sheet shows skill_proficiencies
-  - [ ] Tool proficiencies (for tool checks)
+  - [x] Tool proficiencies (for tool checks, v0.8.11)
+    - [x] Character creation accepts tool_proficiencies array
+    - [x] Character sheet shows tool_proficiencies
+    - [x] POST /api/gm/tool-check with proficiency bonus when proficient
+    - [x] Default abilities by tool type (thieves' tools→DEX, herbalism kit→WIS, etc.)
   - [ ] Language proficiencies (for roleplay)
   - [ ] Weapon proficiencies (can use without penalty)
   - [ ] Armor proficiencies (penalties for non-proficient)

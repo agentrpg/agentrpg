@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.10"
+const version = "0.8.11"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -163,6 +163,7 @@ func main() {
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
+	http.HandleFunc("/api/gm/tool-check", handleGMToolCheck)
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
 	http.HandleFunc("/api/gm/contested-check", handleGMContestedCheck)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
@@ -443,6 +444,11 @@ func initDB() {
 		-- Binary flag: character either has inspiration or doesn't
 		-- GM awards for good roleplay; spend for advantage on any d20 roll
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS inspiration BOOLEAN DEFAULT FALSE;
+		
+		-- Tool proficiencies (Phase 8 P1 - Proficiencies)
+		-- Comma-separated list of tool names the character is proficient in
+		-- e.g., "thieves' tools, herbalism kit, lute"
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS tool_proficiencies TEXT DEFAULT '';
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -4155,6 +4161,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			Wis               int      `json:"wis"`
 			Cha               int      `json:"cha"`
 			SkillProficiencies []string `json:"skill_proficiencies"` // e.g., ["perception", "stealth"]
+			ToolProficiencies  []string `json:"tool_proficiencies"`  // e.g., ["thieves' tools", "herbalism kit"]
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		
@@ -4247,14 +4254,24 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			skillProfsStr = strings.Join(validSkills, ", ")
 		}
 		
+		// Process tool proficiencies (no validation - tools come from backgrounds)
+		toolProfsStr := ""
+		if len(req.ToolProficiencies) > 0 {
+			normalizedTools := []string{}
+			for _, tool := range req.ToolProficiencies {
+				normalizedTools = append(normalizedTools, strings.ToLower(strings.TrimSpace(tool)))
+			}
+			toolProfsStr = strings.Join(normalizedTools, ", ")
+		}
+		
 		// Starting gold (simplified: 10gp for all classes)
 		startingGold := 10
 		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -4332,6 +4349,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var inventoryJSON []byte
 	var skillProfsRaw string
 	
+	var toolProfsRaw string
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
 			str, dex, con, intl, wis, cha,
@@ -4341,13 +4359,14 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
 			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0),
 			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0),
-			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false)
+			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false),
+			COALESCE(tool_proficiencies, '')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
-		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration)
+		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -4416,6 +4435,16 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 				skills = append(skills, strings.TrimSpace(s))
 			}
 			return skills
+		}(),
+		"tool_proficiencies": func() []string {
+			if toolProfsRaw == "" {
+				return []string{}
+			}
+			tools := []string{}
+			for _, t := range strings.Split(toolProfsRaw, ",") {
+				tools = append(tools, strings.TrimSpace(t))
+			}
+			return tools
 		}(),
 		"xp":                  xp,
 		"xp_to_next_level":    xpToNextLevel - xp,
@@ -6044,6 +6073,282 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 			"die1": roll1,
 			"die2": roll2,
 		},
+	}
+	if usedInspiration {
+		response["used_inspiration"] = true
+		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this check", charName)
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMToolCheck godoc
+// @Summary Call for a tool check
+// @Description GM calls for a tool check (e.g., thieves' tools, herbalism kit). Server rolls d20 + ability + proficiency (if proficient).
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,tool=string,ability=string,dc=int,advantage=bool,disadvantage=bool,description=string,use_inspiration=bool} true "Tool check details"
+// @Success 200 {object} map[string]interface{} "Tool check result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/tool-check [post]
+func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID    int    `json:"character_id"`
+		Tool           string `json:"tool"`            // e.g., "thieves' tools", "herbalism kit"
+		Ability        string `json:"ability"`         // e.g., "dex" - defaults based on tool if omitted
+		DC             int    `json:"dc"`              // Difficulty Class
+		Advantage      bool   `json:"advantage"`
+		Disadvantage   bool   `json:"disadvantage"`
+		Description    string `json:"description"`     // Optional context
+		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	if req.Tool == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "tool required", "example": "thieves' tools"})
+		return
+	}
+	
+	if req.DC == 0 {
+		req.DC = 15 // Default DC for tool checks
+	}
+	
+	// Get character stats
+	var charName string
+	var str, dex, con, intl, wis, cha, level int
+	var charLobbyID int
+	var toolProfsRaw string
+	var hasInspiration bool
+	err = db.QueryRow(`
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, 
+			COALESCE(tool_proficiencies, ''), COALESCE(inspiration, false)
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &hasInspiration)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify character is in this campaign
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Parse tool proficiencies
+	toolProfs := make(map[string]bool)
+	if toolProfsRaw != "" {
+		for _, tool := range strings.Split(toolProfsRaw, ",") {
+			toolProfs[strings.TrimSpace(strings.ToLower(tool))] = true
+		}
+	}
+	
+	// Normalize the requested tool name
+	toolLower := strings.TrimSpace(strings.ToLower(req.Tool))
+	
+	// Default ability by tool type
+	abilityUsed := strings.ToLower(req.Ability)
+	if abilityUsed == "" {
+		// Default abilities for common tools
+		switch {
+		case strings.Contains(toolLower, "thieves"):
+			abilityUsed = "dex"
+		case strings.Contains(toolLower, "herbalism"):
+			abilityUsed = "wis"
+		case strings.Contains(toolLower, "navigator"):
+			abilityUsed = "wis"
+		case strings.Contains(toolLower, "smith") || strings.Contains(toolLower, "mason") || strings.Contains(toolLower, "carpenter"):
+			abilityUsed = "str"
+		case strings.Contains(toolLower, "calligrapher") || strings.Contains(toolLower, "cartographer") || strings.Contains(toolLower, "painter"):
+			abilityUsed = "dex"
+		case strings.Contains(toolLower, "alchemist") || strings.Contains(toolLower, "tinker"):
+			abilityUsed = "int"
+		default:
+			// Musical instruments and gaming sets often use DEX or CHA
+			if strings.Contains(toolLower, "instrument") || strings.HasSuffix(toolLower, "set") {
+				abilityUsed = "cha"
+			} else {
+				abilityUsed = "dex" // Default fallback
+			}
+		}
+	}
+	
+	// Get ability modifier
+	var abilityMod int
+	var abilityName string
+	switch abilityUsed {
+	case "str", "strength":
+		abilityMod = modifier(str)
+		abilityName = "Strength"
+	case "dex", "dexterity":
+		abilityMod = modifier(dex)
+		abilityName = "Dexterity"
+	case "con", "constitution":
+		abilityMod = modifier(con)
+		abilityName = "Constitution"
+	case "int", "intelligence":
+		abilityMod = modifier(intl)
+		abilityName = "Intelligence"
+	case "wis", "wisdom":
+		abilityMod = modifier(wis)
+		abilityName = "Wisdom"
+	case "cha", "charisma":
+		abilityMod = modifier(cha)
+		abilityName = "Charisma"
+	default:
+		abilityMod = modifier(dex)
+		abilityName = "Dexterity"
+	}
+	
+	// Check for proficiency
+	totalMod := abilityMod
+	isProficient := toolProfs[toolLower]
+	if isProficient {
+		totalMod += proficiencyBonus(level)
+	}
+	
+	// Handle inspiration
+	usedInspiration := false
+	if req.UseInspiration {
+		if hasInspiration {
+			db.Exec(`UPDATE characters SET inspiration = false WHERE id = $1`, req.CharacterID)
+			req.Advantage = true
+			usedInspiration = true
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_inspiration",
+				"message": fmt.Sprintf("%s doesn't have inspiration to spend", charName),
+			})
+			return
+		}
+	}
+	
+	// Roll the die
+	var roll1, roll2, finalRoll int
+	rollType := "normal"
+	
+	if req.Advantage && !req.Disadvantage {
+		roll1, roll2, finalRoll = rollWithAdvantage()
+		rollType = "advantage"
+		if usedInspiration {
+			rollType = "advantage (inspiration)"
+		}
+	} else if req.Disadvantage && !req.Advantage {
+		roll1, roll2, finalRoll = rollWithDisadvantage()
+		rollType = "disadvantage"
+	} else {
+		finalRoll = rollDie(20)
+		roll1 = finalRoll
+		roll2 = 0
+	}
+	
+	total := finalRoll + totalMod
+	success := total >= req.DC
+	
+	// Build result description
+	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
+	if rollType == "advantage" || rollType == "advantage (inspiration)" {
+		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+	} else if rollType == "disadvantage" {
+		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+	}
+	
+	modStr := ""
+	if totalMod >= 0 {
+		modStr = fmt.Sprintf("+%d", totalMod)
+	} else {
+		modStr = fmt.Sprintf("%d", totalMod)
+	}
+	
+	outcomeStr := "FAILURE"
+	if success {
+		outcomeStr = "SUCCESS"
+	}
+	
+	// Natural 20/1 flavor
+	if finalRoll == 20 {
+		outcomeStr = "CRITICAL SUCCESS"
+	} else if finalRoll == 1 {
+		outcomeStr = "CRITICAL FAILURE"
+	}
+	
+	fullResult := fmt.Sprintf("%s check (%s): %s%s = %d vs DC %d → %s",
+		req.Tool, abilityName, resultStr, modStr, total, req.DC, outcomeStr)
+	
+	// Record the tool check
+	desc := fmt.Sprintf("%s: %s check (DC %d)", charName, req.Tool, req.DC)
+	if req.Description != "" {
+		desc = fmt.Sprintf("%s: %s - %s check (DC %d)", charName, req.Description, req.Tool, req.DC)
+	}
+	
+	_, _ = db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'tool_check', $3, $4)
+	`, campaignID, req.CharacterID, desc, fullResult)
+	
+	response := map[string]interface{}{
+		"success":      success,
+		"character":    charName,
+		"tool":         req.Tool,
+		"ability":      abilityName,
+		"roll":         finalRoll,
+		"roll_type":    rollType,
+		"modifier":     totalMod,
+		"proficient":   isProficient,
+		"total":        total,
+		"dc":           req.DC,
+		"outcome":      outcomeStr,
+		"result":       fullResult,
+		"rolls_detail": map[string]interface{}{
+			"die1": roll1,
+			"die2": roll2,
+		},
+	}
+	if !isProficient {
+		response["note"] = fmt.Sprintf("%s is not proficient with %s (no proficiency bonus added)", charName, req.Tool)
 	}
 	if usedInspiration {
 		response["used_inspiration"] = true
