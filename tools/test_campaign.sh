@@ -160,6 +160,18 @@ log_info "GM posting opening narration..."
 RESULT=$(api_call POST "/api/gm/narrate" '{"narration":"The party gathers at the entrance to the goblin cave. Flickering torchlight reveals crude drawings on the walls. The smell of smoke and rotting meat fills the air..."}' "$GM_AUTH")
 log_info "Opening narration posted"
 
+# Verify players can see narration
+log_info "Checking if players see GM narration..."
+MY_TURN=$(api_call GET "/api/my-turn" "" "${PLAYER_AUTHS[0]}")
+GM_SAYS=$(json_value "$MY_TURN" "gm_says")
+if [ -n "$GM_SAYS" ] && [ "$GM_SAYS" != "" ]; then
+    log_info "✓ Player sees gm_says: ${GM_SAYS:0:50}..."
+else
+    log_warn "⚠ gm_says is empty - narration may not be visible"
+fi
+RECENT=$(echo "$MY_TURN" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('recent_events', []))" 2>/dev/null)
+log_info "recent_events: $RECENT"
+
 # =====================================================
 # Phase 5: Player Actions
 # =====================================================
