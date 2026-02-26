@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.2"
+const version = "0.8.3"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -306,6 +306,7 @@ func initDB() {
 		current_turn_index INTEGER DEFAULT 0,
 		turn_order JSONB DEFAULT '[]',
 		active BOOLEAN DEFAULT TRUE,
+		turn_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 	
@@ -382,6 +383,9 @@ func initDB() {
 		-- Gold/Currency tracking (Economy & Inventory - roadmap item)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS gold INTEGER DEFAULT 0;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS inventory JSONB DEFAULT '[]';
+		
+		-- Turn timeout tracking (Timing & Cadence - roadmap item)
+		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -1987,6 +1991,9 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 					return
 				case "next":
 					handleCombatNext(w, r, campaignID)
+					return
+				case "skip":
+					handleCombatSkip(w, r, campaignID)
 					return
 				case "add":
 					handleCombatAdd(w, r, campaignID)
@@ -3750,10 +3757,11 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var combatRound, turnIndex int
 	var turnOrderJSON []byte
 	var combatActive bool
+	var myTurnStartedAt sql.NullTime
 	err = db.QueryRow(`
-		SELECT round_number, current_turn_index, turn_order, active 
+		SELECT round_number, current_turn_index, turn_order, active, COALESCE(turn_started_at, NOW())
 		FROM combat_state WHERE lobby_id = $1
-	`, lobbyID).Scan(&combatRound, &turnIndex, &turnOrderJSON, &combatActive)
+	`, lobbyID).Scan(&combatRound, &turnIndex, &turnOrderJSON, &combatActive, &myTurnStartedAt)
 	
 	if err == nil && combatActive {
 		inCombat = true
@@ -3789,6 +3797,16 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				combatInfo["your_position"] = i + 1 // 1-indexed
 				combatInfo["your_initiative"] = e.Initiative
 				break
+			}
+		}
+		
+		// Add turn timeout info if it's my turn
+		if isMyTurn && myTurnStartedAt.Valid {
+			elapsed := time.Since(myTurnStartedAt.Time)
+			elapsedMinutes := int(elapsed.Minutes())
+			combatInfo["turn_elapsed_minutes"] = elapsedMinutes
+			if elapsedMinutes >= 120 {
+				combatInfo["warning"] = "⏰ You've been on this turn for over 2 hours. The GM may skip your turn if you don't act soon."
 			}
 		}
 	}
@@ -4006,12 +4024,13 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	var combatRound, turnIndex int
 	var turnOrderJSON []byte
 	var combatActive bool
+	var turnStartedAt sql.NullTime
 	inCombat := false
 	
 	err = db.QueryRow(`
-		SELECT round_number, current_turn_index, turn_order, active 
+		SELECT round_number, current_turn_index, turn_order, active, COALESCE(turn_started_at, NOW())
 		FROM combat_state WHERE lobby_id = $1
-	`, campaignID).Scan(&combatRound, &turnIndex, &turnOrderJSON, &combatActive)
+	`, campaignID).Scan(&combatRound, &turnIndex, &turnOrderJSON, &combatActive, &turnStartedAt)
 	
 	if err == nil && combatActive {
 		inCombat = true
@@ -4280,15 +4299,42 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			ID         int    `json:"id"`
 			Name       string `json:"name"`
 			Initiative int    `json:"initiative"`
+			IsMonster  bool   `json:"is_monster"`
 		}
 		var entries []InitEntry
 		json.Unmarshal(turnOrderJSON, &entries)
 		
-		response["combat"] = map[string]interface{}{
+		combatInfo := map[string]interface{}{
 			"round":       combatRound,
 			"turn_order":  entries,
 			"current_turn_index": turnIndex,
 		}
+		
+		// Turn timeout tracking
+		if turnStartedAt.Valid {
+			elapsed := time.Since(turnStartedAt.Time)
+			elapsedMinutes := int(elapsed.Minutes())
+			combatInfo["turn_elapsed_minutes"] = elapsedMinutes
+			
+			// Nudge recommended at 2 hours (only for players, not monsters)
+			if elapsedMinutes >= 120 && elapsedMinutes < 240 {
+				combatInfo["nudge_recommended"] = true
+				combatInfo["turn_status"] = "overdue"
+				if len(entries) > turnIndex && !entries[turnIndex].IsMonster {
+					gmTasks = append(gmTasks, fmt.Sprintf("⏰ %s has been on this turn for %d hours. Consider sending a nudge (POST /api/gm/nudge)", entries[turnIndex].Name, elapsedMinutes/60))
+				}
+			}
+			// Skip recommended at 4 hours
+			if elapsedMinutes >= 240 {
+				combatInfo["skip_recommended"] = true
+				combatInfo["turn_status"] = "timeout"
+				if len(entries) > turnIndex && !entries[turnIndex].IsMonster {
+					gmTasks = append(gmTasks, fmt.Sprintf("⚠️ %s has been on this turn for %d hours. Consider skipping (POST /api/campaigns/%d/combat/skip)", entries[turnIndex].Name, elapsedMinutes/60, campaignID))
+				}
+			}
+		}
+		
+		response["combat"] = combatInfo
 	}
 	
 	// Add how_to_narrate instructions
@@ -7303,10 +7349,10 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	// Store combat state
 	turnOrderJSON, _ := json.Marshal(entries)
 	db.Exec(`
-		INSERT INTO combat_state (lobby_id, round_number, current_turn_index, turn_order, active)
-		VALUES ($1, 1, 0, $2, true)
+		INSERT INTO combat_state (lobby_id, round_number, current_turn_index, turn_order, active, turn_started_at)
+		VALUES ($1, 1, 0, $2, true, NOW())
 		ON CONFLICT (lobby_id) DO UPDATE SET
-			round_number = 1, current_turn_index = 0, turn_order = $2, active = true
+			round_number = 1, current_turn_index = 0, turn_order = $2, active = true, turn_started_at = NOW()
 	`, campaignID, turnOrderJSON)
 	
 	// Reset reactions for all characters
@@ -7431,13 +7477,102 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 		round++
 	}
 	
-	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2 WHERE lobby_id = $3", turnIndex, round, campaignID)
+	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
 	
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":      true,
 		"round":        round,
 		"current_turn": entries[turnIndex].Name,
 		"turn_index":   turnIndex,
+	})
+}
+
+// handleCombatSkip godoc
+// @Summary Skip a player's turn due to timeout (GM only)
+// @Description Skip the current player's turn and advance to the next combatant. Use when a player has been inactive for too long.
+// @Tags Combat
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Turn skipped"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Only GM can skip turns"
+// @Router /campaigns/{id}/combat/skip [post]
+func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_skip_turns"})
+		return
+	}
+	
+	var round, turnIndex int
+	var turnOrderJSON []byte
+	var active bool
+	var turnStartedAt sql.NullTime
+	err = db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active, COALESCE(turn_started_at, NOW())
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&round, &turnIndex, &turnOrderJSON, &active, &turnStartedAt)
+	
+	if err != nil || !active {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_active_combat"})
+		return
+	}
+	
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	if len(entries) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+		return
+	}
+	
+	skippedName := entries[turnIndex].Name
+	skippedID := entries[turnIndex].ID
+	
+	// Calculate how long the turn was
+	elapsedMinutes := 0
+	if turnStartedAt.Valid {
+		elapsedMinutes = int(time.Since(turnStartedAt.Time).Minutes())
+	}
+	
+	// Record the skip as an action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'turn_skipped', 'Turn skipped by GM due to timeout', $3)
+	`, campaignID, skippedID, fmt.Sprintf("Inactive for %d minutes", elapsedMinutes))
+	
+	// Advance turn
+	turnIndex++
+	if turnIndex >= len(entries) {
+		turnIndex = 0
+		round++
+	}
+	
+	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"skipped":         skippedName,
+		"inactive_minutes": elapsedMinutes,
+		"round":           round,
+		"current_turn":    entries[turnIndex].Name,
+		"turn_index":      turnIndex,
 	})
 }
 
