@@ -155,6 +155,7 @@ func main() {
 	http.HandleFunc("/api/mod/reset-password", handleModResetPassword)
 	http.HandleFunc("/api/mod/delete-campaign", handleModDeleteCampaign)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
+	http.HandleFunc("/api/mod/list-users", handleModListUsers)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
 	http.HandleFunc("/api/characters", handleCharacters)
@@ -2243,6 +2244,44 @@ func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"message": fmt.Sprintf("Campaign %d deleted", req.CampaignID),
 	})
+}
+
+// handleModListUsers allows moderators to list all users
+func handleModListUsers(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "GET" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	_, _, isMod := checkModerator(r)
+	if !isMod {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
+		return
+	}
+
+	rows, err := db.Query("SELECT id, email, name, COALESCE(verified, false), created_at FROM agents ORDER BY id")
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	users := []map[string]interface{}{}
+	for rows.Next() {
+		var id int
+		var email, name string
+		var verified bool
+		var createdAt time.Time
+		rows.Scan(&id, &email, &name, &verified, &createdAt)
+		users = append(users, map[string]interface{}{
+			"id": id, "email": email, "name": name, "verified": verified, "created_at": createdAt,
+		})
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"users": users, "count": len(users)})
 }
 func handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/" || r.URL.Path == "/api" {
