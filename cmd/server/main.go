@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.4"
+const version = "0.8.5"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -169,6 +169,9 @@ func main() {
 	http.HandleFunc("/api/gm/gold", handleGMGold)
 	http.HandleFunc("/api/gm/give-item", handleGMGiveItem)
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
+	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
+	http.HandleFunc("/api/characters/attune", handleCharacterAttune)
+	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
@@ -407,6 +410,14 @@ func initDB() {
 		
 		-- Turn timeout tracking (Timing & Cadence - roadmap item)
 		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+		
+		-- Magic item attunement (max 3 attuned items per character)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attuned_items JSONB DEFAULT '[]';
+		
+		-- Spells: ritual casting and area of effect support
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS is_ritual BOOLEAN DEFAULT FALSE;
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS aoe_shape VARCHAR(20);
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS aoe_size INTEGER;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -788,10 +799,28 @@ func seedSpellsFromAPI() {
 			}
 		}
 		
-		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) ON CONFLICT (slug) DO NOTHING`,
+		// Check for ritual tag
+		isRitual := false
+		if ritual, ok := detail["ritual"].(bool); ok {
+			isRitual = ritual
+		}
+		
+		// Check for area of effect
+		aoeShape := ""
+		aoeSize := 0
+		if aoe, ok := detail["area_of_effect"].(map[string]interface{}); ok {
+			if shape, ok := aoe["type"].(string); ok {
+				aoeShape = strings.ToLower(shape)
+			}
+			if size, ok := aoe["size"].(float64); ok {
+				aoeSize = int(size)
+			}
+		}
+		
+		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (slug) DO UPDATE SET is_ritual = $14, aoe_shape = $15, aoe_size = $16`,
 			r["index"], detail["name"], int(detail["level"].(float64)), school, detail["casting_time"], detail["range"],
-			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing)
+			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing, isRitual, aoeShape, aoeSize)
 	}
 	log.Println("Spells seeded")
 }
@@ -1071,14 +1100,15 @@ func loadSRDFromDB() {
 	}
 
 	// Load spells (for resolveAction)
-	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description FROM spells")
+	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0) FROM spells")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var slug, name, school, damageDice, damageType, save, healing, desc string
-			var level int
-			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc)
-			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc}
+			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape string
+			var level, aoeSize int
+			var isRitual bool
+			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize)
+			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize}
 		}
 		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
 	}
@@ -4615,6 +4645,42 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	// GM tasks / maintenance reminders
 	gmTasks := []string{}
 	
+	// DRIFT DETECTION: Check for drift_flag observations
+	driftAlerts := []map[string]interface{}{}
+	driftRows, _ := db.Query(`
+		SELECT o.id, c1.name as observer, c2.name as target, o.content, o.created_at
+		FROM observations o
+		JOIN characters c1 ON o.observer_id = c1.id
+		LEFT JOIN characters c2 ON o.target_id = c2.id
+		WHERE o.lobby_id = $1 AND o.observation_type = 'drift_flag'
+		AND o.created_at > NOW() - INTERVAL '7 days'
+		ORDER BY o.created_at DESC
+		LIMIT 10
+	`, campaignID)
+	if driftRows != nil {
+		defer driftRows.Close()
+		for driftRows.Next() {
+			var obsID int
+			var observer, content string
+			var target sql.NullString
+			var createdAt time.Time
+			driftRows.Scan(&obsID, &observer, &target, &content, &createdAt)
+			alert := map[string]interface{}{
+				"id":       obsID,
+				"observer": observer,
+				"content":  content,
+				"time":     createdAt.Format(time.RFC3339),
+			}
+			if target.Valid {
+				alert["about"] = target.String
+			}
+			driftAlerts = append(driftAlerts, alert)
+		}
+	}
+	if len(driftAlerts) > 0 {
+		gmTasks = append(gmTasks, fmt.Sprintf("⚠️ %d drift flag(s) detected! Review player observations for potential out-of-character or disruptive behavior.", len(driftAlerts)))
+	}
+	
 	// Check if campaign document needs updating
 	var campaignDoc map[string]interface{}
 	json.Unmarshal(campaignDocRaw, &campaignDoc)
@@ -4660,6 +4726,12 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	
 	if len(gmTasks) > 0 {
 		response["gm_tasks"] = gmTasks
+	}
+	
+	// Add drift detection alerts if any
+	if len(driftAlerts) > 0 {
+		response["drift_alerts"] = driftAlerts
+		needsAttention = true // Drift flags need GM attention
 	}
 	
 	// Add combat info if in combat
@@ -6874,6 +6946,559 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGMAoECast godoc
+// @Summary Cast an area of effect spell on multiple targets
+// @Description GM resolves an AoE spell (like Fireball) against multiple targets. Each target makes a saving throw.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{spell_slug=string,caster_id=int,target_ids=[]int,dc=int,ritual=bool} true "AoE cast details"
+// @Success 200 {object} map[string]interface{} "Results for each target"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/aoe-cast [post]
+func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_gm", "message": "You are not the GM of any active campaign"})
+		return
+	}
+	
+	var req struct {
+		SpellSlug  string `json:"spell_slug"`
+		CasterID   int    `json:"caster_id"`
+		TargetIDs  []int  `json:"target_ids"`
+		DC         int    `json:"dc"`
+		Ritual     bool   `json:"ritual"`
+		SlotLevel  int    `json:"slot_level"` // For upcasting
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.SpellSlug == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "spell_slug_required"})
+		return
+	}
+	if len(req.TargetIDs) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_ids_required"})
+		return
+	}
+	
+	// Get spell info
+	var spellName, damageDice, damageType, savingThrow, description string
+	var spellLevel int
+	var isRitual bool
+	err = db.QueryRow(`
+		SELECT name, COALESCE(damage_dice, ''), COALESCE(damage_type, ''), COALESCE(saving_throw, ''), 
+		       COALESCE(description, ''), level, COALESCE(is_ritual, false)
+		FROM spells WHERE slug = $1
+	`, req.SpellSlug).Scan(&spellName, &damageDice, &damageType, &savingThrow, &description, &spellLevel, &isRitual)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "spell_not_found", "slug": req.SpellSlug})
+		return
+	}
+	
+	// Check ritual casting
+	usedSlot := true
+	if req.Ritual {
+		if !isRitual {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "spell_cannot_be_ritual",
+				"message": fmt.Sprintf("%s cannot be cast as a ritual", spellName),
+			})
+			return
+		}
+		usedSlot = false // Ritual casting doesn't use a spell slot
+	}
+	
+	// If caster provided, handle spell slot usage
+	var casterName string
+	if req.CasterID > 0 && usedSlot && spellLevel > 0 {
+		var class string
+		var level int
+		db.QueryRow(`SELECT name, class, level FROM characters WHERE id = $1`, req.CasterID).Scan(&casterName, &class, &level)
+		
+		// Use spell slot if not ritual
+		slots := getSpellSlots(class, level)
+		slotLevel := spellLevel
+		if req.SlotLevel > spellLevel {
+			slotLevel = req.SlotLevel // Upcasting
+		}
+		
+		if totalSlots, ok := slots[slotLevel]; ok && totalSlots > 0 {
+			var usedJSON []byte
+			db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", req.CasterID).Scan(&usedJSON)
+			var used map[string]int
+			json.Unmarshal(usedJSON, &used)
+			
+			usedKey := fmt.Sprintf("%d", slotLevel)
+			usedSlots := used[usedKey]
+			if usedSlots >= totalSlots {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": "no_spell_slots",
+					"message": fmt.Sprintf("No level %d spell slots remaining", slotLevel),
+				})
+				return
+			}
+			
+			used[usedKey] = usedSlots + 1
+			updatedJSON, _ := json.Marshal(used)
+			db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, req.CasterID)
+		}
+	}
+	
+	// Calculate DC if not provided
+	dc := req.DC
+	if dc == 0 {
+		dc = 15 // Default DC
+		if req.CasterID > 0 {
+			var intl, wis, cha, level int
+			var class string
+			db.QueryRow(`SELECT intl, wis, cha, level, class FROM characters WHERE id = $1`, req.CasterID).Scan(&intl, &wis, &cha, &level, &class)
+			classKey := strings.ToLower(class)
+			spellMod := 0
+			if c, ok := srdClasses[classKey]; ok {
+				switch c.Spellcasting {
+				case "INT":
+					spellMod = modifier(intl)
+				case "WIS":
+					spellMod = modifier(wis)
+				case "CHA":
+					spellMod = modifier(cha)
+				}
+			}
+			dc = spellSaveDC(level, spellMod)
+		}
+	}
+	
+	// Roll base damage once (same for all targets)
+	baseDamage := 0
+	if damageDice != "" {
+		baseDamage = rollDamage(damageDice, false)
+	}
+	
+	// Process each target
+	results := []map[string]interface{}{}
+	totalDamageDealt := 0
+	
+	for _, targetID := range req.TargetIDs {
+		var targetName string
+		var targetHP, targetMaxHP int
+		var targetLobbyID int
+		
+		// Check if target is a character or a monster (negative IDs are combat-added monsters)
+		if targetID > 0 {
+			err = db.QueryRow(`SELECT name, hp, max_hp, lobby_id FROM characters WHERE id = $1`, targetID).Scan(
+				&targetName, &targetHP, &targetMaxHP, &targetLobbyID)
+			if err != nil {
+				results = append(results, map[string]interface{}{
+					"target_id": targetID,
+					"error": "target_not_found",
+				})
+				continue
+			}
+			if targetLobbyID != campaignID {
+				results = append(results, map[string]interface{}{
+					"target_id": targetID,
+					"error": "target_not_in_campaign",
+				})
+				continue
+			}
+		} else {
+			// Monster in combat - get from turn order
+			targetName = fmt.Sprintf("Monster %d", -targetID)
+		}
+		
+		// Get target's save modifier
+		saveMod := 0
+		if targetID > 0 && savingThrow != "" {
+			var str, dex, con, intl, wis, cha int
+			db.QueryRow(`SELECT str, dex, con, intl, wis, cha FROM characters WHERE id = $1`, targetID).Scan(&str, &dex, &con, &intl, &wis, &cha)
+			switch strings.ToUpper(savingThrow) {
+			case "STR":
+				saveMod = modifier(str)
+			case "DEX":
+				saveMod = modifier(dex)
+			case "CON":
+				saveMod = modifier(con)
+			case "INT":
+				saveMod = modifier(intl)
+			case "WIS":
+				saveMod = modifier(wis)
+			case "CHA":
+				saveMod = modifier(cha)
+			}
+		}
+		
+		// Roll saving throw
+		saveRoll := rollDie(20)
+		saveTotal := saveRoll + saveMod
+		saved := saveTotal >= dc
+		
+		// Calculate damage (half on save for most AoE spells)
+		damage := baseDamage
+		if saved {
+			damage = baseDamage / 2
+		}
+		
+		result := map[string]interface{}{
+			"target_id":   targetID,
+			"target_name": targetName,
+			"save_roll":   saveRoll,
+			"save_mod":    saveMod,
+			"save_total":  saveTotal,
+			"dc":          dc,
+			"saved":       saved,
+			"damage":      damage,
+		}
+		
+		// Apply damage to characters
+		if targetID > 0 && damage > 0 {
+			newHP := targetHP - damage
+			if newHP < 0 {
+				newHP = 0
+			}
+			db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, targetID)
+			result["hp_before"] = targetHP
+			result["hp_after"] = newHP
+			totalDamageDealt += damage
+		}
+		
+		results = append(results, result)
+	}
+	
+	// Log the AoE cast
+	targetNames := []string{}
+	for _, r := range results {
+		if name, ok := r["target_name"].(string); ok {
+			targetNames = append(targetNames, name)
+		}
+	}
+	
+	castType := "cast"
+	if req.Ritual {
+		castType = "ritual cast"
+	}
+	
+	actionDesc := fmt.Sprintf("%s %s (AoE) targeting %s", castType, spellName, strings.Join(targetNames, ", "))
+	resultStr := fmt.Sprintf("DC %d %s save. Base damage: %d. Targets: %d", dc, savingThrow, baseDamage, len(results))
+	
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'aoe_cast', $3, $4)`,
+		campaignID, req.CasterID, actionDesc, resultStr)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"spell":        spellName,
+		"cast_type":    castType,
+		"used_slot":    usedSlot,
+		"base_damage":  baseDamage,
+		"damage_type":  damageType,
+		"save_type":    savingThrow,
+		"dc":           dc,
+		"targets":      results,
+		"total_damage": totalDamageDealt,
+	})
+}
+
+// handleCharacterAttune godoc
+// @Summary Attune or unattune magic items
+// @Description Manage magic item attunement for a character. Max 3 attuned items per 5e rules.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,action=string,item_name=string} true "Attunement action (attune/unattune)"
+// @Success 200 {object} map[string]interface{} "Attunement result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request or max attunement reached"
+// @Router /characters/attune [post]
+func handleCharacterAttune(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Action      string `json:"action"` // "attune" or "unattune"
+		ItemName    string `json:"item_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 || req.ItemName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id and item_name required"})
+		return
+	}
+	
+	if req.Action == "" {
+		req.Action = "attune"
+	}
+	
+	// Verify ownership
+	var charAgentID int
+	var charName string
+	err = db.QueryRow(`SELECT agent_id, name FROM characters WHERE id = $1`, req.CharacterID).Scan(&charAgentID, &charName)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	if charAgentID != agentID {
+		// Check if requester is GM
+		var lobbyID, dmID int
+		db.QueryRow(`SELECT lobby_id FROM characters WHERE id = $1`, req.CharacterID).Scan(&lobbyID)
+		db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+		if dmID != agentID {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+			return
+		}
+	}
+	
+	// Get current attuned items
+	var attunedJSON []byte
+	db.QueryRow(`SELECT COALESCE(attuned_items, '[]') FROM characters WHERE id = $1`, req.CharacterID).Scan(&attunedJSON)
+	var attunedItems []string
+	json.Unmarshal(attunedJSON, &attunedItems)
+	
+	maxAttunement := 3
+	
+	if req.Action == "attune" {
+		// Check if already attuned
+		for _, item := range attunedItems {
+			if strings.EqualFold(item, req.ItemName) {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": "already_attuned",
+					"message": fmt.Sprintf("%s is already attuned to %s", charName, req.ItemName),
+				})
+				return
+			}
+		}
+		
+		// Check max attunement
+		if len(attunedItems) >= maxAttunement {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "max_attunement_reached",
+				"message": fmt.Sprintf("%s already has %d items attuned (max %d). Unattune an item first.", charName, len(attunedItems), maxAttunement),
+				"attuned_items": attunedItems,
+			})
+			return
+		}
+		
+		// Attune the item
+		attunedItems = append(attunedItems, req.ItemName)
+		updatedJSON, _ := json.Marshal(attunedItems)
+		db.Exec(`UPDATE characters SET attuned_items = $1 WHERE id = $2`, updatedJSON, req.CharacterID)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"action":  "attuned",
+			"character": charName,
+			"item":    req.ItemName,
+			"attuned_items": attunedItems,
+			"slots_remaining": maxAttunement - len(attunedItems),
+		})
+		
+	} else if req.Action == "unattune" {
+		// Find and remove the item
+		found := false
+		newAttuned := []string{}
+		for _, item := range attunedItems {
+			if strings.EqualFold(item, req.ItemName) {
+				found = true
+			} else {
+				newAttuned = append(newAttuned, item)
+			}
+		}
+		
+		if !found {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "not_attuned",
+				"message": fmt.Sprintf("%s is not attuned to %s", charName, req.ItemName),
+				"attuned_items": attunedItems,
+			})
+			return
+		}
+		
+		updatedJSON, _ := json.Marshal(newAttuned)
+		db.Exec(`UPDATE characters SET attuned_items = $1 WHERE id = $2`, updatedJSON, req.CharacterID)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"action":  "unattuned",
+			"character": charName,
+			"item":    req.ItemName,
+			"attuned_items": newAttuned,
+			"slots_remaining": maxAttunement - len(newAttuned),
+		})
+		
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_action", "valid_actions": []string{"attune", "unattune"}})
+	}
+}
+
+// handleCharacterEncumbrance godoc
+// @Summary Calculate character encumbrance
+// @Description Calculate equipment weight and encumbrance status based on STR score.
+// @Tags Characters
+// @Produce json
+// @Security BasicAuth
+// @Param character_id query int true "Character ID"
+// @Success 200 {object} map[string]interface{} "Encumbrance calculation"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/encumbrance [get]
+func handleCharacterEncumbrance(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	_, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	characterID, _ := strconv.Atoi(r.URL.Query().Get("character_id"))
+	if characterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Get character's STR and inventory
+	var charName string
+	var str int
+	var inventoryJSON []byte
+	err = db.QueryRow(`SELECT name, str, COALESCE(inventory, '[]') FROM characters WHERE id = $1`, characterID).Scan(&charName, &str, &inventoryJSON)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	var inventory []map[string]interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
+	
+	// Calculate total weight from inventory
+	totalWeight := 0.0
+	itemWeights := []map[string]interface{}{}
+	
+	for _, item := range inventory {
+		itemName, _ := item["name"].(string)
+		quantity := 1
+		if q, ok := item["quantity"].(float64); ok {
+			quantity = int(q)
+		}
+		
+		// Check for weight in item
+		weight := 0.0
+		if w, ok := item["weight"].(float64); ok {
+			weight = w
+		} else {
+			// Try to look up weight from SRD
+			itemSlug := strings.ToLower(strings.ReplaceAll(itemName, " ", "-"))
+			
+			// Check weapons
+			var dbWeight float64
+			err := db.QueryRow(`SELECT COALESCE(weight, 0) FROM weapons WHERE slug = $1`, itemSlug).Scan(&dbWeight)
+			if err == nil && dbWeight > 0 {
+				weight = dbWeight
+			} else {
+				// Check armor
+				err = db.QueryRow(`SELECT COALESCE(weight, 0) FROM armor WHERE slug = $1`, itemSlug).Scan(&dbWeight)
+				if err == nil && dbWeight > 0 {
+					weight = dbWeight
+				}
+			}
+		}
+		
+		itemTotalWeight := weight * float64(quantity)
+		totalWeight += itemTotalWeight
+		
+		if weight > 0 {
+			itemWeights = append(itemWeights, map[string]interface{}{
+				"name":     itemName,
+				"quantity": quantity,
+				"weight":   weight,
+				"total":    itemTotalWeight,
+			})
+		}
+	}
+	
+	// Calculate carrying capacity (5e rules: STR × 15)
+	carryingCapacity := float64(str * 15)
+	
+	// Calculate encumbrance thresholds (variant rule)
+	// Encumbered: > STR × 5 (speed reduced by 10)
+	// Heavily Encumbered: > STR × 10 (speed reduced by 20, disadvantage on checks)
+	encumberedThreshold := float64(str * 5)
+	heavilyEncumberedThreshold := float64(str * 10)
+	
+	encumbranceStatus := "normal"
+	speedPenalty := 0
+	disadvantage := false
+	
+	if totalWeight > carryingCapacity {
+		encumbranceStatus = "over_capacity"
+		speedPenalty = -20
+		disadvantage = true
+	} else if totalWeight > heavilyEncumberedThreshold {
+		encumbranceStatus = "heavily_encumbered"
+		speedPenalty = -20
+		disadvantage = true
+	} else if totalWeight > encumberedThreshold {
+		encumbranceStatus = "encumbered"
+		speedPenalty = -10
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"character":       charName,
+		"strength":        str,
+		"total_weight":    totalWeight,
+		"carrying_capacity": carryingCapacity,
+		"encumbered_at":   encumberedThreshold,
+		"heavily_encumbered_at": heavilyEncumberedThreshold,
+		"status":          encumbranceStatus,
+		"speed_penalty":   speedPenalty,
+		"disadvantage_on_checks": disadvantage,
+		"item_weights":    itemWeights,
+		"rules_note":      "Variant encumbrance: >STR×5 = encumbered (-10 speed), >STR×10 = heavily encumbered (-20 speed, disadvantage on ability checks)",
+	})
+}
+
 // handleCampaignMessages godoc
 // @Summary Get or post campaign messages
 // @Description Get campaign messages (GET) or post a new message (POST). Available before campaign starts.
@@ -7546,6 +8171,10 @@ func resolveAction(action, description string, charID int) string {
 		spellKey := parseSpellFromDescription(description)
 		spell, hasSpell := srdSpellsMemory[spellKey]
 		
+		// Check for ritual casting keyword
+		descLower := strings.ToLower(description)
+		isRitualCast := strings.Contains(descLower, "ritual") || strings.Contains(descLower, "as a ritual")
+		
 		// Get spellcasting ability modifier
 		classKey := strings.ToLower(class)
 		spellMod := 0
@@ -7564,7 +8193,19 @@ func resolveAction(action, description string, charID int) string {
 		saveDC := spellSaveDC(level, spellMod)
 		
 		if hasSpell {
-			// Check and use spell slot
+			// Check if ritual casting is valid
+			if isRitualCast {
+				// Check if spell has ritual tag
+				var canRitual bool
+				db.QueryRow("SELECT COALESCE(is_ritual, false) FROM spells WHERE slug = $1", spellKey).Scan(&canRitual)
+				if !canRitual {
+					return fmt.Sprintf("Cannot cast %s as a ritual - spell does not have the ritual tag!", spell.Name)
+				}
+				// Ritual casting - no spell slot used, but takes 10 minutes longer
+				return fmt.Sprintf("Ritual casting %s (takes 10 extra minutes, no spell slot used). (DC %d) %s", spell.Name, saveDC, spell.Description)
+			}
+			
+			// Check and use spell slot (non-ritual)
 			slotLevel := spell.Level
 			if slotLevel > 0 {
 				slots := getSpellSlots(class, level)
@@ -10299,6 +10940,9 @@ type SRDSpell struct {
 	DamageType  string `json:"damage_type,omitempty"`
 	SavingThrow string `json:"saving_throw,omitempty"`
 	Healing     string `json:"healing,omitempty"`
+	IsRitual    bool   `json:"is_ritual,omitempty"`
+	AoEShape    string `json:"aoe_shape,omitempty"`
+	AoESize     int    `json:"aoe_size,omitempty"`
 }
 
 // srdSpells lives in Postgres - queried via handleUniverseSpell(s), cached in srdSpellsMemory for resolveAction
@@ -10636,9 +11280,12 @@ func handleUniverseSpell(w http.ResponseWriter, r *http.Request) {
 		DamageType  string `json:"damage_type,omitempty"`
 		SavingThrow string `json:"saving_throw,omitempty"`
 		Healing     string `json:"healing,omitempty"`
+		IsRitual    bool   `json:"is_ritual"`
+		AoEShape    string `json:"aoe_shape,omitempty"`
+		AoESize     int    `json:"aoe_size,omitempty"`
 	}
-	err := db.QueryRow("SELECT name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing FROM spells WHERE slug = $1", id).Scan(
-		&s.Name, &s.Level, &s.School, &s.CastingTime, &s.Range, &s.Components, &s.Duration, &s.Description, &s.DamageDice, &s.DamageType, &s.SavingThrow, &s.Healing)
+	err := db.QueryRow("SELECT name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0) FROM spells WHERE slug = $1", id).Scan(
+		&s.Name, &s.Level, &s.School, &s.CastingTime, &s.Range, &s.Components, &s.Duration, &s.Description, &s.DamageDice, &s.DamageType, &s.SavingThrow, &s.Healing, &s.IsRitual, &s.AoEShape, &s.AoESize)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": "spell_not_found"})
 		return

@@ -99,8 +99,8 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Spell slots per class/level
 - [x] Spell slot tracking and recovery
 - [x] Spell save DCs
-- [ ] Area of effect targeting
-- [ ] Ritual casting
+- [x] Area of effect targeting (POST /api/gm/aoe-cast for multi-target spells, v0.8.5)
+- [x] Ritual casting (spells with ritual tag can be cast without spell slots, v0.8.5)
 - [x] Concentration management
 
 ### Character Advancement (partial)
@@ -112,8 +112,8 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 
 ### Economy & Inventory (partial)
 - [x] Gold/currency tracking (POST /api/gm/gold, shows in character sheet + /my-turn)
-- [ ] Equipment weight and encumbrance
-- [ ] Magic item attunement (max 3)
+- [x] Equipment weight and encumbrance (GET /api/characters/encumbrance, v0.8.5)
+- [x] Magic item attunement (max 3) (POST /api/characters/attune, v0.8.5)
 - [x] Consumable items (potions, scrolls) — use_item action + /api/gm/give-item + /api/universe/consumables
 
 ### Reference: Open Source D&D Engines
@@ -203,7 +203,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ### Remaining
 - [x] GET /characters/{id}/observations — observations about a character
-- [ ] Drift detection alerts
+- [x] Drift detection alerts (drift_flag observations appear in /api/gm/status, v0.8.5)
 
 ---
 
