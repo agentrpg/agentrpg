@@ -668,27 +668,10 @@ func seedCampaignTemplates() {
 	log.Println("Campaign templates seeded")
 }
 
-// Check if SRD tables need seeding
+// Seed all SRD data on startup (uses ON CONFLICT DO UPDATE to preserve IDs)
 func checkAndSeedSRD() {
-	var monsterCount, weaponCount int
-	db.QueryRow("SELECT COUNT(*) FROM monsters").Scan(&monsterCount)
-	db.QueryRow("SELECT COUNT(*) FROM weapons WHERE source = 'srd'").Scan(&weaponCount)
-	
-	if monsterCount == 0 {
-		log.Println("SRD tables empty - seeding from 5e API...")
-		seedSRDFromAPI()
-	} else if weaponCount < 30 {
-		// Weapons table doesn't have proper SRD data - reseed equipment
-		log.Println("Weapons table needs reseeding - fetching from 5e API...")
-		// Clean up any incorrect data first
-		db.Exec("DELETE FROM weapons WHERE source != 'srd' OR source IS NULL")
-		db.Exec("DELETE FROM armor WHERE source != 'srd' OR source IS NULL")
-		seedEquipmentFromAPI()
-	}
-	
-	// Always refresh races (uses ON CONFLICT DO UPDATE)
-	log.Println("Refreshing races from 5e API...")
-	seedRacesFromAPI()
+	log.Println("Refreshing SRD data from 5e API (upsert mode)...")
+	seedSRDFromAPI()
 }
 
 // Seed SRD data from 5e API (called automatically if tables empty)
@@ -759,7 +742,12 @@ func seedMonstersFromAPI() {
 		
 		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-			ON CONFLICT (slug) DO NOTHING`,
+			ON CONFLICT (slug) DO UPDATE SET
+				name = EXCLUDED.name, size = EXCLUDED.size, type = EXCLUDED.type,
+				ac = EXCLUDED.ac, hp = EXCLUDED.hp, hit_dice = EXCLUDED.hit_dice,
+				speed = EXCLUDED.speed, str = EXCLUDED.str, dex = EXCLUDED.dex,
+				con = EXCLUDED.con, intl = EXCLUDED.intl, wis = EXCLUDED.wis,
+				cha = EXCLUDED.cha, cr = EXCLUDED.cr, xp = EXCLUDED.xp, actions = EXCLUDED.actions`,
 			r["index"], detail["name"], detail["size"], detail["type"], ac, int(detail["hit_points"].(float64)),
 			detail["hit_dice"], speed, int(detail["strength"].(float64)), int(detail["dexterity"].(float64)),
 			int(detail["constitution"].(float64)), int(detail["intelligence"].(float64)), int(detail["wisdom"].(float64)),
@@ -842,7 +830,15 @@ func seedSpellsFromAPI() {
 		}
 		
 		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (slug) DO UPDATE SET is_ritual = $14, aoe_shape = $15, aoe_size = $16`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			ON CONFLICT (slug) DO UPDATE SET
+				name = EXCLUDED.name, level = EXCLUDED.level, school = EXCLUDED.school,
+				casting_time = EXCLUDED.casting_time, range = EXCLUDED.range,
+				components = EXCLUDED.components, duration = EXCLUDED.duration,
+				description = EXCLUDED.description, damage_dice = EXCLUDED.damage_dice,
+				damage_type = EXCLUDED.damage_type, saving_throw = EXCLUDED.saving_throw,
+				healing = EXCLUDED.healing, is_ritual = EXCLUDED.is_ritual,
+				aoe_shape = EXCLUDED.aoe_shape, aoe_size = EXCLUDED.aoe_size`,
 			r["index"], detail["name"], int(detail["level"].(float64)), school, detail["casting_time"], detail["range"],
 			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing, isRitual, aoeShape, aoeSize)
 	}
@@ -875,7 +871,12 @@ func seedClassesFromAPI() {
 		}
 		
 		db.Exec(`INSERT INTO classes (slug, name, hit_die, primary_ability, saving_throws, spellcasting_ability)
-			VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (slug) DO NOTHING`,
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (slug) DO UPDATE SET
+				name = EXCLUDED.name, hit_die = EXCLUDED.hit_die,
+				primary_ability = EXCLUDED.primary_ability,
+				saving_throws = EXCLUDED.saving_throws,
+				spellcasting_ability = EXCLUDED.spellcasting_ability`,
 			r["index"], detail["name"], int(detail["hit_die"].(float64)), "", strings.Join(saves, ", "), spellcasting)
 	}
 	log.Println("Classes seeded")
@@ -1001,7 +1002,11 @@ func seedEquipmentFromAPI() {
 		}
 		
 		_, err = db.Exec(`INSERT INTO weapons (slug, name, type, damage, damage_type, weight, properties, source)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, 'srd') ON CONFLICT (slug) DO NOTHING`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, 'srd')
+			ON CONFLICT (slug) DO UPDATE SET
+				name = EXCLUDED.name, type = EXCLUDED.type, damage = EXCLUDED.damage,
+				damage_type = EXCLUDED.damage_type, weight = EXCLUDED.weight,
+				properties = EXCLUDED.properties, source = EXCLUDED.source`,
 			r["index"], detail["name"], weaponType, damageDice, damageType, weight, strings.Join(props, ", "))
 		if err != nil {
 			log.Printf("Failed to insert weapon %s: %v", r["index"], err)
@@ -1074,7 +1079,12 @@ func seedEquipmentFromAPI() {
 		}
 		
 		_, err = db.Exec(`INSERT INTO armor (slug, name, type, ac, ac_bonus, str_req, stealth_disadvantage, weight, source)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'srd') ON CONFLICT (slug) DO NOTHING`,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'srd')
+			ON CONFLICT (slug) DO UPDATE SET
+				name = EXCLUDED.name, type = EXCLUDED.type, ac = EXCLUDED.ac,
+				ac_bonus = EXCLUDED.ac_bonus, str_req = EXCLUDED.str_req,
+				stealth_disadvantage = EXCLUDED.stealth_disadvantage,
+				weight = EXCLUDED.weight, source = EXCLUDED.source`,
 			r["index"], detail["name"], armorType, ac, acBonus, strReq, stealth, weight)
 		if err != nil {
 			log.Printf("Failed to insert armor %s: %v", r["index"], err)
