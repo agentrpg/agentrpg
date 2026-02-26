@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.13"
+const version = "0.8.14"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -5097,7 +5097,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		},
 		"your_options": map[string]interface{}{
 			"actions":       actions,
-			"bonus_actions": []map[string]interface{}{},
+			"bonus_actions": buildBonusActions(classKey, actionUsed, bonusActionUsed),
 			"movement":      fmt.Sprintf("You have %dft of movement remaining.", movementRemaining),
 			"reaction":      reactionStatus,
 			"action_economy": map[string]interface{}{
@@ -5153,6 +5153,65 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// buildBonusActions returns available bonus actions based on class and current state
+func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool) []map[string]interface{} {
+	bonusActions := []map[string]interface{}{}
+	
+	if bonusActionUsed {
+		return bonusActions // Already used bonus action
+	}
+	
+	// Two-Weapon Fighting: available after using Attack action
+	if actionUsed {
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "offhand_attack",
+			"description": "Two-Weapon Fighting: Attack with a light melee weapon in your other hand. Light weapons: dagger, handaxe, shortsword, scimitar, sickle, light hammer. No ability modifier to damage.",
+			"requires":    "Must have used Attack action first. Weapon must have 'light' property.",
+		})
+	} else {
+		// Show it as an option but explain it needs Attack first
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "offhand_attack",
+			"description": "Two-Weapon Fighting: Attack with a light melee weapon. Available after using your Attack action.",
+			"available":   false,
+		})
+	}
+	
+	// Class-specific bonus actions
+	switch classKey {
+	case "rogue":
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "cunning_action",
+			"description": "Dash, Disengage, or Hide as a bonus action.",
+		})
+	case "barbarian":
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "rage",
+			"description": "Enter a rage (if not already raging). Gain resistance to bludgeoning, piercing, and slashing damage, and bonus damage on melee attacks.",
+		})
+	case "fighter":
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "second_wind",
+			"description": "Regain 1d10 + fighter level HP. Once per short rest.",
+		})
+	case "monk":
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "flurry_of_blows",
+			"description": "Spend 1 ki point to make two unarmed strikes.",
+		})
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "patient_defense",
+			"description": "Spend 1 ki point to take the Dodge action.",
+		})
+		bonusActions = append(bonusActions, map[string]interface{}{
+			"name":        "step_of_the_wind",
+			"description": "Spend 1 ki point to take the Dash or Disengage action, and your jump distance is doubled.",
+		})
+	}
+	
+	return bonusActions
 }
 
 // getMovementSpeed returns base movement speed for a race
@@ -10039,6 +10098,105 @@ func resolveAction(action, description string, charID int) string {
 		default:
 			return fmt.Sprintf("Used %s. %s", item.Name, item.Description)
 		}
+	
+	case "offhand_attack":
+		// Two-Weapon Fighting: when you take the Attack action with a light melee weapon,
+		// you can use a bonus action to attack with a different light melee weapon.
+		// You don't add your ability modifier to the damage (unless negative).
+		
+		// Check that the player already used their action this turn (must have attacked first)
+		var actionUsed bool
+		db.QueryRow("SELECT COALESCE(action_used, false) FROM characters WHERE id = $1", charID).Scan(&actionUsed)
+		if !actionUsed {
+			return "Two-Weapon Fighting requires taking the Attack action first! Use 'attack' action with a light weapon, then 'offhand_attack' as a bonus action."
+		}
+		
+		// Parse weapon from description
+		weaponKey := parseWeaponFromDescription(description)
+		weapon, hasWeapon := srdWeapons[weaponKey]
+		
+		if !hasWeapon {
+			return "Offhand attack requires specifying a weapon (e.g., 'offhand_attack with dagger'). Light weapons: dagger, handaxe, shortsword, scimitar, sickle, light hammer."
+		}
+		
+		// Validate weapon is light
+		isLight := containsProperty(weapon.Properties, "light")
+		if !isLight {
+			return fmt.Sprintf("Two-Weapon Fighting requires a light weapon! %s is not light. Light weapons: dagger, handaxe, shortsword, scimitar, sickle, light hammer.", weapon.Name)
+		}
+		
+		// Validate weapon is melee (not ranged)
+		if weapon.Type != "melee" {
+			return fmt.Sprintf("Two-Weapon Fighting requires melee weapons! %s is a ranged weapon.", weapon.Name)
+		}
+		
+		// Determine attack modifier (DEX for finesse, STR otherwise)
+		attackMod := modifier(str)
+		if containsProperty(weapon.Properties, "finesse") {
+			attackMod = modifier(dex)
+		}
+		
+		// Add proficiency bonus only if proficient
+		isProficient := isWeaponProficient(weaponProfsStr, weaponKey)
+		if isProficient {
+			attackMod += proficiencyBonus(level)
+		}
+		
+		// Get condition-based advantage/disadvantage
+		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{})
+		
+		// Check for explicit advantage/disadvantage in description
+		if requestedAdvantage {
+			hasAdvantage = true
+		}
+		if requestedDisadvantage {
+			hasDisadvantage = true
+		}
+		
+		// Roll attack
+		var attackRoll, roll1, roll2 int
+		rollType := "normal"
+		if hasAdvantage && !hasDisadvantage {
+			attackRoll, roll1, roll2 = rollWithAdvantage()
+			rollType = "advantage"
+		} else if hasDisadvantage && !hasAdvantage {
+			attackRoll, roll1, roll2 = rollWithDisadvantage()
+			rollType = "disadvantage"
+		} else {
+			attackRoll = rollDie(20)
+			roll1, roll2 = attackRoll, 0
+		}
+		
+		totalAttack := attackRoll + attackMod
+		
+		rollInfo := ""
+		if rollType != "normal" {
+			rollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", rollType, roll1, roll2, attackRoll)
+		}
+		
+		profInfo := ""
+		if !isProficient {
+			profInfo = " (not proficient)"
+		}
+		
+		// Critical hit
+		if attackRoll == 20 {
+			// Double damage dice, but still no ability modifier for TWF
+			dmg := rollDamage(weapon.Damage, true) // crit = double dice
+			return fmt.Sprintf("Offhand attack with %s%s: %d (nat 20 CRITICAL!)%s Damage: %d (TWF - no ability modifier)", 
+				weapon.Name, profInfo, totalAttack, rollInfo, dmg)
+		}
+		
+		// Critical miss
+		if attackRoll == 1 {
+			return fmt.Sprintf("Offhand attack with %s%s: %d (nat 1 - Critical miss!)%s", 
+				weapon.Name, profInfo, totalAttack, rollInfo)
+		}
+		
+		// Normal hit - NO ability modifier to damage per TWF rules
+		dmg := rollDamage(weapon.Damage, false)
+		return fmt.Sprintf("Offhand attack with %s%s: %d to hit%s. Damage: %d (TWF - no ability modifier)", 
+			weapon.Name, profInfo, totalAttack, rollInfo, dmg)
 	
 	default:
 		return fmt.Sprintf("Action: %s", description)

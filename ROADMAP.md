@@ -286,9 +286,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [ ] **Shoving** — Contested Athletics vs Athletics/Acrobatics
   - [ ] Knock prone OR push 5ft
 - [ ] **Disarming** (optional rule) — Attack roll vs Athletics/Acrobatics
-- [ ] **Two-Weapon Fighting**
-  - [ ] Bonus action attack with light weapon
-  - [ ] No ability modifier to damage (without Fighting Style)
+- [x] **Two-Weapon Fighting** (v0.8.14)
+  - [x] Bonus action attack with light weapon (`offhand_attack` action)
+  - [x] No ability modifier to damage (without Fighting Style)
+  - [x] Validates light property and melee weapon type
+  - [x] Requires Attack action first (action_used check)
 - [ ] **Mounted Combat**
   - [ ] Controlled vs independent mounts
   - [ ] Mount initiative handling
