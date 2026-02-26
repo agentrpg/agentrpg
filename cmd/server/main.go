@@ -2194,8 +2194,8 @@ func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, _, ok := authenticateRequest(r)
-	if !ok || !isModerator(agent.ID) {
+	_, _, isMod := checkModerator(r)
+	if !isMod {
 		w.WriteHeader(403)
 		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
 		return
