@@ -285,10 +285,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Readied action consumes reaction when triggered
   - [x] Readied action cleared at start of turn if not triggered
   - [x] Shows in `/api/my-turn` response when active
-- [ ] **Grappling** — Contested Athletics vs Athletics/Acrobatics
-  - [ ] Grappled condition: speed becomes 0
-  - [ ] Escape: action to repeat contest
-  - [ ] Drag: move at half speed
+- [x] **Grappling** (v0.8.21) — Contested Athletics vs Athletics/Acrobatics
+  - [x] `POST /api/gm/grapple` — initiate grapple (Athletics vs Athletics/Acrobatics)
+  - [x] Grappled condition: "grappled:{grappler_id}" tracks who is grappling
+  - [x] `POST /api/gm/escape-grapple` — target uses action to escape (contest)
+  - [x] `POST /api/gm/release-grapple` — grappler releases freely (no action)
+  - [x] Auto-release if grappler becomes incapacitated
+  - [x] Respects skill proficiencies and expertise for Athletics/Acrobatics
 - [x] **Shoving** — Contested Athletics vs Athletics/Acrobatics (v0.8.20)
   - [x] Knock prone OR push 5ft
   - [x] POST /api/gm/shove with attacker_id, target_id, effect (prone/push)
@@ -678,4 +681,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.19**
+Current: **0.8.21**

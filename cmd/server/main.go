@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.20"
+const version = "0.8.21"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -167,6 +167,9 @@ func main() {
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
 	http.HandleFunc("/api/gm/contested-check", handleGMContestedCheck)
 	http.HandleFunc("/api/gm/shove", handleGMShove)
+	http.HandleFunc("/api/gm/grapple", handleGMGrapple)
+	http.HandleFunc("/api/gm/escape-grapple", handleGMEscapeGrapple)
+	http.HandleFunc("/api/gm/release-grapple", handleGMReleaseGrapple)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/gm/gold", handleGMGold)
@@ -7514,6 +7517,567 @@ func handleGMShove(w http.ResponseWriter, r *http.Request) {
 		campaignID, req.AttackerID, fmt.Sprintf("Shove %s (%s)", targetName, effect), resultText)
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMGrapple godoc
+// @Summary Resolve a grapple attempt
+// @Description GM resolves a grapple attempt. Attacker contests Athletics vs target's Athletics or Acrobatics. On success: target gains grappled condition (speed 0). Grappler can drag at half speed.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{attacker_id=int,target_id=int} true "Grapple details"
+// @Success 200 {object} map[string]interface{} "Grapple result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/grapple [post]
+func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		AttackerID int `json:"attacker_id"`
+		TargetID   int `json:"target_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.AttackerID == 0 || req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_id and target_id required"})
+		return
+	}
+	
+	// Check if attacker is incapacitated
+	if isIncapacitated(req.AttackerID) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "attacker_incapacitated",
+			"message": "Incapacitated creatures cannot grapple",
+		})
+		return
+	}
+	
+	// Get attacker stats
+	var attackerName string
+	var attackerStr, attackerDex, attackerLevel, attackerLobby int
+	var attackerSkillsJSON []byte
+	var attackerExpertiseJSON []byte
+	err = db.QueryRow(`SELECT name, str, dex, level, lobby_id, COALESCE(skill_proficiencies, '[]'), COALESCE(expertise, '[]') FROM characters WHERE id = $1`, req.AttackerID).
+		Scan(&attackerName, &attackerStr, &attackerDex, &attackerLevel, &attackerLobby, &attackerSkillsJSON, &attackerExpertiseJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_not_found"})
+		return
+	}
+	
+	// Get target stats
+	var targetName string
+	var targetStr, targetDex, targetLevel, targetLobby int
+	var targetSkillsJSON []byte
+	var targetExpertiseJSON []byte
+	err = db.QueryRow(`SELECT name, str, dex, level, lobby_id, COALESCE(skill_proficiencies, '[]'), COALESCE(expertise, '[]') FROM characters WHERE id = $1`, req.TargetID).
+		Scan(&targetName, &targetStr, &targetDex, &targetLevel, &targetLobby, &targetSkillsJSON, &targetExpertiseJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_found"})
+		return
+	}
+	
+	// Verify both are in this campaign
+	if attackerLobby != campaignID || targetLobby != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "characters_not_in_campaign"})
+		return
+	}
+	
+	// Check if target is already grappled by this attacker
+	var targetConditionsJSON []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", req.TargetID).Scan(&targetConditionsJSON)
+	var targetConditions []string
+	json.Unmarshal(targetConditionsJSON, &targetConditions)
+	for _, c := range targetConditions {
+		if strings.HasPrefix(c, fmt.Sprintf("grappled:%d", req.AttackerID)) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_grappled",
+				"message": fmt.Sprintf("%s is already grappled by %s", targetName, attackerName),
+			})
+			return
+		}
+	}
+	
+	// Parse skill proficiencies for proper modifiers
+	var attackerSkills, targetSkills []string
+	var attackerExpertise, targetExpertise []string
+	json.Unmarshal(attackerSkillsJSON, &attackerSkills)
+	json.Unmarshal(targetSkillsJSON, &targetSkills)
+	json.Unmarshal(attackerExpertiseJSON, &attackerExpertise)
+	json.Unmarshal(targetExpertiseJSON, &targetExpertise)
+	
+	// Calculate attacker's Athletics modifier
+	attackerMod := modifier(attackerStr)
+	if containsSkill(attackerSkills, "athletics") {
+		if containsSkill(attackerExpertise, "athletics") {
+			attackerMod += proficiencyBonus(attackerLevel) * 2 // expertise
+		} else {
+			attackerMod += proficiencyBonus(attackerLevel)
+		}
+	}
+	
+	// Calculate target's choice of Athletics or Acrobatics (use higher)
+	targetAthMod := modifier(targetStr)
+	if containsSkill(targetSkills, "athletics") {
+		if containsSkill(targetExpertise, "athletics") {
+			targetAthMod += proficiencyBonus(targetLevel) * 2
+		} else {
+			targetAthMod += proficiencyBonus(targetLevel)
+		}
+	}
+	
+	targetAcrMod := modifier(targetDex)
+	if containsSkill(targetSkills, "acrobatics") {
+		if containsSkill(targetExpertise, "acrobatics") {
+			targetAcrMod += proficiencyBonus(targetLevel) * 2
+		} else {
+			targetAcrMod += proficiencyBonus(targetLevel)
+		}
+	}
+	
+	targetMod := targetAthMod
+	targetSkill := "Athletics"
+	if targetAcrMod > targetAthMod {
+		targetMod = targetAcrMod
+		targetSkill = "Acrobatics"
+	}
+	
+	// Roll the contest
+	attackerRoll := rollDie(20)
+	targetRoll := rollDie(20)
+	
+	attackerTotal := attackerRoll + attackerMod
+	targetTotal := targetRoll + targetMod
+	
+	// Determine winner (ties go to defender)
+	success := attackerTotal > targetTotal
+	
+	resultText := fmt.Sprintf("Grapple: %s Athletics (%d + %d = %d) vs %s %s (%d + %d = %d)",
+		attackerName, attackerRoll, attackerMod, attackerTotal,
+		targetName, targetSkill, targetRoll, targetMod, targetTotal)
+	
+	response := map[string]interface{}{
+		"success": success,
+		"attacker": map[string]interface{}{
+			"id":       req.AttackerID,
+			"name":     attackerName,
+			"roll":     attackerRoll,
+			"modifier": attackerMod,
+			"total":    attackerTotal,
+		},
+		"defender": map[string]interface{}{
+			"id":       req.TargetID,
+			"name":     targetName,
+			"skill":    targetSkill,
+			"roll":     targetRoll,
+			"modifier": targetMod,
+			"total":    targetTotal,
+		},
+	}
+	
+	if success {
+		// Apply grappled condition with grappler ID for tracking
+		// Format: "grappled:{grappler_id}" so we can track who's grappling whom
+		grappleCondition := fmt.Sprintf("grappled:%d", req.AttackerID)
+		targetConditions = append(targetConditions, grappleCondition)
+		updatedJSON, _ := json.Marshal(targetConditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, req.TargetID)
+		
+		resultText += fmt.Sprintf(" → %s GRAPPLES %s!", attackerName, targetName)
+		response["condition_applied"] = "grappled"
+		response["grappler_id"] = req.AttackerID
+		response["message"] = fmt.Sprintf("%s grapples %s! Target's speed is now 0. %s can drag %s at half speed.", 
+			attackerName, targetName, attackerName, targetName)
+		response["rules_note"] = "Grapple ends if: grappler incapacitated, target moved out of reach, or target uses action to escape (contest Athletics vs Athletics/Acrobatics). Grappler can release freely (no action)."
+	} else {
+		resultText += fmt.Sprintf(" → %s breaks free!", targetName)
+		response["message"] = fmt.Sprintf("%s fails to grapple %s!", attackerName, targetName)
+	}
+	
+	response["result"] = resultText
+	
+	// Record the action
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'grapple', $3, $4)`,
+		campaignID, req.AttackerID, fmt.Sprintf("Grapple %s", targetName), resultText)
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMEscapeGrapple godoc
+// @Summary Resolve escape from grapple
+// @Description Target uses their action to attempt escaping a grapple. Contests Athletics or Acrobatics vs grappler's Athletics.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,use_acrobatics=bool} true "Escape details (use_acrobatics defaults to false = Athletics)"
+// @Success 200 {object} map[string]interface{} "Escape result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/escape-grapple [post]
+func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID   int  `json:"character_id"`
+		UseAcrobatics bool `json:"use_acrobatics"` // Default false = Athletics
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Get character and find if they're grappled
+	var charName string
+	var charStr, charDex, charLevel, charLobby int
+	var conditionsJSON, skillsJSON, expertiseJSON []byte
+	err = db.QueryRow(`SELECT name, str, dex, level, lobby_id, COALESCE(conditions, '[]'), COALESCE(skill_proficiencies, '[]'), COALESCE(expertise, '[]') FROM characters WHERE id = $1`, req.CharacterID).
+		Scan(&charName, &charStr, &charDex, &charLevel, &charLobby, &conditionsJSON, &skillsJSON, &expertiseJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charLobby != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Find the grappled condition and extract grappler ID
+	var grapplerID int
+	var grappleConditionIndex = -1
+	for i, c := range conditions {
+		if strings.HasPrefix(c, "grappled:") {
+			parts := strings.Split(c, ":")
+			if len(parts) == 2 {
+				grapplerID, _ = strconv.Atoi(parts[1])
+				grappleConditionIndex = i
+				break
+			}
+		}
+	}
+	
+	if grappleConditionIndex == -1 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_grappled",
+			"message": fmt.Sprintf("%s is not currently grappled", charName),
+		})
+		return
+	}
+	
+	// Get grappler stats
+	var grapplerName string
+	var grapplerStr, grapplerLevel int
+	var grapplerSkillsJSON, grapplerExpertiseJSON []byte
+	err = db.QueryRow(`SELECT name, str, level, COALESCE(skill_proficiencies, '[]'), COALESCE(expertise, '[]') FROM characters WHERE id = $1`, grapplerID).
+		Scan(&grapplerName, &grapplerStr, &grapplerLevel, &grapplerSkillsJSON, &grapplerExpertiseJSON)
+	if err != nil {
+		// Grappler no longer exists - auto-release
+		conditions = append(conditions[:grappleConditionIndex], conditions[grappleConditionIndex+1:]...)
+		updatedJSON, _ := json.Marshal(conditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, req.CharacterID)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": fmt.Sprintf("%s is freed - grappler no longer exists", charName),
+		})
+		return
+	}
+	
+	// Check if grappler is incapacitated - auto-release
+	if isIncapacitated(grapplerID) {
+		conditions = append(conditions[:grappleConditionIndex], conditions[grappleConditionIndex+1:]...)
+		updatedJSON, _ := json.Marshal(conditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, req.CharacterID)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":     true,
+			"auto_escape": true,
+			"message":     fmt.Sprintf("%s is freed - %s is incapacitated!", charName, grapplerName),
+		})
+		return
+	}
+	
+	// Parse skills
+	var charSkills, grapplerSkills []string
+	var charExpertise, grapplerExpertise []string
+	json.Unmarshal(skillsJSON, &charSkills)
+	json.Unmarshal(grapplerSkillsJSON, &grapplerSkills)
+	json.Unmarshal(expertiseJSON, &charExpertise)
+	json.Unmarshal(grapplerExpertiseJSON, &grapplerExpertise)
+	
+	// Calculate escaper's modifier (Athletics or Acrobatics based on choice)
+	var escaperMod int
+	var escaperSkill string
+	if req.UseAcrobatics {
+		escaperMod = modifier(charDex)
+		escaperSkill = "Acrobatics"
+		if containsSkill(charSkills, "acrobatics") {
+			if containsSkill(charExpertise, "acrobatics") {
+				escaperMod += proficiencyBonus(charLevel) * 2
+			} else {
+				escaperMod += proficiencyBonus(charLevel)
+			}
+		}
+	} else {
+		escaperMod = modifier(charStr)
+		escaperSkill = "Athletics"
+		if containsSkill(charSkills, "athletics") {
+			if containsSkill(charExpertise, "athletics") {
+				escaperMod += proficiencyBonus(charLevel) * 2
+			} else {
+				escaperMod += proficiencyBonus(charLevel)
+			}
+		}
+	}
+	
+	// Calculate grappler's Athletics modifier
+	grapplerMod := modifier(grapplerStr)
+	if containsSkill(grapplerSkills, "athletics") {
+		if containsSkill(grapplerExpertise, "athletics") {
+			grapplerMod += proficiencyBonus(grapplerLevel) * 2
+		} else {
+			grapplerMod += proficiencyBonus(grapplerLevel)
+		}
+	}
+	
+	// Roll the contest
+	escaperRoll := rollDie(20)
+	grapplerRoll := rollDie(20)
+	
+	escaperTotal := escaperRoll + escaperMod
+	grapplerTotal := grapplerRoll + grapplerMod
+	
+	// Determine winner (ties go to defender, who is the grappler in escape attempts)
+	success := escaperTotal > grapplerTotal
+	
+	resultText := fmt.Sprintf("Escape Grapple: %s %s (%d + %d = %d) vs %s Athletics (%d + %d = %d)",
+		charName, escaperSkill, escaperRoll, escaperMod, escaperTotal,
+		grapplerName, grapplerRoll, grapplerMod, grapplerTotal)
+	
+	response := map[string]interface{}{
+		"success": success,
+		"escaper": map[string]interface{}{
+			"id":       req.CharacterID,
+			"name":     charName,
+			"skill":    escaperSkill,
+			"roll":     escaperRoll,
+			"modifier": escaperMod,
+			"total":    escaperTotal,
+		},
+		"grappler": map[string]interface{}{
+			"id":       grapplerID,
+			"name":     grapplerName,
+			"roll":     grapplerRoll,
+			"modifier": grapplerMod,
+			"total":    grapplerTotal,
+		},
+	}
+	
+	if success {
+		// Remove grappled condition
+		conditions = append(conditions[:grappleConditionIndex], conditions[grappleConditionIndex+1:]...)
+		updatedJSON, _ := json.Marshal(conditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, req.CharacterID)
+		
+		resultText += fmt.Sprintf(" → %s ESCAPES!", charName)
+		response["message"] = fmt.Sprintf("%s breaks free from %s's grapple!", charName, grapplerName)
+	} else {
+		resultText += fmt.Sprintf(" → %s remains grappled!", charName)
+		response["message"] = fmt.Sprintf("%s fails to escape %s's grapple!", charName, grapplerName)
+	}
+	
+	response["result"] = resultText
+	response["action_cost"] = "This escape attempt costs the character's action"
+	
+	// Record the action
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'escape_grapple', $3, $4)`,
+		campaignID, req.CharacterID, fmt.Sprintf("Escape grapple from %s", grapplerName), resultText)
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMReleaseGrapple godoc
+// @Summary Release a grapple voluntarily
+// @Description Grappler releases their hold on a grappled creature. No action required.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{grappler_id=int,target_id=int} true "Release details"
+// @Success 200 {object} map[string]interface{} "Release result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/release-grapple [post]
+func handleGMReleaseGrapple(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		GrapplerID int `json:"grappler_id"`
+		TargetID   int `json:"target_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.GrapplerID == 0 || req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "grappler_id and target_id required"})
+		return
+	}
+	
+	// Get target's conditions
+	var targetName string
+	var conditionsJSON []byte
+	err = db.QueryRow(`SELECT name, COALESCE(conditions, '[]') FROM characters WHERE id = $1`, req.TargetID).
+		Scan(&targetName, &conditionsJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_found"})
+		return
+	}
+	
+	var grapplerName string
+	db.QueryRow(`SELECT name FROM characters WHERE id = $1`, req.GrapplerID).Scan(&grapplerName)
+	if grapplerName == "" {
+		grapplerName = "Unknown"
+	}
+	
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Find and remove the specific grapple condition
+	grappleCondition := fmt.Sprintf("grappled:%d", req.GrapplerID)
+	found := false
+	newConditions := []string{}
+	for _, c := range conditions {
+		if c == grappleCondition {
+			found = true
+		} else {
+			newConditions = append(newConditions, c)
+		}
+	}
+	
+	if !found {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_grapple",
+			"message": fmt.Sprintf("%s is not grappled by character %d", targetName, req.GrapplerID),
+		})
+		return
+	}
+	
+	updatedJSON, _ := json.Marshal(newConditions)
+	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, req.TargetID)
+	
+	// Record the action
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'release_grapple', $3, $4)`,
+		campaignID, req.GrapplerID, fmt.Sprintf("Release grapple on %s", targetName), 
+		fmt.Sprintf("%s releases %s from their grapple", grapplerName, targetName))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"grappler_id": req.GrapplerID,
+		"target_id":   req.TargetID,
+		"message":     fmt.Sprintf("%s releases %s from their grapple (no action cost)", grapplerName, targetName),
+	})
+}
+
+// containsSkill checks if a skill name is in the skill list (case-insensitive)
+func containsSkill(skills []string, skill string) bool {
+	skill = strings.ToLower(skill)
+	for _, s := range skills {
+		if strings.ToLower(s) == skill {
+			return true
+		}
+	}
+	return false
 }
 
 // handleGMUpdateCharacter godoc
