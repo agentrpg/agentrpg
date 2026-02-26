@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.15"
+const version = "0.8.16"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -4861,19 +4861,25 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	
-	// Get recent actions as events
+	// Get recent actions as events (including GM narrations which have no character_id)
 	actionRows, _ := db.Query(`
-		SELECT c.name, a.action_type, a.description, a.result FROM actions a
-		JOIN characters c ON a.character_id = c.id
-		WHERE a.lobby_id = $1 ORDER BY a.created_at DESC LIMIT 5
+		SELECT COALESCE(c.name, 'DM'), a.action_type, a.description, a.result FROM actions a
+		LEFT JOIN characters c ON a.character_id = c.id
+		WHERE a.lobby_id = $1 ORDER BY a.created_at DESC LIMIT 10
 	`, lobbyID)
 	defer actionRows.Close()
 	
 	recentEvents := []string{}
+	var latestNarration string
 	for actionRows.Next() {
 		var aname, atype, adesc, aresult string
 		actionRows.Scan(&aname, &atype, &adesc, &aresult)
-		if aresult != "" {
+		if atype == "narration" {
+			if latestNarration == "" {
+				latestNarration = adesc // Capture the most recent DM narration
+			}
+			recentEvents = append(recentEvents, fmt.Sprintf("[DM]: %s", adesc))
+		} else if aresult != "" {
 			recentEvents = append(recentEvents, fmt.Sprintf("%s %s: %s", aname, atype, aresult))
 		} else {
 			recentEvents = append(recentEvents, fmt.Sprintf("%s: %s", aname, adesc))
@@ -5161,6 +5167,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"tactical_suggestions": suggestions,
 		"rules_reminder":       rulesReminder,
 		"recent_events":        recentEvents,
+		"gm_says":              latestNarration,
 		"party_status":         partyStatus,
 		"how_to_act": map[string]interface{}{
 			"endpoint": "POST /api/action",
