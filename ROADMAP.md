@@ -252,6 +252,373 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ---
 
+## Phase 8: Core Rules Completion (D&D 5e Feature Audit)
+
+Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVTT dnd5e, open5e, 5e-srd-api), here's everything we need for complete rules coverage.
+
+### Combat System
+
+**What we have:**
+- [x] Initiative tracking and turn order
+- [x] Attack rolls (d20 + modifier)
+- [x] Damage calculation with weapon dice from SRD
+- [x] Critical hits (nat 20) and auto-miss (nat 1)
+- [x] HP tracking
+- [x] Death saves (successes/failures tracking)
+- [x] Advantage/disadvantage
+- [x] Opportunity attacks (`POST /api/gm/opportunity-attack`)
+- [x] Cover bonuses (+2 half, +5 three-quarters)
+- [x] Basic action types (attack, cast, move, help, dodge, ready, use_item)
+
+**What we need:**
+- [x] **Action Economy (CRITICAL)** — Track per turn (v0.8.6):
+  - [x] Action (1 per turn)
+  - [x] Bonus action (1 per turn)
+  - [x] Reaction (1 per round, resets on your turn)
+  - [x] Movement (speed in feet, tracked separately)
+  - [x] Free action (object interaction)
+  - [x] Validation: prevent multiple actions per turn
+- [ ] **Readied Actions** — Hold action with trigger condition
+- [ ] **Grappling** — Contested Athletics vs Athletics/Acrobatics
+  - [ ] Grappled condition: speed becomes 0
+  - [ ] Escape: action to repeat contest
+  - [ ] Drag: move at half speed
+- [ ] **Shoving** — Contested Athletics vs Athletics/Acrobatics
+  - [ ] Knock prone OR push 5ft
+- [ ] **Disarming** (optional rule) — Attack roll vs Athletics/Acrobatics
+- [ ] **Two-Weapon Fighting**
+  - [ ] Bonus action attack with light weapon
+  - [ ] No ability modifier to damage (without Fighting Style)
+- [ ] **Mounted Combat**
+  - [ ] Controlled vs independent mounts
+  - [ ] Mount initiative handling
+  - [ ] Mounting/dismounting movement costs
+- [ ] **Underwater Combat**
+  - [ ] Disadvantage on melee (without swim speed)
+  - [ ] Ranged attacks auto-miss beyond normal range
+  - [ ] Resistance to fire damage
+- [ ] **Flanking** (optional rule) — Advantage when allies opposite
+
+### Conditions System
+
+**What we have:**
+- [x] Conditions column in characters table (JSONB)
+- [x] Basic condition tracking (name + duration)
+- [x] Condition effects description lookup
+
+**What we need (all 15 PHB conditions with mechanical effects):**
+- [ ] **Blinded**
+  - [ ] Auto-fail checks requiring sight
+  - [ ] Attack rolls have disadvantage
+  - [ ] Attacks against have advantage
+- [ ] **Charmed**
+  - [ ] Can't attack the charmer
+  - [ ] Charmer has advantage on social checks
+- [ ] **Deafened**
+  - [ ] Auto-fail checks requiring hearing
+- [ ] **Exhaustion (CRITICAL — 6 levels!)**
+  - [ ] Level 1: Disadvantage on ability checks
+  - [ ] Level 2: Speed halved
+  - [ ] Level 3: Disadvantage on attacks/saves
+  - [ ] Level 4: HP maximum halved
+  - [ ] Level 5: Speed reduced to 0
+  - [ ] Level 6: Death
+  - [ ] Cumulative tracking
+  - [ ] Long rest removes 1 level (with food/drink)
+- [ ] **Frightened**
+  - [ ] Disadvantage on ability checks/attacks while source visible
+  - [ ] Can't willingly move closer to source
+- [ ] **Grappled**
+  - [ ] Speed becomes 0
+  - [ ] Ends if grappler incapacitated
+  - [ ] Ends if effect moves target out of reach
+- [ ] **Incapacitated**
+  - [ ] Can't take actions or reactions
+- [ ] **Invisible**
+  - [ ] Impossible to see without special sense
+  - [ ] Attacks against have disadvantage
+  - [ ] Attack rolls have advantage
+- [ ] **Paralyzed**
+  - [ ] Incapacitated, can't move or speak
+  - [ ] Auto-fail STR/DEX saves
+  - [ ] Attacks have advantage
+  - [ ] Hits within 5ft are automatic crits
+- [ ] **Petrified**
+  - [ ] Weight x10
+  - [ ] Incapacitated, can't move/speak, unaware
+  - [ ] Resistance to all damage
+  - [ ] Immune to poison and disease
+- [ ] **Poisoned**
+  - [ ] Disadvantage on attack rolls
+  - [ ] Disadvantage on ability checks
+- [ ] **Prone**
+  - [ ] Disadvantage on attack rolls
+  - [ ] Attacks within 5ft have advantage
+  - [ ] Attacks from further have disadvantage
+  - [ ] Must crawl (1ft costs 2ft) or use movement to stand
+- [ ] **Restrained**
+  - [ ] Speed becomes 0
+  - [ ] Attack rolls have disadvantage
+  - [ ] Attacks against have advantage
+  - [ ] Disadvantage on DEX saves
+- [ ] **Stunned**
+  - [ ] Incapacitated, can't move
+  - [ ] Can only speak falteringly
+  - [ ] Auto-fail STR/DEX saves
+  - [ ] Attacks have advantage
+- [ ] **Unconscious**
+  - [ ] Incapacitated, can't move or speak, unaware
+  - [ ] Drop held items, fall prone
+  - [ ] Auto-fail STR/DEX saves
+  - [ ] Attacks have advantage
+  - [ ] Hits within 5ft are automatic crits
+
+### Spellcasting
+
+**What we have:**
+- [x] Spell slots per class/level (full caster, half caster, warlock)
+- [x] Spell slot tracking and usage
+- [x] Spell slot recovery on long rest
+- [x] Spell save DC calculation (8 + prof + mod)
+- [x] Area of effect targeting (`POST /api/gm/aoe-cast`)
+- [x] Ritual casting (cast without slot if spell has ritual tag)
+- [x] Concentration tracking (concentrating_on column)
+- [x] Concentration saves on damage
+
+**What we need:**
+- [ ] **Spell Components**
+  - [ ] V (Verbal) — Can't cast if silenced
+  - [ ] S (Somatic) — Need free hand
+  - [ ] M (Material) — Need component pouch/focus OR specific items
+  - [ ] Consumed materials tracking (remove from inventory)
+- [ ] **Counterspell/Dispel Magic**
+  - [ ] Reaction to counter (within 60ft, can see)
+  - [ ] Auto-succeed if slot ≥ target spell level
+  - [ ] Ability check (DC 10 + spell level) otherwise
+- [ ] **Spell Schools** (for class features)
+  - [ ] Abjuration, Conjuration, Divination, Enchantment
+  - [ ] Evocation, Illusion, Necromancy, Transmutation
+- [ ] **Prepared vs Known Spells**
+  - [ ] Prepared casters (Cleric, Druid, Paladin, Wizard): change daily
+  - [ ] Known casters (Bard, Ranger, Sorcerer, Warlock): fixed list
+  - [ ] Spells known/prepared count = level + modifier (varies by class)
+- [ ] **Pact Magic (Warlock)**
+  - [ ] Separate from regular spell slots
+  - [ ] All slots same level
+  - [ ] Recover on SHORT rest
+- [ ] **Domain/Subclass Spells**
+  - [ ] Always prepared, don't count against limit
+  - [ ] Cleric domains, Paladin oaths, etc.
+- [ ] **Upcasting**
+  - [ ] Use higher slot for increased effect
+  - [ ] Damage scaling from SRD data
+
+### Character Features
+
+**What we have:**
+- [x] XP tracking with auto-level (`/api/gm/award-xp`)
+- [x] Proficiency bonus scaling by level
+- [x] Ability Score Improvements at 4, 8, 12, 16, 19
+- [x] Class hit die for HP
+- [x] Race ability bonuses
+
+**What we need:**
+- [ ] **Subclasses (CRITICAL for real play)**
+  - [ ] Data model for subclass selection (level 1-3 depending on class)
+  - [ ] PHB Subclasses to implement:
+    - [ ] Barbarian: Berserker, Totem Warrior
+    - [ ] Bard: Lore, Valor
+    - [ ] Cleric: Knowledge, Life, Light, Nature, Tempest, Trickery, War
+    - [ ] Druid: Land, Moon
+    - [ ] Fighter: Champion, Battle Master, Eldritch Knight
+    - [ ] Monk: Open Hand, Shadow, Four Elements
+    - [ ] Paladin: Devotion, Ancients, Vengeance
+    - [ ] Ranger: Hunter, Beast Master
+    - [ ] Rogue: Thief, Assassin, Arcane Trickster
+    - [ ] Sorcerer: Draconic, Wild Magic
+    - [ ] Warlock: Archfey, Fiend, Great Old One
+    - [ ] Wizard: All 8 schools
+- [ ] **Class Features by Level**
+  - [ ] Feature unlock tracking
+  - [ ] Resource tracking (Ki, Rage, Sorcery Points, etc.)
+  - [ ] Extra Attack at level 5 (Fighter, Paladin, Ranger, Monk, Barbarian)
+  - [ ] Spellcasting feature at class-specific levels
+- [ ] **Feats**
+  - [ ] Alternative to ASI
+  - [ ] SRD feats: Grappler, Great Weapon Master, etc.
+  - [ ] Feat prerequisites checking
+- [ ] **Backgrounds**
+  - [ ] Mechanical benefits: skill proficiencies, tool proficiencies, languages
+  - [ ] Starting equipment from background
+  - [ ] Background feature (roleplay benefit)
+- [ ] **Proficiencies**
+  - [ ] Skill proficiencies (add prof bonus)
+  - [ ] Tool proficiencies (for tool checks)
+  - [ ] Language proficiencies (for roleplay)
+  - [ ] Weapon proficiencies (can use without penalty)
+  - [ ] Armor proficiencies (penalties for non-proficient)
+  - [ ] Expertise (double prof bonus) for Rogues/Bards
+- [ ] **Inspiration**
+  - [ ] Binary flag (have it or don't)
+  - [ ] Spend for advantage on any d20 roll
+  - [ ] GM awards for good roleplay
+- [ ] **Multiclassing**
+  - [ ] Multiple class levels
+  - [ ] Multiclass spellcasting calculation
+  - [ ] Prerequisite ability scores
+  - [ ] Proficiency restrictions
+
+### Rest & Recovery
+
+**What we need:**
+- [ ] **Short Rest (CRITICAL)**
+  - [ ] 1+ hour duration
+  - [ ] Spend hit dice to heal
+  - [ ] Some abilities recover (Second Wind, Action Surge, etc.)
+  - [ ] Warlock spell slots recover
+- [ ] **Long Rest**
+  - [ ] 8 hours (6 hours sleep minimum for elves: 4)
+  - [ ] Recover all HP
+  - [ ] Recover all spell slots
+  - [ ] Recover half hit dice (minimum 1)
+  - [ ] Recover most class features
+  - [ ] Remove 1 exhaustion level (with food/drink)
+  - [ ] Only 1 per 24 hours
+- [ ] **Hit Dice Tracking**
+  - [ ] Total = character level
+  - [ ] Die type = class hit die
+  - [ ] Tracking spent vs available
+  - [ ] Recovery: half (round down, min 1) on long rest
+
+### Equipment & Economy
+
+**What we have:**
+- [x] Gold tracking (integer, `gold` column)
+- [x] Inventory (JSONB array)
+- [x] Encumbrance calculation
+- [x] Magic item attunement (max 3)
+- [x] Consumables (potions, scrolls)
+- [x] Weapons and armor from SRD
+
+**What we need:**
+- [ ] **Full Currency System**
+  - [ ] Copper (cp), Silver (sp), Electrum (ep), Gold (gp), Platinum (pp)
+  - [ ] Conversion rates: 10cp=1sp, 5sp=1ep, 2ep=1gp, 10gp=1pp
+  - [ ] Auto-conversion or manual management
+- [ ] **Armor Mechanics**
+  - [ ] AC calculation by armor type
+  - [ ] Light: AC + full DEX mod
+  - [ ] Medium: AC + DEX mod (max +2)
+  - [ ] Heavy: AC (no DEX)
+  - [ ] Shield: +2 AC
+  - [ ] Stealth disadvantage flag
+  - [ ] Strength requirements
+  - [ ] Donning/doffing time
+- [ ] **Ammunition Tracking**
+  - [ ] Arrows, bolts, bullets, darts
+  - [ ] Decrement on use
+  - [ ] Recovery: half after combat (recoverable arrows)
+- [ ] **Tool Checks**
+  - [ ] Tool proficiency for relevant checks
+  - [ ] Specific tool types: Thieves' tools, Herbalism kit, etc.
+
+### Monster/NPC Features
+
+**What we need:**
+- [ ] **Legendary Actions**
+  - [ ] Pool of actions (usually 3)
+  - [ ] Use at end of other creature's turn
+  - [ ] Different cost for different abilities
+  - [ ] Replenish at start of monster's turn
+- [ ] **Legendary Resistances**
+  - [ ] Choose to succeed failed save
+  - [ ] Limited uses per day (usually 3)
+- [ ] **Lair Actions**
+  - [ ] Occur on initiative count 20
+  - [ ] Only in monster's lair
+  - [ ] Specific effects per monster
+- [ ] **Regional Effects**
+  - [ ] Passive effects around legendary creature's lair
+- [ ] **Damage Resistances/Immunities/Vulnerabilities**
+  - [ ] Resistance: half damage
+  - [ ] Immunity: no damage
+  - [ ] Vulnerability: double damage
+  - [ ] Type-specific (fire, cold, bludgeoning, etc.)
+  - [ ] Conditional (nonmagical weapons, silver, etc.)
+
+### Environmental & Exploration
+
+**What we need:**
+- [ ] **Environmental Hazards**
+  - [ ] Falling damage (1d6 per 10ft, max 20d6)
+  - [ ] Suffocation (CON mod minutes, then 0 HP in 1+CON rounds)
+  - [ ] Extreme temperatures (CON saves or exhaustion)
+  - [ ] High altitude (exhaustion without acclimation)
+- [ ] **Traps**
+  - [ ] Detection (Investigation/Perception vs DC)
+  - [ ] Disarming (Thieves' tools vs DC)
+  - [ ] Triggering and damage
+  - [ ] Save DC for avoidance
+- [ ] **Diseases**
+  - [ ] Contraction mechanics
+  - [ ] Ongoing effects
+  - [ ] Recovery (saves, rest, magic)
+- [ ] **Poisons**
+  - [ ] Contact, ingested, inhaled, injury types
+  - [ ] CON saves
+  - [ ] Damage and/or conditions
+- [ ] **Lighting & Vision**
+  - [ ] Bright, dim, darkness
+  - [ ] Darkvision, blindsight, truesight
+  - [ ] Heavily obscured = effectively blind
+
+### Advanced (Optional Rules)
+
+**Lower priority but good to have:**
+- [ ] **Flanking** — Advantage when ally opposite
+- [ ] **Facing** — Direction matters
+- [ ] **Morale** — Monsters flee at HP threshold
+- [ ] **Downtime Activities**
+  - [ ] Crafting
+  - [ ] Research
+  - [ ] Training (new proficiency/language)
+  - [ ] Work (earn gold)
+  - [ ] Recuperating (remove disease/lingering injury)
+- [ ] **Madness**
+  - [ ] Short-term, long-term, indefinite
+  - [ ] Effects table
+  - [ ] Recovery through rest or magic
+
+---
+
+## Implementation Priority
+
+### P0 — Critical for Playable Games
+1. **Action Economy** — Without this, combat is broken
+2. **Conditions with Effects** — Especially exhaustion, prone, grappled
+3. **Short/Long Rest** — Recovery is fundamental
+4. **Hit Dice** — Healing resource management
+
+### P1 — Needed for Real Campaigns
+5. **Subclasses** — Characters need mechanical identity
+6. **Class Features** — Ki, Rage, etc.
+7. **Proficiencies** — Skills, tools, weapons, armor
+8. **Spell Components** — Material component tracking
+
+### P2 — Polish for Full Experience
+9. **Legendary Actions/Resistances** — Boss fights
+10. **Full Currency** — Economic gameplay
+11. **Ammunition** — Resource management
+12. **Feats** — Build variety
+
+### P3 — Nice to Have
+13. **Environmental Hazards**
+14. **Traps and Diseases**
+15. **Downtime Activities**
+16. **Optional Rules**
+
+---
+
 ## Versioning Policy
 
 **Don't increment versions rapidly.** Stay on a version until there's a meaningful release.
@@ -261,4 +628,4 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.0**
+Current: **0.8.5**

@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.5"
+const version = "0.8.6"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -394,6 +394,11 @@ func initDB() {
 		
 		-- Reaction tracking (for opportunity attacks)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS reaction_used BOOLEAN DEFAULT FALSE;
+		
+		-- Action Economy tracking (Phase 8 P0 - Combat is broken without this)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS action_used BOOLEAN DEFAULT FALSE;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS bonus_action_used BOOLEAN DEFAULT FALSE;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS movement_remaining INTEGER DEFAULT 30;
 		
 		-- Cover tracking
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS cover_bonus INTEGER DEFAULT 0;
@@ -4211,8 +4216,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var charName, class, race, lobbyName, setting, lobbyStatus string
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
-	var deathSuccesses, deathFailures, pendingASI int
-	var isStable, isDead, reactionUsed bool
+	var deathSuccesses, deathFailures, pendingASI, movementRemaining int
+	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed bool
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
@@ -4220,7 +4225,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.temp_hp, 0), COALESCE(c.conditions, '[]'), COALESCE(c.spell_slots_used, '{}'),
 			COALESCE(c.concentrating_on, ''), COALESCE(c.death_save_successes, 0), COALESCE(c.death_save_failures, 0),
 			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false),
-			COALESCE(c.xp, 0), COALESCE(c.gold, 0), COALESCE(c.pending_asi, 0)
+			COALESCE(c.xp, 0), COALESCE(c.gold, 0), COALESCE(c.pending_asi, 0),
+			COALESCE(c.action_used, false), COALESCE(c.bonus_action_used, false), COALESCE(c.movement_remaining, 30)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -4229,7 +4235,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&str, &dex, &con, &intl, &wis, &cha,
 		&lobbyID, &lobbyName, &setting, &lobbyStatus,
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
-		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &pendingASI)
+		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &pendingASI,
+		&actionUsed, &bonusActionUsed, &movementRemaining)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -4524,6 +4531,16 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		reactionStatus = "Your reaction has been used this round."
 	}
 	
+	// Action economy status (for in-combat turns)
+	actionStatus := "You have your action available."
+	if actionUsed {
+		actionStatus = "You have already used your action this turn."
+	}
+	bonusActionStatus := "You have your bonus action available."
+	if bonusActionUsed {
+		bonusActionStatus = "You have already used your bonus action this turn."
+	}
+	
 	// Update character activity (log poll, update last_active)
 	updateCharacterActivity(charID, "poll", "Checked game status")
 	
@@ -4547,8 +4564,18 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"your_options": map[string]interface{}{
 			"actions":       actions,
 			"bonus_actions": []map[string]interface{}{},
-			"movement":      fmt.Sprintf("You have %dft of movement.", getMovementSpeed(race)),
+			"movement":      fmt.Sprintf("You have %dft of movement remaining.", movementRemaining),
 			"reaction":      reactionStatus,
+			"action_economy": map[string]interface{}{
+				"action":            !actionUsed,
+				"action_status":     actionStatus,
+				"bonus_action":      !bonusActionUsed,
+				"bonus_action_status": bonusActionStatus,
+				"reaction":          !reactionUsed,
+				"reaction_status":   reactionStatus,
+				"movement_remaining_ft": movementRemaining,
+				"movement_speed_ft": getMovementSpeed(race),
+			},
 		},
 		"tactical_suggestions": suggestions,
 		"rules_reminder":       rulesReminder,
@@ -5189,7 +5216,12 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 			SELECT current_turn_index, turn_order FROM combat_state WHERE lobby_id = $1
 		`, campaignID).Scan(&turnIndex, &turnOrderJSON)
 		
-		var turnOrder []interface{}
+		type InitEntry struct {
+			ID         int    `json:"id"`
+			Name       string `json:"name"`
+			Initiative int    `json:"initiative"`
+		}
+		var turnOrder []InitEntry
 		json.Unmarshal(turnOrderJSON, &turnOrder)
 		
 		if turnIndex >= len(turnOrder) {
@@ -5199,6 +5231,7 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 				SET current_turn_index = 0, round_number = round_number + 1
 				WHERE lobby_id = $1
 			`, campaignID)
+			turnIndex = 0
 			
 			// Reset reactions for all characters in campaign (start of new round)
 			db.Exec(`
@@ -5208,6 +5241,25 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 			
 			response["new_round"] = true
 			response["reactions_reset"] = true
+		}
+		
+		// Reset action economy for the new current character
+		if turnIndex < len(turnOrder) {
+			newActiveID := turnOrder[turnIndex].ID
+			// Get character's race for movement speed
+			var race string
+			db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
+			speed := getMovementSpeed(race)
+			
+			// Reset turn resources: action, bonus action, movement, and reaction (resets on your turn)
+			db.Exec(`
+				UPDATE characters 
+				SET action_used = false, bonus_action_used = false, 
+				    movement_remaining = $1, reaction_used = false
+				WHERE id = $2
+			`, speed, newActiveID)
+			
+			response["action_economy_reset_for"] = turnOrder[turnIndex].Name
 		}
 		
 		response["turn_advanced"] = true
@@ -8212,17 +8264,114 @@ func getRecentCampaignActions(lobbyID int, hours int) []map[string]interface{} {
 	return actions
 }
 
+// Action Economy: which resource each action type consumes
+// Returns: "action", "bonus_action", "reaction", "movement", "free", or "none"
+func getActionResourceType(actionType string) string {
+	actionType = strings.ToLower(actionType)
+	switch actionType {
+	// Standard actions (consume your action)
+	case "attack", "cast", "dash", "disengage", "dodge", "help", "hide", "ready", "search", "use_item", "death_save", "grapple", "shove":
+		return "action"
+	// Bonus actions (consume bonus action - class/spell specific)
+	case "bonus_attack", "cunning_action", "offhand_attack", "second_wind", "action_surge", "rage", "bonus_cast":
+		return "bonus_action"
+	// Reactions (consume reaction - used on others' turns too)
+	case "opportunity_attack", "counterspell", "shield":
+		return "reaction"
+	// Movement (consumes movement speed)
+	case "move":
+		return "movement"
+	// Free actions (no resource cost)
+	case "drop", "speak", "interact", "other":
+		return "free"
+	default:
+		// Default unknown actions to using the action
+		return "action"
+	}
+}
+
+// Check if character has the required resource for an action
+// Returns: canAct bool, resourceType string, errorMsg string
+func checkActionEconomy(charID int, actionType string, movementCost int) (bool, string, string) {
+	resourceType := getActionResourceType(actionType)
+	
+	var actionUsed, bonusActionUsed, reactionUsed bool
+	var movementRemaining int
+	err := db.QueryRow(`
+		SELECT COALESCE(action_used, false), COALESCE(bonus_action_used, false), 
+		       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30)
+		FROM characters WHERE id = $1
+	`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining)
+	
+	if err != nil {
+		return false, resourceType, "Failed to check action economy"
+	}
+	
+	switch resourceType {
+	case "action":
+		if actionUsed {
+			return false, resourceType, "You have already used your action this turn. Available: bonus action, movement, free actions."
+		}
+	case "bonus_action":
+		if bonusActionUsed {
+			return false, resourceType, "You have already used your bonus action this turn."
+		}
+	case "reaction":
+		if reactionUsed {
+			return false, resourceType, "You have already used your reaction this round."
+		}
+	case "movement":
+		if movementCost > movementRemaining {
+			return false, resourceType, fmt.Sprintf("Not enough movement. You have %dft remaining, need %dft.", movementRemaining, movementCost)
+		}
+	case "free":
+		// Free actions always succeed
+		return true, resourceType, ""
+	}
+	
+	return true, resourceType, ""
+}
+
+// Consume the appropriate resource after an action
+func consumeActionResource(charID int, resourceType string, movementCost int) {
+	switch resourceType {
+	case "action":
+		db.Exec("UPDATE characters SET action_used = true WHERE id = $1", charID)
+	case "bonus_action":
+		db.Exec("UPDATE characters SET bonus_action_used = true WHERE id = $1", charID)
+	case "reaction":
+		db.Exec("UPDATE characters SET reaction_used = true WHERE id = $1", charID)
+	case "movement":
+		db.Exec("UPDATE characters SET movement_remaining = movement_remaining - $1 WHERE id = $2", movementCost, charID)
+	}
+}
+
+// Reset action economy at start of turn (called when turn advances)
+func resetTurnResources(charID int, raceSpeed int) {
+	db.Exec(`
+		UPDATE characters 
+		SET action_used = false, bonus_action_used = false, movement_remaining = $1
+		WHERE id = $2
+	`, raceSpeed, charID)
+	// Note: reaction_used resets at start of YOUR turn, not when turn advances to you
+}
+
+// Reset reaction at start of character's turn
+func resetReaction(charID int) {
+	db.Exec("UPDATE characters SET reaction_used = false WHERE id = $1", charID)
+}
+
 // handleAction godoc
 // @Summary Submit an action
-// @Description Submit a game action. Server resolves mechanics (dice rolls, damage, etc.).
+// @Description Submit a game action. Server resolves mechanics (dice rolls, damage, etc.). Enforces action economy: 1 action, 1 bonus action, 1 reaction per round, movement in feet.
 // @Tags Actions
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{action=string,description=string,target=string} true "Action details"
+// @Param request body object{action=string,description=string,target=string,movement_cost=int} true "Action details"
 // @Success 200 {object} map[string]interface{} "Action result with dice rolls"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
-// @Failure 400 {object} map[string]interface{} "No active game"
+// @Failure 400 {object} map[string]interface{} "No active game or resource exhausted"
 // @Router /action [post]
 func handleAction(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -8239,36 +8388,90 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		Action      string `json:"action"`
-		Description string `json:"description"`
-		Target      string `json:"target"`
+		Action       string `json:"action"`
+		Description  string `json:"description"`
+		Target       string `json:"target"`
+		MovementCost int    `json:"movement_cost"` // feet of movement for move actions
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	
 	var charID, lobbyID int
+	var race string
 	err = db.QueryRow(`
-		SELECT c.id, c.lobby_id FROM characters c
+		SELECT c.id, c.lobby_id, c.race FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
-	`, agentID).Scan(&charID, &lobbyID)
+	`, agentID).Scan(&charID, &lobbyID, &race)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_active_game"})
 		return
 	}
 	
+	// Check if in combat - action economy only enforced in combat
+	var inCombat bool
+	err = db.QueryRow("SELECT active FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&inCombat)
+	if err != nil {
+		inCombat = false
+	}
+	
+	// Check action economy (only in combat)
+	resourceUsed := ""
+	if inCombat {
+		canAct, resourceType, errMsg := checkActionEconomy(charID, req.Action, req.MovementCost)
+		if !canAct {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":       false,
+				"error":         "resource_exhausted",
+				"message":       errMsg,
+				"resource_type": resourceType,
+				"hint":          "Use GET /api/my-turn to see your available resources.",
+			})
+			return
+		}
+		resourceUsed = resourceType
+	}
+	
 	result := resolveAction(req.Action, req.Description, charID)
+	
+	// Consume the resource (only in combat)
+	if inCombat && resourceUsed != "" && resourceUsed != "free" {
+		consumeActionResource(charID, resourceUsed, req.MovementCost)
+	}
 	
 	db.Exec(`
 		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
 		VALUES ($1, $2, $3, $4, $5)
 	`, lobbyID, charID, req.Action, req.Description, result)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	// Build response with resource info
+	response := map[string]interface{}{
 		"success": true,
 		"action":  req.Action,
 		"result":  result,
-	})
+	}
+	
+	if inCombat {
+		response["resource_consumed"] = resourceUsed
+		
+		// Show remaining resources
+		var actionUsed, bonusActionUsed, reactionUsed bool
+		var movementRemaining int
+		db.QueryRow(`
+			SELECT COALESCE(action_used, false), COALESCE(bonus_action_used, false),
+			       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30)
+			FROM characters WHERE id = $1
+		`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining)
+		
+		response["resources_remaining"] = map[string]interface{}{
+			"action":       !actionUsed,
+			"bonus_action": !bonusActionUsed,
+			"reaction":     !reactionUsed,
+			"movement_ft":  movementRemaining,
+		}
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // Check if character has a condition that grants advantage/disadvantage
@@ -8958,14 +9161,23 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 			round_number = 1, current_turn_index = 0, turn_order = $2, active = true, turn_started_at = NOW()
 	`, campaignID, turnOrderJSON)
 	
-	// Reset reactions for all characters
-	db.Exec("UPDATE characters SET reaction_used = false WHERE lobby_id = $1", campaignID)
+	// Reset action economy for all characters (reactions, actions, bonus actions, movement)
+	db.Exec("UPDATE characters SET reaction_used = false, action_used = false, bonus_action_used = false WHERE lobby_id = $1", campaignID)
+	
+	// Initialize movement for each character based on their race speed
+	for _, entry := range entries {
+		var race string
+		db.QueryRow("SELECT race FROM characters WHERE id = $1", entry.ID).Scan(&race)
+		speed := getMovementSpeed(race)
+		db.Exec("UPDATE characters SET movement_remaining = $1 WHERE id = $2", speed, entry.ID)
+	}
 	
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":      true,
 		"round":        1,
 		"turn_order":   entries,
 		"current_turn": entries[0].Name,
+		"action_economy_note": "All characters have their action, bonus action, reaction, and full movement available.",
 	})
 }
 
@@ -8997,10 +9209,10 @@ func handleCombatEnd(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	db.Exec("UPDATE combat_state SET active = false WHERE lobby_id = $1", campaignID)
 	
-	// Clear temporary combat conditions
-	db.Exec("UPDATE characters SET conditions = '[]', reaction_used = false WHERE lobby_id = $1", campaignID)
+	// Clear temporary combat conditions and reset action economy
+	db.Exec("UPDATE characters SET conditions = '[]', reaction_used = false, action_used = false, bonus_action_used = false WHERE lobby_id = $1", campaignID)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "Combat ended"})
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "message": "Combat ended", "action_economy_note": "Action economy reset for all characters."})
 }
 
 // handleCombatNext godoc
@@ -9055,9 +9267,8 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 		return
 	}
 	
-	// Clear start-of-turn conditions for current character
+	// Clear start-of-turn conditions for current character (ending their turn)
 	currentID := entries[turnIndex].ID
-	db.Exec("UPDATE characters SET reaction_used = false WHERE id = $1", currentID)
 	
 	// Remove "dodging" condition at end of turn
 	var condJSON []byte
@@ -9082,11 +9293,24 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
 	
+	// Reset action economy for the new active character
+	newActiveID := entries[turnIndex].ID
+	var race string
+	db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
+	speed := getMovementSpeed(race)
+	db.Exec(`
+		UPDATE characters 
+		SET action_used = false, bonus_action_used = false, 
+		    movement_remaining = $1, reaction_used = false
+		WHERE id = $2
+	`, speed, newActiveID)
+	
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":      true,
-		"round":        round,
-		"current_turn": entries[turnIndex].Name,
-		"turn_index":   turnIndex,
+		"success":            true,
+		"round":              round,
+		"current_turn":       entries[turnIndex].Name,
+		"turn_index":         turnIndex,
+		"action_economy_reset": true,
 	})
 }
 
@@ -9174,13 +9398,26 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
 	
+	// Reset action economy for the new active character
+	newActiveID := entries[turnIndex].ID
+	var race string
+	db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
+	speed := getMovementSpeed(race)
+	db.Exec(`
+		UPDATE characters 
+		SET action_used = false, bonus_action_used = false, 
+		    movement_remaining = $1, reaction_used = false
+		WHERE id = $2
+	`, speed, newActiveID)
+	
 	response := map[string]interface{}{
-		"success":         true,
-		"skipped":         skippedName,
-		"inactive_minutes": elapsedMinutes,
-		"round":           round,
-		"current_turn":    entries[turnIndex].Name,
-		"turn_index":      turnIndex,
+		"success":            true,
+		"skipped":            skippedName,
+		"inactive_minutes":   elapsedMinutes,
+		"round":              round,
+		"current_turn":       entries[turnIndex].Name,
+		"turn_index":         turnIndex,
+		"action_economy_reset": true,
 	}
 	
 	if newRound {
