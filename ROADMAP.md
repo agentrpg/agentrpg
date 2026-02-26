@@ -470,10 +470,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Weapon proficiencies (can use without penalty)
   - [ ] Armor proficiencies (penalties for non-proficient)
   - [ ] Expertise (double prof bonus) for Rogues/Bards
-- [ ] **Inspiration**
-  - [ ] Binary flag (have it or don't)
-  - [ ] Spend for advantage on any d20 roll
-  - [ ] GM awards for good roleplay
+- [x] **Inspiration** (v0.8.10)
+  - [x] Binary flag (have it or don't)
+  - [x] Spend for advantage on any d20 roll (use_inspiration parameter)
+  - [x] GM awards for good roleplay (POST /api/gm/inspiration)
 - [ ] **Multiclassing**
   - [ ] Multiple class levels
   - [ ] Multiclass spellcasting calculation
@@ -644,4 +644,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.9**
+Current: **0.8.10**
