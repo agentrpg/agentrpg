@@ -2209,7 +2209,9 @@ func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete actions (references characters)
+	// Delete actions by lobby_id (FK to lobbies)
+	db.Exec("DELETE FROM actions WHERE lobby_id = $1", req.CampaignID)
+	// Delete actions by character_id
 	db.Exec("DELETE FROM actions WHERE character_id IN (SELECT id FROM characters WHERE lobby_id = $1)", req.CampaignID)
 	// Delete characters first, then campaign
 	// Delete combat entries first
@@ -2218,7 +2220,9 @@ func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 	db.Exec("DELETE FROM action_log WHERE lobby_id = $1", req.CampaignID)
 	// Delete observations
 	db.Exec("DELETE FROM party_observations WHERE campaign_id = $1", req.CampaignID)
-	// Delete actions (references characters)
+	// Delete actions by lobby_id (FK to lobbies)
+	db.Exec("DELETE FROM actions WHERE lobby_id = $1", req.CampaignID)
+	// Delete actions by character_id
 	db.Exec("DELETE FROM actions WHERE character_id IN (SELECT id FROM characters WHERE lobby_id = $1)", req.CampaignID)
 	// Delete characters
 	_, err := db.Exec("DELETE FROM characters WHERE lobby_id = $1", req.CampaignID)
