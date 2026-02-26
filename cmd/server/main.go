@@ -166,6 +166,7 @@ func main() {
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/gm/gold", handleGMGold)
 	http.HandleFunc("/api/gm/give-item", handleGMGiveItem)
+	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
@@ -1532,6 +1533,7 @@ Agent RPG`, token, toEmail, token, toEmail, token)
 
 // handlePasswordResetRequest handles POST /api/password-reset/request
 func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1541,12 +1543,14 @@ func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 		Email string `json:"email"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Invalid JSON"})
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
 		return
 	}
 	
 	if req.Email == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Email required"})
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "email_required"})
 		return
 	}
 	
@@ -1555,7 +1559,7 @@ func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 	err := db.QueryRow("SELECT id FROM agents WHERE email = $1", req.Email).Scan(&agentID)
 	if err != nil {
 		// Don't reveal if email exists - always return success
-		jsonResponse(w, http.StatusOK, map[string]interface{}{
+		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "If an account exists with that email, a reset link has been sent.",
 		})
@@ -1571,7 +1575,8 @@ func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 		agentID, token, expiresAt)
 	if err != nil {
 		log.Printf("Failed to store reset token: %v", err)
-		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"error": "Database error"})
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
 		return
 	}
 	
@@ -1580,7 +1585,7 @@ func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Failed to send reset email: %v", err)
 	}
 	
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "If an account exists with that email, a reset link has been sent.",
 		"token_hint": token[:strings.Index(token, "-")] + "-...",
@@ -1589,6 +1594,7 @@ func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 
 // handlePasswordResetConfirm handles POST /api/password-reset/confirm
 func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	if r.Method != "POST" {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1600,17 +1606,20 @@ func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
 		NewPassword string `json:"new_password"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Invalid JSON"})
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
 		return
 	}
 	
 	if req.Email == "" || req.Token == "" || req.NewPassword == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Email, token, and new_password required"})
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "email_token_and_new_password_required"})
 		return
 	}
 	
 	if len(req.NewPassword) < 6 {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Password must be at least 6 characters"})
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "password_must_be_at_least_6_characters"})
 		return
 	}
 	
@@ -1624,7 +1633,8 @@ func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
 	`, req.Email, req.Token).Scan(&tokenID, &agentID)
 	
 	if err != nil {
-		jsonResponse(w, http.StatusBadRequest, map[string]interface{}{"error": "Invalid or expired reset token"})
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_or_expired_reset_token"})
 		return
 	}
 	
@@ -1636,14 +1646,15 @@ func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
 	_, err = db.Exec(`UPDATE agents SET password_hash = $1, salt = $2 WHERE id = $3`, hash, salt, agentID)
 	if err != nil {
 		log.Printf("Failed to update password: %v", err)
-		jsonResponse(w, http.StatusInternalServerError, map[string]interface{}{"error": "Database error"})
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
 		return
 	}
 	
 	// Mark token as used
 	db.Exec(`UPDATE password_reset_tokens SET used = TRUE WHERE id = $1`, tokenID)
 	
-	jsonResponse(w, http.StatusOK, map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Password updated successfully. You can now log in with your new password.",
 	})
@@ -4730,13 +4741,21 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		json.Unmarshal(turnOrderJSON, &turnOrder)
 		
 		if turnIndex >= len(turnOrder) {
-			// New round
+			// New round - reset turn index and increment round
 			db.Exec(`
 				UPDATE combat_state 
 				SET current_turn_index = 0, round_number = round_number + 1
 				WHERE lobby_id = $1
 			`, campaignID)
+			
+			// Reset reactions for all characters in campaign (start of new round)
+			db.Exec(`
+				UPDATE characters SET reaction_used = false 
+				WHERE lobby_id = $1
+			`, campaignID)
+			
 			response["new_round"] = true
+			response["reactions_reset"] = true
 		}
 		
 		response["turn_advanced"] = true
@@ -6379,6 +6398,337 @@ func handleGMGiveItem(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGMOpportunityAttack godoc
+// @Summary Trigger an opportunity attack
+// @Description GM triggers an opportunity attack when a creature leaves another's reach. Uses the attacker's reaction.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{attacker_id=integer,target_id=integer,attacker_is_monster=boolean,weapon=string} true "Opportunity attack details"
+// @Success 200 {object} map[string]interface{} "Attack result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or no reaction available"
+// @Router /gm/opportunity-attack [post]
+func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		AttackerID        int    `json:"attacker_id"`         // Character ID (if player) or ignored for monster
+		TargetID          int    `json:"target_id"`           // Character ID of the creature provoking
+		AttackerIsMonster bool   `json:"attacker_is_monster"` // true if monster is making the attack
+		MonsterName       string `json:"monster_name"`        // Name of monster (if attacker_is_monster)
+		MonsterKey        string `json:"monster_key"`         // SRD slug for monster stats
+		Weapon            string `json:"weapon"`              // Optional: specific weapon to use
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_id required (the character being attacked)",
+		})
+		return
+	}
+	
+	// Get target character info
+	var targetName string
+	var targetLobbyID int
+	var targetAC int
+	err = db.QueryRow(`
+		SELECT name, lobby_id, 
+			10 + CASE WHEN dex > 10 THEN (dex - 10) / 2 ELSE 0 END as ac
+		FROM characters WHERE id = $1
+	`, req.TargetID).Scan(&targetName, &targetLobbyID, &targetAC)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_found"})
+		return
+	}
+	
+	if targetLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_in_campaign"})
+		return
+	}
+	
+	var attackerName string
+	var attackMod, damageMod int
+	var damageDice string
+	var weaponName string
+	
+	if req.AttackerIsMonster {
+		// Monster opportunity attack
+		if req.MonsterName == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_request",
+				"message": "monster_name required when attacker_is_monster is true",
+			})
+			return
+		}
+		attackerName = req.MonsterName
+		
+		// Try to get monster stats from SRD
+		if req.MonsterKey != "" {
+			var mStr, mDex int
+			var actionsJSON []byte
+			err = db.QueryRow(`
+				SELECT COALESCE((abilities->>'str')::int, 10), 
+				       COALESCE((abilities->>'dex')::int, 10),
+				       actions
+				FROM monsters WHERE slug = $1
+			`, req.MonsterKey).Scan(&mStr, &mDex, &actionsJSON)
+			
+			if err == nil {
+				// Use STR for melee
+				attackMod = modifier(mStr)
+				damageMod = modifier(mStr)
+				
+				// Try to find a melee attack in actions
+				var actions []map[string]interface{}
+				json.Unmarshal(actionsJSON, &actions)
+				
+				for _, action := range actions {
+					if name, ok := action["name"].(string); ok {
+						nameLower := strings.ToLower(name)
+						// Look for melee attacks (claws, bite, slam, etc.)
+						if strings.Contains(nameLower, "claw") || 
+						   strings.Contains(nameLower, "bite") ||
+						   strings.Contains(nameLower, "slam") ||
+						   strings.Contains(nameLower, "attack") ||
+						   strings.Contains(nameLower, "sword") {
+							weaponName = name
+							// Try to parse damage from description
+							if desc, ok := action["desc"].(string); ok {
+								// Look for damage dice pattern like "2d6 + 4"
+								if idx := strings.Index(desc, "d"); idx > 0 {
+									// Find the start of the dice
+									start := idx - 1
+									for start > 0 && (desc[start-1] >= '0' && desc[start-1] <= '9') {
+										start--
+									}
+									// Find end of dice
+									end := idx + 1
+									for end < len(desc) && ((desc[end] >= '0' && desc[end] <= '9') || desc[end] == '+' || desc[end] == ' ') {
+										end++
+									}
+									if end > idx+1 {
+										damageDice = strings.TrimSpace(desc[start:end])
+										// Clean up the dice string
+										damageDice = strings.ReplaceAll(damageDice, " ", "")
+										if plusIdx := strings.Index(damageDice, "+"); plusIdx > 0 {
+											damageDice = damageDice[:plusIdx]
+										}
+									}
+								}
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+		
+		// Defaults if not found
+		if weaponName == "" {
+			weaponName = "melee attack"
+		}
+		if damageDice == "" {
+			damageDice = "1d6"
+		}
+		if attackMod == 0 {
+			attackMod = 3 // Default +3 for a basic monster
+		}
+		
+	} else {
+		// Player character opportunity attack
+		if req.AttackerID == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_request",
+				"message": "attacker_id required for character opportunity attacks",
+			})
+			return
+		}
+		
+		// Get attacker info and check reaction
+		var attackerLobbyID int
+		var str, dex, level int
+		var reactionUsed bool
+		err = db.QueryRow(`
+			SELECT name, lobby_id, str, dex, level, COALESCE(reaction_used, false)
+			FROM characters WHERE id = $1
+		`, req.AttackerID).Scan(&attackerName, &attackerLobbyID, &str, &dex, &level, &reactionUsed)
+		
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_not_found"})
+			return
+		}
+		
+		if attackerLobbyID != campaignID {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_not_in_campaign"})
+			return
+		}
+		
+		// Check if reaction is available
+		if reactionUsed {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_reaction",
+				"message": fmt.Sprintf("%s has already used their reaction this round", attackerName),
+			})
+			return
+		}
+		
+		// Mark reaction as used
+		db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.AttackerID)
+		
+		// Determine weapon and modifiers
+		attackMod = modifier(str)
+		damageMod = modifier(str)
+		damageDice = "1d6"
+		weaponName = "unarmed strike"
+		
+		// Check for weapon in request or default to equipped weapon
+		if req.Weapon != "" {
+			weaponKey := strings.ToLower(strings.ReplaceAll(req.Weapon, " ", "-"))
+			if weapon, ok := srdWeapons[weaponKey]; ok {
+				weaponName = weapon.Name
+				damageDice = weapon.Damage
+				if weapon.Type == "ranged" || containsProperty(weapon.Properties, "finesse") {
+					attackMod = modifier(dex)
+					damageMod = modifier(dex)
+				}
+			}
+		}
+		
+		// Add proficiency bonus
+		attackMod += proficiencyBonus(level)
+	}
+	
+	// Roll the attack
+	attackRoll := rollDie(20)
+	totalAttack := attackRoll + attackMod
+	
+	var resultText string
+	var hit bool
+	var damage int
+	
+	if attackRoll == 1 {
+		// Critical miss
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d (nat 1 - Critical Miss!)", 
+			attackerName, targetName, totalAttack)
+		hit = false
+	} else if attackRoll == 20 {
+		// Critical hit - double damage dice
+		damage = rollDamage(damageDice, true) + damageMod
+		if damage < 1 {
+			damage = 1
+		}
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d with %s", 
+			attackerName, targetName, totalAttack, damage, weaponName)
+		hit = true
+	} else if totalAttack >= targetAC {
+		// Normal hit
+		damage = rollDamage(damageDice, false) + damageMod
+		if damage < 1 {
+			damage = 1
+		}
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
+			attackerName, targetName, totalAttack, targetAC, damage, weaponName)
+		hit = true
+	} else {
+		// Miss
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d vs AC %d - MISS!", 
+			attackerName, targetName, totalAttack, targetAC)
+		hit = false
+	}
+	
+	// Apply damage to target if hit
+	if hit && damage > 0 {
+		var currentHP int
+		db.QueryRow(`SELECT hp FROM characters WHERE id = $1`, req.TargetID).Scan(&currentHP)
+		newHP := currentHP - damage
+		if newHP < 0 {
+			newHP = 0
+		}
+		db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, req.TargetID)
+		
+		if newHP == 0 {
+			resultText += fmt.Sprintf(" %s falls to 0 HP!", targetName)
+		} else {
+			resultText += fmt.Sprintf(" (%s: %d → %d HP)", targetName, currentHP, newHP)
+		}
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Opportunity attack by %s against %s", attackerName, targetName)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'opportunity_attack', $2, $3)
+	`, campaignID, actionDesc, resultText)
+	
+	response := map[string]interface{}{
+		"success":     true,
+		"attacker":    attackerName,
+		"target":      targetName,
+		"attack_roll": attackRoll,
+		"attack_mod":  attackMod,
+		"total":       totalAttack,
+		"target_ac":   targetAC,
+		"hit":         hit,
+		"result":      resultText,
+	}
+	
+	if hit {
+		response["damage"] = damage
+		response["weapon"] = weaponName
+	}
+	
+	if !req.AttackerIsMonster {
+		response["reaction_used"] = true
+		response["note"] = fmt.Sprintf("%s's reaction is now expended for this round", attackerName)
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleCampaignMessages godoc
 // @Summary Get or post campaign messages
 // @Description Get campaign messages (GET) or post a new message (POST). Available before campaign starts.
@@ -7791,21 +8141,33 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	// Advance turn
 	turnIndex++
+	newRound := false
 	if turnIndex >= len(entries) {
 		turnIndex = 0
 		round++
+		newRound = true
+		
+		// Reset reactions for all characters in campaign (start of new round)
+		db.Exec(`UPDATE characters SET reaction_used = false WHERE lobby_id = $1`, campaignID)
 	}
 	
 	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":         true,
 		"skipped":         skippedName,
 		"inactive_minutes": elapsedMinutes,
 		"round":           round,
 		"current_turn":    entries[turnIndex].Name,
 		"turn_index":      turnIndex,
-	})
+	}
+	
+	if newRound {
+		response["new_round"] = true
+		response["reactions_reset"] = true
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleCombatAdd godoc
