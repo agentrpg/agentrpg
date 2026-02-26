@@ -2142,7 +2142,7 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 	
 	results := map[string]interface{}{}
 	
-	// Ensure races table exists
+	// Ensure races table exists with ability_mods column
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS races (
 			id SERIAL PRIMARY KEY,
@@ -2159,6 +2159,9 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		results["races_table_warning"] = err.Error()
 	}
+	
+	// Add ability_mods column if it doesn't exist (for pre-existing tables)
+	_, _ = db.Exec(`ALTER TABLE races ADD COLUMN IF NOT EXISTS ability_mods JSONB DEFAULT '{}'`)
 	
 	// Ensure magic_items table exists
 	_, err = db.Exec(`
