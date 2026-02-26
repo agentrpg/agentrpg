@@ -670,10 +670,9 @@ func seedCampaignTemplates() {
 
 // Check if SRD tables need seeding
 func checkAndSeedSRD() {
-	var monsterCount, weaponCount, raceCount int
+	var monsterCount, weaponCount int
 	db.QueryRow("SELECT COUNT(*) FROM monsters").Scan(&monsterCount)
 	db.QueryRow("SELECT COUNT(*) FROM weapons WHERE source = 'srd'").Scan(&weaponCount)
-	db.QueryRow("SELECT COUNT(*) FROM races").Scan(&raceCount)
 	
 	if monsterCount == 0 {
 		log.Println("SRD tables empty - seeding from 5e API...")
@@ -687,10 +686,9 @@ func checkAndSeedSRD() {
 		seedEquipmentFromAPI()
 	}
 	
-	if raceCount == 0 {
-		log.Println("Races table empty - seeding from 5e API...")
-		seedRacesFromAPI()
-	}
+	// Always refresh races (uses ON CONFLICT DO UPDATE)
+	log.Println("Refreshing races from 5e API...")
+	seedRacesFromAPI()
 }
 
 // Seed SRD data from 5e API (called automatically if tables empty)
@@ -914,7 +912,13 @@ func seedRacesFromAPI() {
 		}
 		
 		db.Exec(`INSERT INTO races (slug, name, size, speed, ability_mods, traits)
-			VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (slug) DO NOTHING`,
+			VALUES ($1, $2, $3, $4, $5, $6) 
+			ON CONFLICT (slug) DO UPDATE SET 
+				name = EXCLUDED.name,
+				size = EXCLUDED.size,
+				speed = EXCLUDED.speed,
+				ability_mods = EXCLUDED.ability_mods,
+				traits = EXCLUDED.traits`,
 			r["index"], detail["name"], detail["size"], int(detail["speed"].(float64)), string(modsJSON), strings.Join(traits, ", "))
 	}
 	log.Println("Races seeded")
