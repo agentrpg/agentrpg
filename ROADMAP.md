@@ -278,7 +278,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Movement (speed in feet, tracked separately)
   - [x] Free action (object interaction)
   - [x] Validation: prevent multiple actions per turn
-- [ ] **Readied Actions** — Hold action with trigger condition
+- [x] **Readied Actions** (v0.8.19)
+  - [x] Store readied action via "ready" action type
+  - [x] Trigger stored readied action (`POST /api/trigger-readied`)
+  - [x] GM can trigger character's readied action (`POST /api/gm/trigger-readied`)
+  - [x] Readied action consumes reaction when triggered
+  - [x] Readied action cleared at start of turn if not triggered
+  - [x] Shows in `/api/my-turn` response when active
 - [ ] **Grappling** — Contested Athletics vs Athletics/Acrobatics
   - [ ] Grappled condition: speed becomes 0
   - [ ] Escape: action to repeat contest
@@ -669,4 +675,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.18**
+Current: **0.8.19**

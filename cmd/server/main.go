@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.18"
+const version = "0.8.19"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -179,6 +179,8 @@ func main() {
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
+	http.HandleFunc("/api/trigger-readied", handleTriggerReadied)
+	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -471,6 +473,11 @@ func initDB() {
 		-- Ammunition tracking (v0.8.18)
 		-- Tracks ammo used since last rest for recovery calculation
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS ammo_used_since_rest INTEGER DEFAULT 0;
+		
+		-- Readied Actions (v0.8.19)
+		-- Stores a readied action: {"trigger": "when goblin attacks", "action": "attack", "description": "swing at it"}
+		-- Cleared at start of turn, triggered via reaction
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS readied_action JSONB;
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -5123,6 +5130,16 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		reactionStatus = "Your reaction has been used this round."
 	}
 	
+	// Check for readied action
+	var readiedActionJSON []byte
+	db.QueryRow("SELECT readied_action FROM characters WHERE id = $1", charID).Scan(&readiedActionJSON)
+	var readiedAction map[string]string
+	hasReadiedAction := false
+	if readiedActionJSON != nil && string(readiedActionJSON) != "null" {
+		json.Unmarshal(readiedActionJSON, &readiedAction)
+		hasReadiedAction = len(readiedAction) > 0
+	}
+	
 	// Action economy status (for in-combat turns)
 	actionStatus := "You have your action available."
 	if actionUsed {
@@ -5190,6 +5207,25 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		response["combat"] = combatInfo
 		if !isMyTurn {
 			response["message"] = fmt.Sprintf("It's not your turn. Current turn: %s", combatInfo["current_turn"])
+		}
+	}
+	
+	// Add readied action info if one is set
+	if hasReadiedAction {
+		readiedInfo := map[string]interface{}{
+			"trigger":     readiedAction["trigger"],
+			"action":      readiedAction["action"],
+			"description": readiedAction["description"],
+			"how_to_trigger": "POST /api/trigger-readied when your trigger condition occurs (costs your reaction)",
+		}
+		response["readied_action"] = readiedInfo
+		
+		// Update action economy to show readied action
+		if opts, ok := response["your_options"].(map[string]interface{}); ok {
+			if ae, ok := opts["action_economy"].(map[string]interface{}); ok {
+				ae["has_readied_action"] = true
+				ae["readied_trigger"] = readiedAction["trigger"]
+			}
 		}
 	}
 	
@@ -9669,10 +9705,12 @@ func consumeActionResource(charID int, resourceType string, movementCost int) {
 func resetTurnResources(charID int, raceSpeed int) {
 	db.Exec(`
 		UPDATE characters 
-		SET action_used = false, bonus_action_used = false, movement_remaining = $1
+		SET action_used = false, bonus_action_used = false, movement_remaining = $1,
+		    readied_action = NULL
 		WHERE id = $2
 	`, raceSpeed, charID)
 	// Note: reaction_used resets at start of YOUR turn, not when turn advances to you
+	// Note: readied_action is also cleared - if not triggered, it's lost
 }
 
 // Reset reaction at start of character's turn
@@ -10387,6 +10425,55 @@ func resolveAction(action, description string, charID int) string {
 		return fmt.Sprintf("Offhand attack with %s%s: %d to hit%s. Damage: %d (TWF - no ability modifier)", 
 			weapon.Name, profInfo, totalAttack, rollInfo, dmg)
 	
+	case "ready":
+		// Ready action: hold your action for a trigger condition
+		// Parse trigger from description (format: "trigger: X, action: Y" or just describe it)
+		trigger := ""
+		readyAction := ""
+		readyDesc := description
+		
+		// Try to parse structured format: "trigger: when goblin attacks; action: attack with sword"
+		descLower := strings.ToLower(description)
+		if strings.Contains(descLower, "trigger:") {
+			parts := strings.SplitN(description, ";", 2)
+			if len(parts) >= 1 {
+				triggerPart := strings.TrimPrefix(strings.TrimPrefix(parts[0], "trigger:"), "Trigger:")
+				trigger = strings.TrimSpace(triggerPart)
+			}
+			if len(parts) >= 2 {
+				actionPart := strings.TrimPrefix(strings.TrimPrefix(parts[1], "action:"), "Action:")
+				actionPart = strings.TrimSpace(actionPart)
+				// Parse action type from description
+				for _, aType := range []string{"attack", "cast", "dash", "disengage", "help", "hide"} {
+					if strings.Contains(strings.ToLower(actionPart), aType) {
+						readyAction = aType
+						readyDesc = actionPart
+						break
+					}
+				}
+			}
+		}
+		
+		if trigger == "" {
+			trigger = description
+		}
+		if readyAction == "" {
+			// Default to "other" action type if not specified
+			readyAction = "other"
+		}
+		
+		// Store the readied action
+		readiedData := map[string]string{
+			"trigger":     trigger,
+			"action":      readyAction,
+			"description": readyDesc,
+		}
+		readiedJSON, _ := json.Marshal(readiedData)
+		db.Exec("UPDATE characters SET readied_action = $1 WHERE id = $2", readiedJSON, charID)
+		
+		return fmt.Sprintf("Readied action: When '%s' → %s (%s). Use your REACTION to trigger when the condition occurs, or it will be lost at the start of your next turn.", 
+			trigger, readyAction, readyDesc)
+	
 	default:
 		return fmt.Sprintf("Action: %s", description)
 	}
@@ -10657,6 +10744,196 @@ func rollDamage(dice string, critical bool) int {
 	
 	_, total := rollDice(count, sides)
 	return total
+}
+
+// handleTriggerReadied godoc
+// @Summary Trigger your readied action
+// @Description When the trigger condition for your readied action occurs, use this endpoint to execute it. Costs your reaction.
+// @Tags Actions
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Readied action result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "No readied action or reaction already used"
+// @Router /trigger-readied [post]
+func handleTriggerReadied(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find the character's active game
+	var charID, lobbyID int
+	err = db.QueryRow(`
+		SELECT c.id, c.lobby_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.agent_id = $1 AND l.status = 'active'
+	`, agentID).Scan(&charID, &lobbyID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_active_game"})
+		return
+	}
+	
+	// Check for readied action
+	var readiedJSON []byte
+	err = db.QueryRow("SELECT readied_action FROM characters WHERE id = $1", charID).Scan(&readiedJSON)
+	if err != nil || readiedJSON == nil || string(readiedJSON) == "null" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "no_readied_action",
+			"message": "You don't have a readied action. Use 'ready' action first with a trigger condition.",
+		})
+		return
+	}
+	
+	var readied map[string]string
+	json.Unmarshal(readiedJSON, &readied)
+	
+	// Check if reaction is available
+	var reactionUsed bool
+	db.QueryRow("SELECT COALESCE(reaction_used, false) FROM characters WHERE id = $1", charID).Scan(&reactionUsed)
+	if reactionUsed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        false,
+			"error":          "reaction_used",
+			"message":        "You have already used your reaction this round.",
+			"readied_action": readied,
+			"hint":           "Your readied action is still set, but you can't trigger it until your reaction refreshes.",
+		})
+		return
+	}
+	
+	// Execute the readied action
+	result := resolveAction(readied["action"], readied["description"], charID)
+	
+	// Consume reaction and clear readied action
+	db.Exec("UPDATE characters SET reaction_used = true, readied_action = NULL WHERE id = $1", charID)
+	
+	// Log the action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, charID, "readied_"+readied["action"], 
+		fmt.Sprintf("Triggered: %s → %s", readied["trigger"], readied["description"]), result)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":          true,
+		"trigger":          readied["trigger"],
+		"action":           readied["action"],
+		"result":           result,
+		"reaction_consumed": true,
+		"message":          fmt.Sprintf("Readied action triggered! Trigger: '%s' → %s", readied["trigger"], result),
+	})
+}
+
+// handleGMTriggerReadied godoc
+// @Summary GM triggers a character's readied action
+// @Description When a player's trigger condition occurs during narration, GM can trigger their readied action. Costs the character's reaction.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer} true "Character whose readied action to trigger"
+// @Success 200 {object} map[string]interface{} "Readied action result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Not a GM or no readied action"
+// @Router /gm/trigger-readied [post]
+func handleGMTriggerReadied(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int `json:"character_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	// Verify agent is DM of the campaign containing this character
+	var lobbyID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1 AND l.dm_id = $2 AND l.status = 'active'
+	`, req.CharacterID, agentID).Scan(&lobbyID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm_or_no_character",
+			"message": "Either you're not the DM of this campaign, or the character doesn't exist in an active campaign.",
+		})
+		return
+	}
+	
+	// Check for readied action
+	var readiedJSON []byte
+	var charName string
+	err = db.QueryRow("SELECT name, readied_action FROM characters WHERE id = $1", req.CharacterID).Scan(&charName, &readiedJSON)
+	if err != nil || readiedJSON == nil || string(readiedJSON) == "null" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "no_readied_action",
+			"message": fmt.Sprintf("%s doesn't have a readied action.", charName),
+		})
+		return
+	}
+	
+	var readied map[string]string
+	json.Unmarshal(readiedJSON, &readied)
+	
+	// Check if reaction is available
+	var reactionUsed bool
+	db.QueryRow("SELECT COALESCE(reaction_used, false) FROM characters WHERE id = $1", req.CharacterID).Scan(&reactionUsed)
+	if reactionUsed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        false,
+			"error":          "reaction_used",
+			"message":        fmt.Sprintf("%s has already used their reaction this round.", charName),
+			"readied_action": readied,
+		})
+		return
+	}
+	
+	// Execute the readied action
+	result := resolveAction(readied["action"], readied["description"], req.CharacterID)
+	
+	// Consume reaction and clear readied action
+	db.Exec("UPDATE characters SET reaction_used = true, readied_action = NULL WHERE id = $1", req.CharacterID)
+	
+	// Log the action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "readied_"+readied["action"], 
+		fmt.Sprintf("GM triggered: %s → %s", readied["trigger"], readied["description"]), result)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"character":         charName,
+		"trigger":           readied["trigger"],
+		"action":            readied["action"],
+		"result":            result,
+		"reaction_consumed": true,
+		"message":           fmt.Sprintf("%s's readied action triggered! '%s' → %s", charName, readied["trigger"], result),
+	})
 }
 
 // handleObserve godoc
