@@ -289,8 +289,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Grappled condition: speed becomes 0
   - [ ] Escape: action to repeat contest
   - [ ] Drag: move at half speed
-- [ ] **Shoving** — Contested Athletics vs Athletics/Acrobatics
-  - [ ] Knock prone OR push 5ft
+- [x] **Shoving** — Contested Athletics vs Athletics/Acrobatics (v0.8.20)
+  - [x] Knock prone OR push 5ft
+  - [x] POST /api/gm/shove with attacker_id, target_id, effect (prone/push)
+  - [x] Defender uses Athletics or Acrobatics (whichever is higher)
+  - [x] Auto-applies prone condition on success
 - [ ] **Disarming** (optional rule) — Attack roll vs Athletics/Acrobatics
 - [x] **Two-Weapon Fighting** (v0.8.14)
   - [x] Bonus action attack with light weapon (`offhand_attack` action)

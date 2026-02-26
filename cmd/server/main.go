@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.19"
+const version = "0.8.20"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -166,6 +166,7 @@ func main() {
 	http.HandleFunc("/api/gm/tool-check", handleGMToolCheck)
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
 	http.HandleFunc("/api/gm/contested-check", handleGMContestedCheck)
+	http.HandleFunc("/api/gm/shove", handleGMShove)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/gm/gold", handleGMGold)
@@ -7328,6 +7329,191 @@ func handleGMContestedCheck(w http.ResponseWriter, r *http.Request) {
 			},
 		},
 	})
+}
+
+// handleGMShove godoc
+// @Summary Resolve a shove attempt
+// @Description GM resolves a shove attack. Attacker contests Athletics vs target's Athletics or Acrobatics. On success: knock prone OR push 5ft.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{attacker_id=int,target_id=int,effect=string} true "Shove details (effect: 'prone' or 'push')"
+// @Success 200 {object} map[string]interface{} "Shove result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/shove [post]
+func handleGMShove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		AttackerID int    `json:"attacker_id"`
+		TargetID   int    `json:"target_id"`
+		Effect     string `json:"effect"` // "prone" or "push"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.AttackerID == 0 || req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_id and target_id required"})
+		return
+	}
+	
+	// Validate effect
+	effect := strings.ToLower(req.Effect)
+	if effect != "prone" && effect != "push" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_effect",
+			"message": "Effect must be 'prone' or 'push'",
+		})
+		return
+	}
+	
+	// Get attacker stats
+	var attackerName string
+	var attackerStr, attackerDex, attackerLevel, attackerLobby int
+	err = db.QueryRow(`SELECT name, str, dex, level, lobby_id FROM characters WHERE id = $1`, req.AttackerID).
+		Scan(&attackerName, &attackerStr, &attackerDex, &attackerLevel, &attackerLobby)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_not_found"})
+		return
+	}
+	
+	// Get target stats
+	var targetName string
+	var targetStr, targetDex, targetLevel, targetLobby int
+	err = db.QueryRow(`SELECT name, str, dex, level, lobby_id FROM characters WHERE id = $1`, req.TargetID).
+		Scan(&targetName, &targetStr, &targetDex, &targetLevel, &targetLobby)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_found"})
+		return
+	}
+	
+	// Verify both are in this campaign
+	if attackerLobby != campaignID || targetLobby != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "characters_not_in_campaign"})
+		return
+	}
+	
+	// Calculate attacker's Athletics modifier
+	attackerMod := modifier(attackerStr) + proficiencyBonus(attackerLevel)
+	
+	// Calculate target's choice of Athletics or Acrobatics (use higher)
+	targetAthMod := modifier(targetStr) + proficiencyBonus(targetLevel)
+	targetAcrMod := modifier(targetDex) + proficiencyBonus(targetLevel)
+	targetMod := targetAthMod
+	targetSkill := "Athletics"
+	if targetAcrMod > targetAthMod {
+		targetMod = targetAcrMod
+		targetSkill = "Acrobatics"
+	}
+	
+	// Roll the contest
+	attackerRoll := rollDie(20)
+	targetRoll := rollDie(20)
+	
+	attackerTotal := attackerRoll + attackerMod
+	targetTotal := targetRoll + targetMod
+	
+	// Determine winner (ties go to defender)
+	success := attackerTotal > targetTotal
+	
+	resultText := fmt.Sprintf("Shove: %s Athletics (%d + %d = %d) vs %s %s (%d + %d = %d)",
+		attackerName, attackerRoll, attackerMod, attackerTotal,
+		targetName, targetSkill, targetRoll, targetMod, targetTotal)
+	
+	response := map[string]interface{}{
+		"success": success,
+		"attacker": map[string]interface{}{
+			"name":     attackerName,
+			"roll":     attackerRoll,
+			"modifier": attackerMod,
+			"total":    attackerTotal,
+		},
+		"defender": map[string]interface{}{
+			"name":     targetName,
+			"skill":    targetSkill,
+			"roll":     targetRoll,
+			"modifier": targetMod,
+			"total":    targetTotal,
+		},
+	}
+	
+	if success {
+		if effect == "prone" {
+			// Add prone condition to target
+			var conditionsJSON []byte
+			db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", req.TargetID).Scan(&conditionsJSON)
+			var conditions []string
+			json.Unmarshal(conditionsJSON, &conditions)
+			
+			// Check if already prone
+			alreadyProne := false
+			for _, c := range conditions {
+				if strings.ToLower(c) == "prone" {
+					alreadyProne = true
+					break
+				}
+			}
+			
+			if !alreadyProne {
+				conditions = append(conditions, "prone")
+				updatedJSON, _ := json.Marshal(conditions)
+				db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, req.TargetID)
+			}
+			
+			resultText += fmt.Sprintf(" → %s is knocked PRONE!", targetName)
+			response["effect_applied"] = "prone"
+			response["message"] = fmt.Sprintf("%s shoves %s to the ground!", attackerName, targetName)
+		} else {
+			// Push effect - position tracking is outside our scope, just report success
+			resultText += fmt.Sprintf(" → %s is pushed 5 feet!", targetName)
+			response["effect_applied"] = "push"
+			response["push_distance"] = "5ft"
+			response["message"] = fmt.Sprintf("%s shoves %s back 5 feet!", attackerName, targetName)
+		}
+	} else {
+		resultText += fmt.Sprintf(" → %s resists the shove!", targetName)
+		response["message"] = fmt.Sprintf("%s fails to shove %s!", attackerName, targetName)
+	}
+	
+	response["result"] = resultText
+	
+	// Record the action
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'shove', $3, $4)`,
+		campaignID, req.AttackerID, fmt.Sprintf("Shove %s (%s)", targetName, effect), resultText)
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleGMUpdateCharacter godoc
