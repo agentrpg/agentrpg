@@ -422,6 +422,16 @@ func initDB() {
 		-- Magic item attunement (max 3 attuned items per character)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attuned_items JSONB DEFAULT '[]';
 		
+		-- Hit Dice tracking (Short/Long Rest - Phase 8 P0)
+		-- hit_dice_spent tracks how many dice have been used (recovers half on long rest)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS hit_dice_spent INTEGER DEFAULT 0;
+		
+		-- Last long rest timestamp (only one long rest per 24 hours)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS last_long_rest TIMESTAMP;
+		
+		-- Exhaustion level (0-6, 6 = death)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS exhaustion_level INTEGER DEFAULT 0;
+		
 		-- Spells: ritual casting and area of effect support
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS is_ritual BOOLEAN DEFAULT FALSE;
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS aoe_shape VARCHAR(20);
@@ -1310,6 +1320,23 @@ func getSpellSlots(class string, level int) map[int]int {
 	}
 	
 	return map[int]int{} // Non-casters have no slots
+}
+
+// getHitDie returns the hit die size for a class (e.g., "d10" for Fighter)
+func getHitDie(class string) int {
+	class = strings.ToLower(class)
+	switch class {
+	case "barbarian":
+		return 12
+	case "fighter", "paladin", "ranger":
+		return 10
+	case "bard", "cleric", "druid", "monk", "rogue", "warlock":
+		return 8
+	case "sorcerer", "wizard":
+		return 6
+	default:
+		return 8 // Default to d8
+	}
 }
 
 // Roll initiative for a character
@@ -10756,6 +10783,27 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// Get current turn info
+	var currentTurnName string
+	var turnOrderJSON []byte
+	var combatRound, turnIndex int
+	var combatActive bool
+	err = db.QueryRow(`
+		SELECT round_number, current_turn_index, turn_order, active
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&combatRound, &turnIndex, &turnOrderJSON, &combatActive)
+	
+	if err == nil && combatActive && len(turnOrderJSON) > 0 {
+		type TurnEntry struct {
+			ID   int    `json:"id"`
+			Name string `json:"name"`
+		}
+		var entries []TurnEntry
+		if json.Unmarshal(turnOrderJSON, &entries) == nil && turnIndex < len(entries) {
+			currentTurnName = entries[turnIndex].Name
+		}
+	}
+	
 	// Get party members
 	var party strings.Builder
 	partyRows, _ := db.Query(`
@@ -10937,6 +10985,11 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		actionsHTML = actions.String()
 	}
 	
+	turnInfoHTML := ""
+	if currentTurnName != "" {
+		turnInfoHTML = fmt.Sprintf(`<p class="turn-info" style="background:var(--note-bg);padding:1em;border-radius:8px;margin-top:1em;border-left:4px solid #ffc107;"><strong>⏳ Current Turn:</strong> <span style="font-size:1.2em;font-weight:bold;">%s</span></p>`, currentTurnName)
+	}
+	
 	content := fmt.Sprintf(`
 <style>
 .campaign-header{margin-bottom:2em}
@@ -10981,6 +11034,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
     <strong>Players:</strong> %d/%d |
     <strong>Started:</strong> %s
   </p>
+  %s
 </div>
 
 <div class="section">
@@ -11005,7 +11059,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 
 <p class="muted"><a href="/api/campaigns/%d">View raw API data →</a></p>
 `, name, statusBadge, dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("January 2, 2006"),
-		setting, partyHTML, obsHTML, actionsHTML, campaignID)
+		turnInfoHTML, setting, partyHTML, obsHTML, actionsHTML, campaignID)
 	
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
