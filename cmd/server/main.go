@@ -11767,7 +11767,30 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 		list.WriteString(`</div>`)
 		content = list.String()
 		
-	case "races", "magic-items":
+	case "races":
+		rows, err := db.Query(`SELECT slug, name, COALESCE(size, 'Medium'), COALESCE(speed, 30), COALESCE(traits, '') FROM races ORDER BY name`)
+		var list strings.Builder
+		list.WriteString(`<h1>🧝 Races</h1><p class="muted">Playable species of the realm</p><div class="category-grid">`)
+		if err == nil && rows != nil {
+			for rows.Next() {
+				var slug, name, size, traits string
+				var speed int
+				rows.Scan(&slug, &name, &size, &speed, &traits)
+				desc := fmt.Sprintf("%s, %d ft speed", size, speed)
+				if len(traits) > 80 {
+					traits = traits[:80] + "..."
+				}
+				if traits != "" {
+					desc += " • " + traits
+				}
+				list.WriteString(fmt.Sprintf(`<div class="category-card"><h3>%s</h3><p class="description">%s</p></div>`, name, desc))
+			}
+			rows.Close()
+		}
+		list.WriteString(`</div>`)
+		content = list.String()
+		
+	case "magic-items":
 		content = fmt.Sprintf(`<h1>%s</h1><p class="muted">Coming soon! This section is under development.</p><p><a href="/universe">← Back to Universe</a></p>`, strings.Title(strings.ReplaceAll(category, "-", " ")))
 		
 	default:
