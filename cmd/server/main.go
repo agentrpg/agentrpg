@@ -210,6 +210,8 @@ func main() {
 	http.HandleFunc("/character/", handleCharacterSheet)
 	http.HandleFunc("/campaigns", handleCampaignsPage)
 	http.HandleFunc("/campaign/", handleCampaignPage)
+	http.HandleFunc("/universe", handleUniversePage)
+	http.HandleFunc("/universe/", handleUniverseDetailPage)
 	http.HandleFunc("/about", handleAbout)
 	http.HandleFunc("/how-it-works", handleHowItWorks)
 	http.HandleFunc("/how-it-works/", handleHowItWorksDoc)
@@ -11458,6 +11460,320 @@ func handleCharacterSheet(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
 
+func handleUniversePage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	// Get counts from database
+	var monsterCount, spellCount, classCount, raceCount, weaponCount, armorCount, magicItemCount int
+	db.QueryRow("SELECT COUNT(*) FROM monsters").Scan(&monsterCount)
+	db.QueryRow("SELECT COUNT(*) FROM spells").Scan(&spellCount)
+	db.QueryRow("SELECT COUNT(*) FROM classes").Scan(&classCount)
+	db.QueryRow("SELECT COUNT(*) FROM races").Scan(&raceCount)
+	db.QueryRow("SELECT COUNT(*) FROM weapons").Scan(&weaponCount)
+	db.QueryRow("SELECT COUNT(*) FROM armor").Scan(&armorCount)
+	db.QueryRow("SELECT COUNT(*) FROM magic_items").Scan(&magicItemCount)
+	
+	content := fmt.Sprintf(`
+<style>
+.universe-header { margin-bottom: 2em; }
+.search-box { width: 100%%; padding: 12px; font-size: 16px; border: 2px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); margin-bottom: 2em; }
+.search-box:focus { outline: none; border-color: var(--link); }
+.category-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5em; margin-bottom: 2em; }
+.category-card { background: var(--note-bg); border: 1px solid var(--note-border); border-radius: 12px; padding: 1.5em; transition: transform 0.2s, box-shadow 0.2s; }
+.category-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+.category-card h3 { margin: 0 0 0.5em 0; display: flex; align-items: center; gap: 0.5em; }
+.category-card .icon { font-size: 1.5em; }
+.category-card .count { color: var(--muted); font-size: 0.9em; }
+.category-card .description { color: var(--muted); font-size: 0.9em; margin-top: 0.5em; }
+.category-card a { text-decoration: none; color: inherit; display: block; }
+.search-results { display: none; }
+.search-results.active { display: block; }
+.result-item { padding: 1em; border-bottom: 1px solid var(--border); }
+.result-item:last-child { border-bottom: none; }
+.result-item .type { color: var(--muted); font-size: 0.8em; text-transform: uppercase; }
+.result-item h4 { margin: 0.25em 0; }
+.result-item .preview { color: var(--muted); font-size: 0.9em; }
+#results-container { background: var(--note-bg); border: 1px solid var(--note-border); border-radius: 8px; max-height: 400px; overflow-y: auto; }
+.no-results { padding: 2em; text-align: center; color: var(--muted); }
+</style>
+
+<div class="universe-header">
+  <h1>🌌 Universe Compendium</h1>
+  <p class="muted">Explore the 5e SRD content available for your adventures. All content is licensed under CC-BY-4.0.</p>
+</div>
+
+<input type="text" class="search-box" id="universe-search" placeholder="🔍 Search monsters, spells, classes, items..." oninput="searchUniverse(this.value)">
+
+<div id="results-container" class="search-results"></div>
+
+<div class="category-grid" id="categories">
+  <div class="category-card">
+    <a href="/universe/monsters">
+      <h3><span class="icon">👹</span> Monsters</h3>
+      <span class="count">%d creatures</span>
+      <p class="description">Dragons, demons, and denizens of the deep.</p>
+    </a>
+  </div>
+  
+  <div class="category-card">
+    <a href="/universe/spells">
+      <h3><span class="icon">✨</span> Spells</h3>
+      <span class="count">%d spells</span>
+      <p class="description">Arcane and divine magic from cantrips to 9th level.</p>
+    </a>
+  </div>
+  
+  <div class="category-card">
+    <a href="/universe/classes">
+      <h3><span class="icon">⚔️</span> Classes</h3>
+      <span class="count">%d classes</span>
+      <p class="description">Barbarian, Bard, Cleric, and more character paths.</p>
+    </a>
+  </div>
+  
+  <div class="category-card">
+    <a href="/universe/races">
+      <h3><span class="icon">🧝</span> Races</h3>
+      <span class="count">%d races</span>
+      <p class="description">Elves, Dwarves, Humans, and other peoples.</p>
+    </a>
+  </div>
+  
+  <div class="category-card">
+    <a href="/universe/weapons">
+      <h3><span class="icon">🗡️</span> Weapons</h3>
+      <span class="count">%d weapons</span>
+      <p class="description">Swords, bows, axes, and instruments of war.</p>
+    </a>
+  </div>
+  
+  <div class="category-card">
+    <a href="/universe/armor">
+      <h3><span class="icon">🛡️</span> Armor</h3>
+      <span class="count">%d armor types</span>
+      <p class="description">Protection from leather to plate.</p>
+    </a>
+  </div>
+  
+  <div class="category-card">
+    <a href="/universe/magic-items">
+      <h3><span class="icon">💎</span> Magic Items</h3>
+      <span class="count">%d items</span>
+      <p class="description">Wondrous items, potions, and artifacts.</p>
+    </a>
+  </div>
+</div>
+
+<script>
+let searchTimeout;
+function searchUniverse(query) {
+  clearTimeout(searchTimeout);
+  const container = document.getElementById('results-container');
+  const categories = document.getElementById('categories');
+  
+  if (query.length < 2) {
+    container.classList.remove('active');
+    categories.style.display = 'grid';
+    return;
+  }
+  
+  searchTimeout = setTimeout(async () => {
+    categories.style.display = 'none';
+    container.classList.add('active');
+    container.innerHTML = '<div class="no-results">Searching...</div>';
+    
+    try {
+      const [monsters, spells, weapons] = await Promise.all([
+        fetch('/api/universe/monsters/search?q=' + encodeURIComponent(query)).then(r => r.json()),
+        fetch('/api/universe/spells/search?q=' + encodeURIComponent(query)).then(r => r.json()),
+        fetch('/api/universe/weapons/search?q=' + encodeURIComponent(query)).then(r => r.json())
+      ]);
+      
+      let html = '';
+      
+      if (monsters.monsters) {
+        monsters.monsters.slice(0, 5).forEach(m => {
+          html += '<div class="result-item"><span class="type">👹 Monster</span><h4><a href="/universe/monsters/' + m.id + '">' + m.name + '</a></h4><p class="preview">CR ' + m.challenge_rating + ' • ' + m.type + '</p></div>';
+        });
+      }
+      
+      if (spells.spells) {
+        spells.spells.slice(0, 5).forEach(s => {
+          html += '<div class="result-item"><span class="type">✨ Spell</span><h4><a href="/universe/spells/' + s.id + '">' + s.name + '</a></h4><p class="preview">Level ' + s.level + ' ' + s.school + '</p></div>';
+        });
+      }
+      
+      if (weapons.weapons) {
+        weapons.weapons.slice(0, 5).forEach(w => {
+          html += '<div class="result-item"><span class="type">🗡️ Weapon</span><h4>' + w.name + '</h4><p class="preview">' + w.damage + ' ' + w.damage_type + '</p></div>';
+        });
+      }
+      
+      if (html === '') {
+        html = '<div class="no-results">No results found for "' + query + '"</div>';
+      }
+      
+      container.innerHTML = html;
+    } catch (e) {
+      container.innerHTML = '<div class="no-results">Search error. Try again.</div>';
+    }
+  }, 300);
+}
+</script>
+`, monsterCount, spellCount, classCount, raceCount, weaponCount, armorCount, magicItemCount)
+	
+	fmt.Fprint(w, wrapHTML("Universe - Agent RPG", content))
+}
+
+func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	path := strings.TrimPrefix(r.URL.Path, "/universe/")
+	parts := strings.SplitN(path, "/", 2)
+	category := parts[0]
+	
+	var content string
+	
+	switch category {
+	case "monsters":
+		if len(parts) > 1 {
+			// Individual monster
+			id, _ := strconv.Atoi(parts[1])
+			var name, monsterType, size, alignment, description string
+			var cr string
+			var hp, ac int
+			err := db.QueryRow(`SELECT name, type, size, alignment, COALESCE(description, ''), challenge_rating, hit_points, armor_class FROM monsters WHERE id = $1`, id).Scan(&name, &monsterType, &size, &alignment, &description, &cr, &hp, &ac)
+			if err != nil {
+				http.Error(w, "Monster not found", http.StatusNotFound)
+				return
+			}
+			content = fmt.Sprintf(`<h1>👹 %s</h1><p class="muted">%s %s, %s</p><div class="note"><strong>CR:</strong> %s | <strong>HP:</strong> %d | <strong>AC:</strong> %d</div><p>%s</p><p><a href="/universe/monsters">← Back to Monsters</a></p>`, name, size, monsterType, alignment, cr, hp, ac, description)
+		} else {
+			// Monster list
+			rows, _ := db.Query(`SELECT id, name, type, challenge_rating FROM monsters ORDER BY name LIMIT 100`)
+			var list strings.Builder
+			list.WriteString(`<h1>👹 Monsters</h1><p class="muted">Creatures of the 5e SRD</p><input type="text" class="search-box" placeholder="Filter monsters..." oninput="filterList(this.value)"><div id="item-list">`)
+			for rows.Next() {
+				var id int
+				var name, monsterType, cr string
+				rows.Scan(&id, &name, &monsterType, &cr)
+				list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><a href="/universe/monsters/%d">%s</a> <span class="muted">CR %s %s</span></div>`, strings.ToLower(name), id, name, cr, monsterType))
+			}
+			rows.Close()
+			list.WriteString(`</div><script>function filterList(q){document.querySelectorAll('.list-item').forEach(el=>{el.style.display=el.dataset.name.includes(q.toLowerCase())?'block':'none'})}</script>`)
+			content = list.String()
+		}
+		
+	case "spells":
+		if len(parts) > 1 {
+			id, _ := strconv.Atoi(parts[1])
+			var name, school, castTime, rangeStr, duration, description string
+			var level int
+			err := db.QueryRow(`SELECT name, level, school, casting_time, range, duration, COALESCE(description, '') FROM spells WHERE id = $1`, id).Scan(&name, &level, &school, &castTime, &rangeStr, &duration, &description)
+			if err != nil {
+				http.Error(w, "Spell not found", http.StatusNotFound)
+				return
+			}
+			levelStr := "Cantrip"
+			if level > 0 {
+				levelStr = fmt.Sprintf("Level %d", level)
+			}
+			content = fmt.Sprintf(`<h1>✨ %s</h1><p class="muted">%s %s</p><div class="note"><strong>Casting Time:</strong> %s | <strong>Range:</strong> %s | <strong>Duration:</strong> %s</div><p>%s</p><p><a href="/universe/spells">← Back to Spells</a></p>`, name, levelStr, school, castTime, rangeStr, duration, description)
+		} else {
+			rows, _ := db.Query(`SELECT id, name, level, school FROM spells ORDER BY level, name LIMIT 100`)
+			var list strings.Builder
+			list.WriteString(`<h1>✨ Spells</h1><p class="muted">Arcane and divine magic</p><input type="text" class="search-box" placeholder="Filter spells..." oninput="filterList(this.value)"><div id="item-list">`)
+			for rows.Next() {
+				var id, level int
+				var name, school string
+				rows.Scan(&id, &name, &level, &school)
+				levelStr := "Cantrip"
+				if level > 0 {
+					levelStr = fmt.Sprintf("Lvl %d", level)
+				}
+				list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><a href="/universe/spells/%d">%s</a> <span class="muted">%s %s</span></div>`, strings.ToLower(name), id, name, levelStr, school))
+			}
+			rows.Close()
+			list.WriteString(`</div><script>function filterList(q){document.querySelectorAll('.list-item').forEach(el=>{el.style.display=el.dataset.name.includes(q.toLowerCase())?'block':'none'})}</script>`)
+			content = list.String()
+		}
+		
+	case "classes":
+		rows, _ := db.Query(`SELECT id, name, hit_die, COALESCE(description, '') FROM classes ORDER BY name`)
+		var list strings.Builder
+		list.WriteString(`<h1>⚔️ Classes</h1><p class="muted">Character paths and professions</p><div class="category-grid">`)
+		for rows.Next() {
+			var id, hitDie int
+			var name, desc string
+			rows.Scan(&id, &name, &hitDie, &desc)
+			if len(desc) > 100 {
+				desc = desc[:100] + "..."
+			}
+			list.WriteString(fmt.Sprintf(`<div class="category-card"><h3>%s</h3><span class="count">Hit Die: d%d</span><p class="description">%s</p></div>`, name, hitDie, desc))
+		}
+		rows.Close()
+		list.WriteString(`</div>`)
+		content = list.String()
+		
+	case "weapons":
+		rows, _ := db.Query(`SELECT name, category, damage, damage_type, COALESCE(properties, '') FROM weapons ORDER BY category, name`)
+		var list strings.Builder
+		list.WriteString(`<h1>🗡️ Weapons</h1><p class="muted">Instruments of war</p><input type="text" class="search-box" placeholder="Filter weapons..." oninput="filterList(this.value)"><div id="item-list">`)
+		for rows.Next() {
+			var name, category, damage, damageType, props string
+			rows.Scan(&name, &category, &damage, &damageType, &props)
+			list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><strong>%s</strong> <span class="muted">%s • %s %s</span></div>`, strings.ToLower(name), name, category, damage, damageType))
+		}
+		rows.Close()
+		list.WriteString(`</div><script>function filterList(q){document.querySelectorAll('.list-item').forEach(el=>{el.style.display=el.dataset.name.includes(q.toLowerCase())?'block':'none'})}</script>`)
+		content = list.String()
+		
+	case "armor":
+		rows, _ := db.Query(`SELECT name, category, base_ac, COALESCE(stealth_disadvantage, false), COALESCE(str_requirement, 0) FROM armor ORDER BY category, base_ac`)
+		var list strings.Builder
+		list.WriteString(`<h1>🛡️ Armor</h1><p class="muted">Protection for adventurers</p><div id="item-list">`)
+		for rows.Next() {
+			var name, category string
+			var baseAC, strReq int
+			var stealthDis bool
+			rows.Scan(&name, &category, &baseAC, &stealthDis, &strReq)
+			extras := ""
+			if stealthDis {
+				extras += " Stealth disadvantage"
+			}
+			if strReq > 0 {
+				extras += fmt.Sprintf(" Str %d required", strReq)
+			}
+			list.WriteString(fmt.Sprintf(`<div class="list-item"><strong>%s</strong> <span class="muted">%s • AC %d%s</span></div>`, name, category, baseAC, extras))
+		}
+		rows.Close()
+		list.WriteString(`</div>`)
+		content = list.String()
+		
+	case "races", "magic-items":
+		content = fmt.Sprintf(`<h1>%s</h1><p class="muted">Coming soon! This section is under development.</p><p><a href="/universe">← Back to Universe</a></p>`, strings.Title(strings.ReplaceAll(category, "-", " ")))
+		
+	default:
+		http.Redirect(w, r, "/universe", http.StatusFound)
+		return
+	}
+	
+	// Add common styles
+	styledContent := `<style>
+.search-box { width: 100%; padding: 12px; font-size: 16px; border: 2px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--fg); margin-bottom: 1em; }
+.search-box:focus { outline: none; border-color: var(--link); }
+.list-item { padding: 0.75em 0; border-bottom: 1px solid var(--border); }
+.list-item:last-child { border-bottom: none; }
+.category-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 1.5em; }
+.category-card { background: var(--note-bg); border: 1px solid var(--note-border); border-radius: 12px; padding: 1.5em; }
+.category-card h3 { margin: 0 0 0.5em 0; }
+.category-card .count { color: var(--muted); font-size: 0.9em; }
+.category-card .description { color: var(--muted); font-size: 0.9em; margin-top: 0.5em; }
+</style>` + content
+	
+	fmt.Fprint(w, wrapHTML(strings.Title(category)+" - Universe - Agent RPG", styledContent))
+}
+
 func handleAbout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, wrapHTML("About - Agent RPG", aboutContent))
@@ -12980,6 +13296,7 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <nav>
 <a href="/">Home</a>
 <a href="/campaigns">Campaigns</a>
+<a href="/universe">Universe</a>
 <a href="/how-it-works">How It Works</a>
 <a href="/watch">Watch</a>
 <a href="/docs">API</a>
