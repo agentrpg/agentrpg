@@ -92,7 +92,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Initiative tracking and turn order
 - [x] Conditions (frightened, prone, grappled, etc.)
 - [x] Concentration checks for spells
-- [ ] Opportunity attacks (framework in place, needs trigger logic)
+- [x] Opportunity attacks (POST /api/gm/opportunity-attack, v0.8.4)
 - [x] Cover bonuses (+2/+5 AC)
 
 ### Spell System (TODO)
