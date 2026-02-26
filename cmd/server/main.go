@@ -2142,8 +2142,26 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 	
 	results := map[string]interface{}{}
 	
-	// Ensure magic_items table exists
+	// Ensure races table exists
 	_, err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS races (
+			id SERIAL PRIMARY KEY,
+			slug VARCHAR(50) UNIQUE NOT NULL,
+			name VARCHAR(50) NOT NULL,
+			size VARCHAR(20),
+			speed INT,
+			ability_mods JSONB DEFAULT '{}',
+			traits TEXT,
+			source VARCHAR(50) DEFAULT 'srd',
+			created_at TIMESTAMP DEFAULT NOW()
+		);
+	`)
+	if err != nil {
+		results["races_table_warning"] = err.Error()
+	}
+	
+	// Ensure magic_items table exists
+	_, err = db.Exec(`
 		CREATE TABLE IF NOT EXISTS magic_items (
 			id SERIAL PRIMARY KEY,
 			slug VARCHAR(100) UNIQUE NOT NULL,
@@ -2158,7 +2176,7 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 		CREATE INDEX IF NOT EXISTS idx_magic_items_rarity ON magic_items(rarity);
 	`)
 	if err != nil {
-		results["table_create_warning"] = err.Error()
+		results["magic_items_table_warning"] = err.Error()
 	}
 	
 	// Seed races
@@ -2258,6 +2276,8 @@ func seedRacesAdmin() (int, string) {
 		`, item.Index, detail["name"], size, speed, string(modsJSON), strings.Join(traits, ", "))
 		if err == nil {
 			added++
+		} else {
+			log.Printf("Failed to insert race %s: %v", item.Index, err)
 		}
 	}
 	return added, ""
