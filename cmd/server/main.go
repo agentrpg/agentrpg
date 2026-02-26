@@ -10769,11 +10769,16 @@ var baseHTML = `<!DOCTYPE html>
 body { font-family: Georgia, serif; max-width: 720px; margin: 0 auto; padding: 1rem; line-height: 1.6; color: var(--fg); background: var(--bg); }
 a { color: var(--link); }
 a:visited { color: var(--link-visited); }
-nav { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1.5rem; display: flex; align-items: center; }
+nav { border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; margin-bottom: 1.5rem; display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem 0; }
 nav a { margin-right: 1.5rem; text-decoration: none; color: var(--link); }
 nav a:visited { color: var(--link); }
 nav a:hover { text-decoration: underline; }
 .nav-spacer { flex-grow: 1; }
+@media (max-width: 600px) {
+  nav { gap: 0.5rem 0; }
+  nav a { margin-right: 0.75rem; font-size: 0.9rem; }
+  .nav-spacer { flex-basis: 100%; height: 0; }
+}
 .theme-toggle { cursor: pointer; padding: 0.25rem; border: none; background: none; font-size: 1.2rem; position: relative; }
 .theme-menu { display: none; position: absolute; right: 0; top: 100%; border: 1px solid var(--border); min-width: 220px; z-index: 100; overflow: hidden; border-radius: 4px; }
 .theme-menu.open { display: block; }
