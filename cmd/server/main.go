@@ -752,18 +752,38 @@ func fetchJSON(url string) (map[string]interface{}, error) {
 }
 
 func seedMonstersFromAPI() {
-	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/monsters")
-	results := data["results"].([]interface{})
-	log.Printf("Seeding %d monsters...", len(results))
+	data, err := fetchJSON("https://www.dnd5eapi.co/api/2014/monsters")
+	if err != nil || data == nil {
+		log.Println("Failed to fetch monsters list, skipping")
+		return
+	}
+	resultsRaw, ok := data["results"].([]interface{})
+	if !ok || resultsRaw == nil {
+		log.Println("No monsters results, skipping")
+		return
+	}
+	log.Printf("Seeding %d monsters...", len(resultsRaw))
 	
-	for _, item := range results {
-		r := item.(map[string]interface{})
-		detail, _ := fetchJSON("https://www.dnd5eapi.co" + r["url"].(string))
+	for _, item := range resultsRaw {
+		r, ok := item.(map[string]interface{})
+		if !ok || r == nil {
+			continue
+		}
+		urlStr, _ := r["url"].(string)
+		if urlStr == "" {
+			continue
+		}
+		detail, err := fetchJSON("https://www.dnd5eapi.co" + urlStr)
+		if err != nil || detail == nil {
+			continue
+		}
 		
 		ac := 10
 		if acArr, ok := detail["armor_class"].([]interface{}); ok && len(acArr) > 0 {
 			if acMap, ok := acArr[0].(map[string]interface{}); ok {
-				ac = int(acMap["value"].(float64))
+				if v, ok := acMap["value"].(float64); ok {
+					ac = int(v)
+				}
 			}
 		}
 		
@@ -777,7 +797,10 @@ func seedMonstersFromAPI() {
 		actions := []map[string]interface{}{}
 		if actArr, ok := detail["actions"].([]interface{}); ok {
 			for _, a := range actArr {
-				act := a.(map[string]interface{})
+				act, ok := a.(map[string]interface{})
+				if !ok {
+					continue
+				}
 				action := map[string]interface{}{"name": act["name"], "attack_bonus": 0, "damage_dice": "1d6", "damage_type": "bludgeoning"}
 				if ab, ok := act["attack_bonus"].(float64); ok {
 					action["attack_bonus"] = int(ab)
@@ -797,6 +820,21 @@ func seedMonstersFromAPI() {
 		}
 		actionsJSON, _ := json.Marshal(actions)
 		
+		// Safe extraction with defaults
+		hp := 1
+		if v, ok := detail["hit_points"].(float64); ok {
+			hp = int(v)
+		}
+		str, dex, con, intl, wis, cha := 10, 10, 10, 10, 10, 10
+		if v, ok := detail["strength"].(float64); ok { str = int(v) }
+		if v, ok := detail["dexterity"].(float64); ok { dex = int(v) }
+		if v, ok := detail["constitution"].(float64); ok { con = int(v) }
+		if v, ok := detail["intelligence"].(float64); ok { intl = int(v) }
+		if v, ok := detail["wisdom"].(float64); ok { wis = int(v) }
+		if v, ok := detail["charisma"].(float64); ok { cha = int(v) }
+		xp := 0
+		if v, ok := detail["xp"].(float64); ok { xp = int(v) }
+		
 		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 			ON CONFLICT (slug) DO UPDATE SET
@@ -805,14 +843,11 @@ func seedMonstersFromAPI() {
 				speed = EXCLUDED.speed, str = EXCLUDED.str, dex = EXCLUDED.dex,
 				con = EXCLUDED.con, intl = EXCLUDED.intl, wis = EXCLUDED.wis,
 				cha = EXCLUDED.cha, cr = EXCLUDED.cr, xp = EXCLUDED.xp, actions = EXCLUDED.actions`,
-			r["index"], detail["name"], detail["size"], detail["type"], ac, int(detail["hit_points"].(float64)),
-			detail["hit_dice"], speed, int(detail["strength"].(float64)), int(detail["dexterity"].(float64)),
-			int(detail["constitution"].(float64)), int(detail["intelligence"].(float64)), int(detail["wisdom"].(float64)),
-			int(detail["charisma"].(float64)), fmt.Sprintf("%v", detail["challenge_rating"]), int(detail["xp"].(float64)), string(actionsJSON))
+			r["index"], detail["name"], detail["size"], detail["type"], ac, hp,
+			detail["hit_dice"], speed, str, dex, con, intl, wis, cha, fmt.Sprintf("%v", detail["challenge_rating"]), xp, string(actionsJSON))
 	}
 	log.Println("Monsters seeded")
 }
-
 func seedSpellsFromAPI() {
 	data, _ := fetchJSON("https://www.dnd5eapi.co/api/2014/spells")
 	results := data["results"].([]interface{})
