@@ -12973,17 +12973,40 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	condition := strings.ToLower(req.Condition)
 	
-	// Validate condition
-	if _, valid := conditionEffects[condition]; !valid {
+	// Validate condition - allow parameterized conditions like "charmed:123" or "grappled:123"
+	baseCondition := condition
+	paramID := 0
+	if idx := strings.Index(condition, ":"); idx != -1 {
+		baseCondition = condition[:idx]
+		if id, err := strconv.Atoi(condition[idx+1:]); err == nil {
+			paramID = id
+		}
+	}
+	
+	if _, valid := conditionEffects[baseCondition]; !valid {
 		validConditions := make([]string, 0, len(conditionEffects))
 		for k := range conditionEffects {
 			validConditions = append(validConditions, k)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":            "invalid_condition",
+			"message":          "Use format 'condition' or 'condition:character_id' for charmed/grappled",
 			"valid_conditions": validConditions,
 		})
 		return
+	}
+	
+	// For charmed/grappled with ID, validate the ID exists
+	if paramID > 0 && (baseCondition == "charmed" || baseCondition == "grappled") {
+		var exists bool
+		db.QueryRow("SELECT EXISTS(SELECT 1 FROM characters WHERE id = $1)", paramID).Scan(&exists)
+		if !exists {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_target",
+				"message": fmt.Sprintf("Character ID %d not found", paramID),
+			})
+			return
+		}
 	}
 	
 	var condJSON []byte

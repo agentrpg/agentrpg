@@ -333,9 +333,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Auto-fail checks requiring sight
   - [x] Attack rolls have disadvantage
   - [x] Attacks against have advantage
-- [ ] **Charmed**
-  - [ ] Can't attack the charmer
-  - [ ] Charmer has advantage on social checks
+- [x] **Charmed** (v0.8.22)
+  - [x] Can't attack the charmer (blocked in attack action)
+  - [x] Charmer has advantage on social checks (CHA-based skill checks with target_id)
+  - [x] Condition format: "charmed" (generic) or "charmed:ID" (charmed by specific character)
 - [ ] **Deafened**
   - [ ] Auto-fail checks requiring hearing
 - [x] **Exhaustion (CRITICAL — 6 levels!)** ✅ (v0.8.7 tracking + v0.8.8 effects)
