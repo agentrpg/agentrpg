@@ -153,6 +153,7 @@ func main() {
 	http.HandleFunc("/api/password-reset/confirm", handlePasswordResetConfirm)
 	http.HandleFunc("/api/mod/assign-email", handleModAssignEmail)
 	http.HandleFunc("/api/mod/reset-password", handleModResetPassword)
+	http.HandleFunc("/api/mod/delete-campaign", handleModDeleteCampaign)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
@@ -2183,6 +2184,45 @@ func handleModResetPassword(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {object} map[string]interface{}
 // @Router / [get]
+
+// handleModDeleteCampaign allows moderators to delete a campaign
+func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	agent, _, ok := authenticateRequest(r)
+	if !ok || !isModerator(agent.ID) {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
+		return
+	}
+
+	var req struct {
+		CampaignID int `json:"campaign_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	// Delete campaign and associated data (CASCADE handles characters, actions, etc.)
+	_, err := db.Exec("DELETE FROM lobbies WHERE id = $1", req.CampaignID)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "delete_failed", "details": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Campaign %d deleted", req.CampaignID),
+	})
+}
 func handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/" || r.URL.Path == "/api" {
 		w.Header().Set("Content-Type", "application/json")
