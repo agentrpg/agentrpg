@@ -12695,6 +12695,9 @@ func handleUniverseMonsterSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = r.URL.Query().Get("q") // Also accept 'q' for search box
+	}
 	mtype := r.URL.Query().Get("type")
 	cr := r.URL.Query().Get("cr")
 	limit := 20
@@ -12759,6 +12762,9 @@ func handleUniverseSpellSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = r.URL.Query().Get("q") // Also accept 'q' for search box
+	}
 	levelStr := r.URL.Query().Get("level")
 	school := r.URL.Query().Get("school")
 	limit := 20
@@ -12824,6 +12830,9 @@ func handleUniverseWeaponSearch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	name := r.URL.Query().Get("name")
+	if name == "" {
+		name = r.URL.Query().Get("q") // Also accept 'q' for search box
+	}
 	wtype := r.URL.Query().Get("type")
 	limit := 20
 	if l, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && l > 0 && l <= 100 {
