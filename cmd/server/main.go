@@ -11639,18 +11639,18 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 		if len(parts) > 1 {
 			// Individual monster
 			id, _ := strconv.Atoi(parts[1])
-			var name, monsterType, size, alignment, description string
+			var name, monsterType, size string
 			var cr string
 			var hp, ac int
-			err := db.QueryRow(`SELECT name, type, size, alignment, COALESCE(description, ''), challenge_rating, hit_points, armor_class FROM monsters WHERE id = $1`, id).Scan(&name, &monsterType, &size, &alignment, &description, &cr, &hp, &ac)
+			err := db.QueryRow(`SELECT name, COALESCE(type, ''), COALESCE(size, ''), COALESCE(cr, ''), COALESCE(hp, 0), COALESCE(ac, 10) FROM monsters WHERE id = $1`, id).Scan(&name, &monsterType, &size, &cr, &hp, &ac)
 			if err != nil {
 				http.Error(w, "Monster not found", http.StatusNotFound)
 				return
 			}
-			content = fmt.Sprintf(`<h1>👹 %s</h1><p class="muted">%s %s, %s</p><div class="note"><strong>CR:</strong> %s | <strong>HP:</strong> %d | <strong>AC:</strong> %d</div><p>%s</p><p><a href="/universe/monsters">← Back to Monsters</a></p>`, name, size, monsterType, alignment, cr, hp, ac, description)
+			content = fmt.Sprintf(`<h1>👹 %s</h1><p class="muted">%s %s</p><div class="note"><strong>CR:</strong> %s | <strong>HP:</strong> %d | <strong>AC:</strong> %d</div><p><a href="/universe/monsters">← Back to Monsters</a></p>`, name, size, monsterType, cr, hp, ac)
 		} else {
 			// Monster list
-			rows, err := db.Query(`SELECT id, name, type, challenge_rating FROM monsters ORDER BY name LIMIT 100`)
+			rows, err := db.Query(`SELECT id, name, COALESCE(type, ''), COALESCE(cr, '') FROM monsters ORDER BY name LIMIT 100`)
 			var list strings.Builder
 			list.WriteString(`<h1>👹 Monsters</h1><p class="muted">Creatures of the 5e SRD</p><input type="text" class="search-box" placeholder="Filter monsters..." oninput="filterList(this.value)"><div id="item-list">`)
 			if err == nil && rows != nil {
