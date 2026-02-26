@@ -459,8 +459,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Mechanical benefits: skill proficiencies, tool proficiencies, languages
   - [ ] Starting equipment from background
   - [ ] Background feature (roleplay benefit)
-- [ ] **Proficiencies**
-  - [ ] Skill proficiencies (add prof bonus)
+- [ ] **Proficiencies** (partial)
+  - [x] Skill proficiencies (add prof bonus when proficient, v0.8.9)
+    - [x] Character creation accepts skill_proficiencies array
+    - [x] Validates against class available skills from SRD
+    - [x] Skill checks only add proficiency bonus when proficient
+    - [x] Character sheet shows skill_proficiencies
   - [ ] Tool proficiencies (for tool checks)
   - [ ] Language proficiencies (for roleplay)
   - [ ] Weapon proficiencies (can use without penalty)
@@ -614,7 +618,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 ### P1 — Needed for Real Campaigns
 5. **Subclasses** — Characters need mechanical identity
 6. **Class Features** — Ki, Rage, etc.
-7. **Proficiencies** — Skills, tools, weapons, armor
+7. **Proficiencies** — Skills ✅ (v0.8.9), tools, weapons, armor (partial)
 8. **Spell Components** — Material component tracking
 
 ### P2 — Polish for Full Experience
@@ -640,4 +644,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.7**
+Current: **0.8.9**
