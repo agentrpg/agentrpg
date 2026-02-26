@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.21"
+const version = "0.8.22"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1498,6 +1498,46 @@ func getSaveDisadvantage(charID int, ability string) bool {
 	return false
 }
 
+// ============================================
+// CHARMED CONDITION EFFECTS (v0.8.22)
+// ============================================
+
+// getCharmerID returns the ID of who charmed this character, or 0 if not charmed
+// Charmed condition format: "charmed" (generic) or "charmed:123" (charmed by character 123)
+func getCharmerID(charID int) int {
+	conditions := getCharConditions(charID)
+	for _, c := range conditions {
+		cLower := strings.ToLower(c)
+		if strings.HasPrefix(cLower, "charmed:") {
+			parts := strings.Split(c, ":")
+			if len(parts) == 2 {
+				if id, err := strconv.Atoi(parts[1]); err == nil {
+					return id
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// isCharmedBy checks if charID is charmed by charmerID
+func isCharmedBy(charID, charmerID int) bool {
+	charmer := getCharmerID(charID)
+	return charmer == charmerID && charmerID > 0
+}
+
+// hasAnyCharm checks if character has any form of charmed condition
+func hasAnyCharm(charID int) bool {
+	conditions := getCharConditions(charID)
+	for _, c := range conditions {
+		cLower := strings.ToLower(c)
+		if cLower == "charmed" || strings.HasPrefix(cLower, "charmed:") {
+			return true
+		}
+	}
+	return false
+}
+
 // parseTargetFromDescription tries to find a character ID from action description
 // Looks for character names in the description (e.g., "attack goblin" → finds goblin's ID)
 func parseTargetFromDescription(description string, attackerID int) int {
@@ -2313,6 +2353,8 @@ func handleModDeleteUser(w http.ResponseWriter, r *http.Request) {
 	// Delete user's characters first (and their related data)
 	db.Exec("DELETE FROM actions WHERE character_id IN (SELECT id FROM characters WHERE agent_id = $1)", req.UserID)
 	db.Exec("DELETE FROM characters WHERE agent_id = $1", req.UserID)
+	// Delete api_logs
+	db.Exec("DELETE FROM api_logs WHERE agent_id = $1", req.UserID)
 	// Delete the user
 	_, err := db.Exec("DELETE FROM agents WHERE id = $1", req.UserID)
 	if err != nil {
@@ -6360,6 +6402,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		Disadvantage   bool   `json:"disadvantage"`
 		Description    string `json:"description"`     // Optional context
 		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
+		TargetID       int    `json:"target_id"`       // Optional: target of the check (for charmed advantage)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -6491,6 +6534,15 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// Charmed: Charmer has advantage on CHA-based checks against charmed target (v0.8.22)
+	charmedAdvantage := false
+	if req.TargetID > 0 && (abilityUsed == "cha" || abilityUsed == "charisma") {
+		if isCharmedBy(req.TargetID, req.CharacterID) {
+			req.Advantage = true
+			charmedAdvantage = true
+		}
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -6500,6 +6552,9 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		rollType = "advantage"
 		if usedInspiration {
 			rollType = "advantage (inspiration)"
+		}
+		if charmedAdvantage {
+			rollType = "advantage (charmed)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
@@ -10873,6 +10928,17 @@ func resolveAction(action, description string, charID int) string {
 		autoCrit := false
 		autoCritReason := ""
 		targetID := parseTargetFromDescription(description, charID)
+		
+		// Charmed: Can't attack the charmer (v0.8.22)
+		if targetID > 0 && isCharmedBy(charID, targetID) {
+			var targetName string
+			db.QueryRow("SELECT name FROM characters WHERE id = $1", targetID).Scan(&targetName)
+			if targetName == "" {
+				targetName = "your charmer"
+			}
+			return fmt.Sprintf("Cannot attack %s — you are charmed by them!", targetName)
+		}
+		
 		if targetID > 0 && isAutoCrit(targetID) {
 			autoCrit = true
 			conditions := getCharConditions(targetID)
