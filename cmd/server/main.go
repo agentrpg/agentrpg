@@ -11729,14 +11729,14 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 		content = list.String()
 		
 	case "weapons":
-		rows, err := db.Query(`SELECT name, category, damage, damage_type, COALESCE(properties, '') FROM weapons ORDER BY category, name`)
+		rows, err := db.Query(`SELECT name, COALESCE(type, ''), COALESCE(damage, ''), COALESCE(damage_type, ''), COALESCE(properties, '') FROM weapons ORDER BY type, name`)
 		var list strings.Builder
 		list.WriteString(`<h1>🗡️ Weapons</h1><p class="muted">Instruments of war</p><input type="text" class="search-box" placeholder="Filter weapons..." oninput="filterList(this.value)"><div id="item-list">`)
 		if err == nil && rows != nil {
 			for rows.Next() {
-				var name, category, damage, damageType, props string
-				rows.Scan(&name, &category, &damage, &damageType, &props)
-				list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><strong>%s</strong> <span class="muted">%s • %s %s</span></div>`, strings.ToLower(name), name, category, damage, damageType))
+				var name, weaponType, damage, damageType, props string
+				rows.Scan(&name, &weaponType, &damage, &damageType, &props)
+				list.WriteString(fmt.Sprintf(`<div class="list-item" data-name="%s"><strong>%s</strong> <span class="muted">%s • %s %s</span></div>`, strings.ToLower(name), name, weaponType, damage, damageType))
 			}
 			rows.Close()
 		}
@@ -11744,15 +11744,15 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 		content = list.String()
 		
 	case "armor":
-		rows, err := db.Query(`SELECT name, category, base_ac, COALESCE(stealth_disadvantage, false), COALESCE(str_requirement, 0) FROM armor ORDER BY category, base_ac`)
+		rows, err := db.Query(`SELECT name, COALESCE(type, ''), COALESCE(ac, 10), COALESCE(stealth_disadvantage, false), COALESCE(str_req, 0) FROM armor ORDER BY type, ac`)
 		var list strings.Builder
 		list.WriteString(`<h1>🛡️ Armor</h1><p class="muted">Protection for adventurers</p><div id="item-list">`)
 		if err == nil && rows != nil {
 			for rows.Next() {
-				var name, category string
-				var baseAC, strReq int
+				var name, armorType string
+				var ac, strReq int
 				var stealthDis bool
-				rows.Scan(&name, &category, &baseAC, &stealthDis, &strReq)
+				rows.Scan(&name, &armorType, &ac, &stealthDis, &strReq)
 				extras := ""
 				if stealthDis {
 					extras += " Stealth disadvantage"
@@ -11760,7 +11760,7 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 				if strReq > 0 {
 					extras += fmt.Sprintf(" Str %d required", strReq)
 				}
-				list.WriteString(fmt.Sprintf(`<div class="list-item"><strong>%s</strong> <span class="muted">%s • AC %d%s</span></div>`, name, category, baseAC, extras))
+				list.WriteString(fmt.Sprintf(`<div class="list-item"><strong>%s</strong> <span class="muted">%s • AC %d%s</span></div>`, name, armorType, ac, extras))
 			}
 			rows.Close()
 		}
