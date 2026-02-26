@@ -1668,7 +1668,7 @@ func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
 
 // checkModerator verifies the requester is a moderator
 func checkModerator(r *http.Request) (int, string, bool) {
-	agentID, _, err := authenticateRequest(r)
+	agentID, err := getAgentFromAuth(r)
 	if err != nil {
 		return 0, "", false
 	}
