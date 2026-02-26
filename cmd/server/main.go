@@ -10512,7 +10512,7 @@ func handleWatch(w http.ResponseWriter, r *http.Request) {
 			
 			var contentBuilder strings.Builder
 			contentBuilder.WriteString("<h1>Watch</h1>\n")
-			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid var(--note-border);padding:1em;margin:1em 0;border-radius:8px;background:var(--note-bg)}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:#ccc;margin:0.5em 0}.players{font-size:0.9em;color:#888}</style>`)
+			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid var(--note-border);padding:1em;margin:1em 0;border-radius:8px;background:var(--note-bg)}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:var(--muted);margin:0.5em 0}.players{font-size:0.9em;color:var(--muted)}</style>`)
 			
 			if hasActive {
 				contentBuilder.WriteString("<h2>🎮 Active Campaigns</h2>\n")
@@ -10619,12 +10619,16 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 .campaigns-grid{display:grid;gap:1.5em}
 .campaign-card{background:var(--note-bg);border:1px solid var(--note-border);border-radius:8px;padding:1.5em}
 .campaign-card h3{margin:0 0 0.5em 0}
-.campaign-card .setting{color:#ccc;font-style:italic;margin:0.5em 0;max-height:4em;overflow:hidden}
-.campaign-card .meta{color:#888;font-size:0.9em}
+.campaign-card .setting{color:var(--muted);font-style:italic;margin:0.5em 0;max-height:4em;overflow:hidden}
+.campaign-card .meta{color:var(--muted);font-size:0.9em}
 .badge{padding:0.2em 0.6em;border-radius:4px;font-size:0.8em;margin-left:0.5em}
-.badge.recruiting{background:#2a4a2a;color:#8f8}
-.badge.active{background:#4a2a2a;color:#f88}
-.badge.completed{background:#2a2a4a;color:#88f}
+.badge.recruiting{background:#d4edda;color:#155724}
+.badge.active{background:#f8d7da;color:#721c24}
+.badge.completed{background:#cce5ff;color:#004085}
+@media(prefers-color-scheme:dark){.badge.recruiting{background:#2a4a2a;color:#8f8}.badge.active{background:#4a2a2a;color:#f88}.badge.completed{background:#2a2a4a;color:#88f}}
+[data-theme="dark"] .badge.recruiting,[data-theme="catppuccin-mocha"] .badge.recruiting,[data-theme="tokyonight"] .badge.recruiting,[data-theme="solarized-dark"] .badge.recruiting{background:#2a4a2a;color:#8f8}
+[data-theme="dark"] .badge.active,[data-theme="catppuccin-mocha"] .badge.active,[data-theme="tokyonight"] .badge.active,[data-theme="solarized-dark"] .badge.active{background:#4a2a2a;color:#f88}
+[data-theme="dark"] .badge.completed,[data-theme="catppuccin-mocha"] .badge.completed,[data-theme="tokyonight"] .badge.completed,[data-theme="solarized-dark"] .badge.completed{background:#2a2a4a;color:#88f}
 .filters{margin:1em 0;padding:1em;background:var(--note-bg);border-radius:8px}
 </style>
 
@@ -10937,27 +10941,34 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 <style>
 .campaign-header{margin-bottom:2em}
 .badge{padding:0.3em 0.8em;border-radius:4px;font-size:0.9em}
-.badge.recruiting{background:#2a4a2a;color:#8f8}
-.badge.active{background:#4a2a2a;color:#f88}
-.meta{color:#888;margin:1em 0}
+.badge.recruiting{background:#d4edda;color:#155724}
+.badge.active{background:#f8d7da;color:#721c24}
+@media(prefers-color-scheme:dark){.badge.recruiting{background:#2a4a2a;color:#8f8}.badge.active{background:#4a2a2a;color:#f88}}
+[data-theme="dark"] .badge.recruiting,[data-theme="catppuccin-mocha"] .badge.recruiting,[data-theme="tokyonight"] .badge.recruiting,[data-theme="solarized-dark"] .badge.recruiting{background:#2a4a2a;color:#8f8}
+[data-theme="dark"] .badge.active,[data-theme="catppuccin-mocha"] .badge.active,[data-theme="tokyonight"] .badge.active,[data-theme="solarized-dark"] .badge.active{background:#4a2a2a;color:#f88}
+.meta{color:var(--muted);margin:1em 0}
 .setting{background:var(--note-bg);padding:1.5em;border-radius:8px;margin:1em 0;white-space:pre-wrap;line-height:1.6}
 .party-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1em}
 .party-member{background:var(--note-bg);padding:1em;border-radius:8px}
 .party-member h4{margin:0 0 0.5em 0}
-.party-member .healthy{color:#8f8}
-.party-member .wounded{color:#ff8}
-.party-member .critical{color:#f88}
-.observation{background:var(--note-bg);padding:1em;margin:0.5em 0;border-radius:4px;border-left:3px solid #446}
+.party-member .healthy{color:#28a745}
+.party-member .wounded{color:#ffc107}
+.party-member .critical{color:#dc3545}
+@media(prefers-color-scheme:dark){.party-member .healthy{color:#8f8}.party-member .wounded{color:#ff8}.party-member .critical{color:#f88}}
+[data-theme="dark"] .party-member .healthy,[data-theme="catppuccin-mocha"] .party-member .healthy,[data-theme="tokyonight"] .party-member .healthy,[data-theme="solarized-dark"] .party-member .healthy{color:#8f8}
+[data-theme="dark"] .party-member .wounded,[data-theme="catppuccin-mocha"] .party-member .wounded,[data-theme="tokyonight"] .party-member .wounded,[data-theme="solarized-dark"] .party-member .wounded{color:#ff8}
+[data-theme="dark"] .party-member .critical,[data-theme="catppuccin-mocha"] .party-member .critical,[data-theme="tokyonight"] .party-member .critical,[data-theme="solarized-dark"] .party-member .critical{color:#f88}
+.observation{background:var(--note-bg);padding:1em;margin:0.5em 0;border-radius:4px;border-left:3px solid var(--link)}
 .observation .observer{font-weight:bold}
-.observation .type{color:#888;font-size:0.9em}
-.observation .time{color:#666;font-size:0.8em}
+.observation .type{color:var(--muted);font-size:0.9em}
+.observation .time{color:var(--muted);font-size:0.8em}
 .feed-item{padding:0.5em 1em;margin:0.5em 0;background:var(--note-bg);border-radius:4px}
-.feed-item.action{border-left:3px solid #464}
-.feed-item.message{border-left:3px solid #446}
-.feed-item.poll{border-left:3px solid #444}
-.feed-item .time{color:#666;font-size:0.8em}
-.feed-item .type{color:#888}
-.feed-item .result{color:#8a8;font-style:italic}
+.feed-item.action{border-left:3px solid #28a745}
+.feed-item.message{border-left:3px solid var(--link)}
+.feed-item.poll{border-left:3px solid var(--border)}
+.feed-item .time{color:var(--muted);font-size:0.8em}
+.feed-item .type{color:var(--muted)}
+.feed-item .result{color:var(--muted);font-style:italic}
 .section{margin:2em 0}
 </style>
 
@@ -11106,16 +11117,16 @@ func handleCharacterSheet(w http.ResponseWriter, r *http.Request) {
 <style>
 .char-header{display:flex;gap:2em;align-items:flex-start}
 .stats{display:grid;grid-template-columns:repeat(6,1fr);gap:0.5em;text-align:center}
-.stat{background:#222;padding:0.5em;border-radius:4px}
+.stat{background:var(--note-bg);padding:0.5em;border-radius:4px;border:1px solid var(--note-border)}
 .stat .value{font-size:1.5em;font-weight:bold}
-.stat .mod{color:#888}
-.stat .label{font-size:0.8em;color:#666}
-.vitals{display:flex;gap:2em;margin:1em 0}
-.vital{background:#222;padding:1em;border-radius:4px}
-.action{border-left:2px solid #444;padding-left:1em;margin:0.5em 0}
-.action .time{color:#666;font-size:0.8em}
-.action .type{color:#888}
-.action .result{color:#aaa;font-style:italic}
+.stat .mod{color:var(--muted)}
+.stat .label{font-size:0.8em;color:var(--muted)}
+.vitals{display:flex;gap:2em;margin:1em 0;flex-wrap:wrap}
+.vital{background:var(--note-bg);padding:1em;border-radius:4px;border:1px solid var(--note-border)}
+.action{border-left:2px solid var(--border);padding-left:1em;margin:0.5em 0}
+.action .time{color:var(--muted);font-size:0.8em}
+.action .type{color:var(--muted)}
+.action .result{color:var(--muted);font-style:italic}
 </style>
 
 <h1>%s</h1>
