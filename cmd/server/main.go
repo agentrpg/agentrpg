@@ -912,15 +912,18 @@ func seedRacesFromAPI() {
 			}
 		}
 		
-		db.Exec(`INSERT INTO races (slug, name, size, speed, ability_mods, traits)
+		_, err := db.Exec(`INSERT INTO races (slug, name, size, speed, ability_bonuses, traits)
 			VALUES ($1, $2, $3, $4, $5, $6) 
 			ON CONFLICT (slug) DO UPDATE SET 
 				name = EXCLUDED.name,
 				size = EXCLUDED.size,
 				speed = EXCLUDED.speed,
-				ability_mods = EXCLUDED.ability_mods,
+				ability_bonuses = EXCLUDED.ability_bonuses,
 				traits = EXCLUDED.traits`,
 			r["index"], detail["name"], detail["size"], int(detail["speed"].(float64)), string(modsJSON), strings.Join(traits, ", "))
+		if err != nil {
+			log.Printf("Failed to insert race %s: %v", r["index"], err)
+		}
 	}
 	log.Println("Races seeded")
 }
@@ -1112,7 +1115,7 @@ func loadSRDFromDB() {
 	}
 
 	// Load races
-	rows, err = db.Query("SELECT slug, name, size, speed, ability_mods FROM races")
+	rows, err = db.Query("SELECT slug, name, size, speed, ability_bonuses FROM races")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
@@ -2196,7 +2199,7 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 	
 	results := map[string]interface{}{}
 	
-	// Ensure races table exists with ability_mods column
+	// Ensure races table exists with ability_bonuses column
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS races (
 			id SERIAL PRIMARY KEY,
@@ -2204,7 +2207,7 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 			name VARCHAR(50) NOT NULL,
 			size VARCHAR(20),
 			speed INT,
-			ability_mods JSONB DEFAULT '{}',
+			ability_bonuses JSONB DEFAULT '{}',
 			traits TEXT,
 			source VARCHAR(50) DEFAULT 'srd',
 			created_at TIMESTAMP DEFAULT NOW()
@@ -2214,8 +2217,8 @@ func handleAdminSeed(w http.ResponseWriter, r *http.Request) {
 		results["races_table_warning"] = err.Error()
 	}
 	
-	// Add ability_mods column if it doesn't exist (for pre-existing tables)
-	_, _ = db.Exec(`ALTER TABLE races ADD COLUMN IF NOT EXISTS ability_mods JSONB DEFAULT '{}'`)
+	// Add ability_bonuses column if it doesn't exist (for pre-existing tables)
+	_, _ = db.Exec(`ALTER TABLE races ADD COLUMN IF NOT EXISTS ability_bonuses JSONB DEFAULT '{}'`)
 	
 	// Ensure magic_items table exists
 	_, err = db.Exec(`
@@ -2325,11 +2328,11 @@ func seedRacesAdmin() (int, string) {
 		}
 		
 		_, err = db.Exec(`
-			INSERT INTO races (slug, name, size, speed, ability_mods, traits)
+			INSERT INTO races (slug, name, size, speed, ability_bonuses, traits)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (slug) DO UPDATE SET 
 				name=EXCLUDED.name, size=EXCLUDED.size, speed=EXCLUDED.speed,
-				ability_mods=EXCLUDED.ability_mods, traits=EXCLUDED.traits
+				ability_bonuses=EXCLUDED.ability_bonuses, traits=EXCLUDED.traits
 		`, item.Index, detail["name"], size, speed, string(modsJSON), strings.Join(traits, ", "))
 		if err == nil {
 			added++
@@ -12533,10 +12536,10 @@ func handleUniverseRace(w http.ResponseWriter, r *http.Request) {
 		Name       string          `json:"name"`
 		Size       string          `json:"size"`
 		Speed      int             `json:"speed"`
-		AbilityMods json.RawMessage `json:"ability_mods"`
+		AbilityMods json.RawMessage `json:"ability_bonuses"`
 		Traits     string          `json:"traits"`
 	}
-	err := db.QueryRow("SELECT name, size, speed, ability_mods, traits FROM races WHERE slug = $1", id).Scan(
+	err := db.QueryRow("SELECT name, size, speed, ability_bonuses, traits FROM races WHERE slug = $1", id).Scan(
 		&race.Name, &race.Size, &race.Speed, &race.AbilityMods, &race.Traits)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": "race_not_found"})
