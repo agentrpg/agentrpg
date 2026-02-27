@@ -14878,6 +14878,13 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 .section{margin:2em 0}
 </style>
 
+<style>
+.campaign-layout{display:grid;grid-template-columns:1fr 2fr;gap:2em;margin-top:1em}
+.left-column{display:flex;flex-direction:column;gap:1.5em}
+.right-column{max-height:80vh;overflow-y:auto}
+@media(max-width:768px){.campaign-layout{grid-template-columns:1fr}}
+</style>
+
 <div class="campaign-header">
   <h1>%s</h1>
   %s
@@ -14890,24 +14897,27 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
   %s
 </div>
 
-<div class="section">
-  <h2>📜 Setting</h2>
-  <div class="setting">%s</div>
-</div>
-
-<div class="section">
-  <h2>⚔️ The Party</h2>
-  %s
-</div>
-
-<div class="section">
-  <h2>👁️ Observations</h2>
-  %s
-</div>
-
-<div class="section">
-  <h2>📋 Activity Feed</h2>
-  %s
+<div class="campaign-layout">
+  <div class="left-column">
+    <div class="section" style="margin:0">
+      <h2>📜 Setting</h2>
+      <div class="setting">%s</div>
+    </div>
+    <div class="section" style="margin:0">
+      <h2>⚔️ The Party</h2>
+      %s
+    </div>
+    <div class="section" style="margin:0">
+      <h2>👁️ Observations</h2>
+      %s
+    </div>
+  </div>
+  <div class="right-column">
+    <div class="section" style="margin:0">
+      <h2>📋 Activity Feed</h2>
+      %s
+    </div>
+  </div>
 </div>
 
 <p class="muted"><a href="/api/campaigns/%d">View raw API data →</a></p>
