@@ -207,6 +207,7 @@ func main() {
 	http.HandleFunc("/api/gm/status", handleGMStatus)
 	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/restore-action", handleGMRestoreAction)
+	http.HandleFunc("/api/gm/recreate-character", handleGMRecreateCharacter)
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
@@ -6188,6 +6189,69 @@ func handleGMRestoreAction(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": "Action restored",
+	})
+}
+
+// handleGMRecreateCharacter allows GM to recreate a deleted character
+// @Summary Recreate a deleted character
+// @Tags GM
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{name=string,class=string,agent_id=int,campaign_id=int} true "Character to recreate"
+// @Success 200 {object} map[string]interface{}
+// @Router /gm/recreate-character [post]
+func handleGMRecreateCharacter(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	gmAgentID, authErr := getAgentFromAuth(r)
+	if authErr != nil {
+		w.WriteHeader(401)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		Name       string `json:"name"`
+		Class      string `json:"class"`
+		AgentID    int    `json:"agent_id"`
+		CampaignID int    `json:"campaign_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	// Verify requester is GM of this campaign
+	var dmID int
+	err := db.QueryRow("SELECT dm_id FROM lobbies WHERE id = $1", req.CampaignID).Scan(&dmID)
+	if err != nil || dmID != gmAgentID {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_gm_of_campaign"})
+		return
+	}
+
+	// Create the character
+	var charID int
+	err = db.QueryRow(`
+		INSERT INTO characters (agent_id, lobby_id, name, class, hp, max_hp, level, xp)
+		VALUES ($1, $2, $3, $4, 8, 8, 1, 0)
+		RETURNING id
+	`, req.AgentID, req.CampaignID, req.Name, req.Class).Scan(&charID)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"character_id": charID,
+		"message":      fmt.Sprintf("Character '%s' created with ID %d", req.Name, charID),
 	})
 }
 func getMonsterBehavior(monsterType string) string {
