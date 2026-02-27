@@ -67,37 +67,6 @@ var xpThresholds = map[int]int{
 }
 
 // getLevelForXP returns the level a character should be at given their XP
-
-// DamageModifier holds damage resistance calculation results
-type DamageModifier struct {
-	OriginalDamage int
-	FinalDamage    int
-	WasHalved      bool
-	Resistances    []string
-}
-
-// applyDamageResistance checks for damage resistance conditions and returns modified damage
-func applyDamageResistance(characterID int, damage int, damageType string) DamageModifier {
-	result := DamageModifier{
-		OriginalDamage: damage,
-		FinalDamage:    damage,
-		WasHalved:      false,
-		Resistances:    []string{},
-	}
-	
-	// Check for petrified condition (halves all damage per 5e PHB p291)
-	var conditions string
-	db.QueryRow("SELECT COALESCE(conditions, '') FROM characters WHERE id = $1", characterID).Scan(&conditions)
-	
-	if strings.Contains(strings.ToLower(conditions), "petrified") {
-		result.FinalDamage = damage / 2
-		result.WasHalved = true
-		result.Resistances = append(result.Resistances, "petrified")
-	}
-	
-	return result
-}
-func getLevelForXP(xp int) int {
 	level := 1
 	for l := 20; l >= 1; l-- {
 		if xp >= xpThresholds[l] {
