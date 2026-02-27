@@ -436,9 +436,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [ ] **Domain/Subclass Spells**
   - [ ] Always prepared, don't count against limit
   - [ ] Cleric domains, Paladin oaths, etc.
-- [ ] **Upcasting**
-  - [ ] Use higher slot for increased effect
-  - [ ] Damage scaling from SRD data
+- [x] **Upcasting (v0.8.28)**
+  - [x] Use higher slot for increased effect ("cast fireball at level 5", "at 5th level", etc.)
+  - [x] Damage scaling from SRD data (damage_at_slot_level)
+  - [x] Healing scaling from SRD data (heal_at_slot_level)
+  - [x] Works in both cast action and /api/gm/aoe-cast
 
 ### Character Features
 

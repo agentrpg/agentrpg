@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.27"
+const version = "0.8.28"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -543,6 +543,9 @@ func initDB() {
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS is_ritual BOOLEAN DEFAULT FALSE;
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS aoe_shape VARCHAR(20);
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS aoe_size INTEGER;
+		-- Upcasting support (v0.8.28)
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS damage_at_slot_level JSONB DEFAULT '{}';
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS heal_at_slot_level JSONB DEFAULT '{}';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -928,11 +931,15 @@ func seedSpellsFromAPI() {
 		}
 		
 		damageDice, damageType, savingThrow, healing := "", "", "", ""
+		damageAtSlotLevel := map[string]string{}
+		healAtSlotLevel := map[string]string{}
 		if dmg, ok := detail["damage"].(map[string]interface{}); ok {
 			if slot, ok := dmg["damage_at_slot_level"].(map[string]interface{}); ok {
-				for _, v := range slot {
-					damageDice = v.(string)
-					break
+				for k, v := range slot {
+					damageAtSlotLevel[k] = v.(string)
+					if damageDice == "" {
+						damageDice = v.(string) // Keep first as base for backward compat
+					}
 				}
 			}
 			if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
@@ -945,11 +952,15 @@ func seedSpellsFromAPI() {
 			}
 		}
 		if heal, ok := detail["heal_at_slot_level"].(map[string]interface{}); ok {
-			for _, v := range heal {
-				healing = v.(string)
-				break
+			for k, v := range heal {
+				healAtSlotLevel[k] = v.(string)
+				if healing == "" {
+					healing = v.(string) // Keep first as base for backward compat
+				}
 			}
 		}
+		damageAtSlotLevelJSON, _ := json.Marshal(damageAtSlotLevel)
+		healAtSlotLevelJSON, _ := json.Marshal(healAtSlotLevel)
 		
 		// Check for ritual tag
 		isRitual := false
@@ -969,8 +980,8 @@ func seedSpellsFromAPI() {
 			}
 		}
 		
-		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size, damage_at_slot_level, heal_at_slot_level)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name, level = EXCLUDED.level, school = EXCLUDED.school,
 				casting_time = EXCLUDED.casting_time, range = EXCLUDED.range,
@@ -978,9 +989,12 @@ func seedSpellsFromAPI() {
 				description = EXCLUDED.description, damage_dice = EXCLUDED.damage_dice,
 				damage_type = EXCLUDED.damage_type, saving_throw = EXCLUDED.saving_throw,
 				healing = EXCLUDED.healing, is_ritual = EXCLUDED.is_ritual,
-				aoe_shape = EXCLUDED.aoe_shape, aoe_size = EXCLUDED.aoe_size`,
+				aoe_shape = EXCLUDED.aoe_shape, aoe_size = EXCLUDED.aoe_size,
+				damage_at_slot_level = EXCLUDED.damage_at_slot_level,
+				heal_at_slot_level = EXCLUDED.heal_at_slot_level`,
 			r["index"], detail["name"], int(detail["level"].(float64)), school, detail["casting_time"], detail["range"],
-			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing, isRitual, aoeShape, aoeSize)
+			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing, isRitual, aoeShape, aoeSize,
+			damageAtSlotLevelJSON, healAtSlotLevelJSON)
 	}
 	log.Println("Spells seeded")
 }
@@ -1283,15 +1297,20 @@ func loadSRDFromDB() {
 	}
 
 	// Load spells (for resolveAction)
-	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, '') FROM spells")
+	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, ''), COALESCE(damage_at_slot_level, '{}'), COALESCE(heal_at_slot_level, '{}') FROM spells")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape, components string
+			var damageAtSlotLevelJSON, healAtSlotLevelJSON []byte
 			var level, aoeSize int
 			var isRitual bool
-			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components)
-			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components}
+			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components, &damageAtSlotLevelJSON, &healAtSlotLevelJSON)
+			damageAtSlotLevel := map[string]string{}
+			healAtSlotLevel := map[string]string{}
+			json.Unmarshal(damageAtSlotLevelJSON, &damageAtSlotLevel)
+			json.Unmarshal(healAtSlotLevelJSON, &healAtSlotLevel)
+			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components, DamageAtSlotLevel: damageAtSlotLevel, HealAtSlotLevel: healAtSlotLevel}
 		}
 		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
 	}
@@ -10350,17 +10369,22 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 	
 	// Get spell info
 	var spellName, damageDice, damageType, savingThrow, description string
+	var damageAtSlotLevelJSON []byte
 	var spellLevel int
 	var isRitual bool
 	err = db.QueryRow(`
 		SELECT name, COALESCE(damage_dice, ''), COALESCE(damage_type, ''), COALESCE(saving_throw, ''), 
-		       COALESCE(description, ''), level, COALESCE(is_ritual, false)
+		       COALESCE(description, ''), level, COALESCE(is_ritual, false), COALESCE(damage_at_slot_level, '{}')
 		FROM spells WHERE slug = $1
-	`, req.SpellSlug).Scan(&spellName, &damageDice, &damageType, &savingThrow, &description, &spellLevel, &isRitual)
+	`, req.SpellSlug).Scan(&spellName, &damageDice, &damageType, &savingThrow, &description, &spellLevel, &isRitual, &damageAtSlotLevelJSON)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "spell_not_found", "slug": req.SpellSlug})
 		return
 	}
+	
+	// Parse damage at slot level for upcasting (v0.8.28)
+	damageAtSlotLevel := map[string]string{}
+	json.Unmarshal(damageAtSlotLevelJSON, &damageAtSlotLevel)
 	
 	// Check ritual casting
 	usedSlot := true
@@ -10435,10 +10459,23 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	// Roll base damage once (same for all targets)
+	// Determine actual slot level used (for upcast damage)
+	actualSlotLevel := spellLevel
+	if req.SlotLevel > spellLevel {
+		actualSlotLevel = req.SlotLevel
+	}
+	
+	// Roll base damage once (same for all targets) - use upcast dice if available (v0.8.28)
+	actualDamageDice := damageDice
+	if len(damageAtSlotLevel) > 0 {
+		slotKey := fmt.Sprintf("%d", actualSlotLevel)
+		if upcastDice, ok := damageAtSlotLevel[slotKey]; ok {
+			actualDamageDice = upcastDice
+		}
+	}
 	baseDamage := 0
-	if damageDice != "" {
-		baseDamage = rollDamage(damageDice, false)
+	if actualDamageDice != "" {
+		baseDamage = rollDamage(actualDamageDice, false)
 	}
 	
 	// Process each target
@@ -11911,6 +11948,27 @@ func resolveAction(action, description string, charID int) string {
 		descLower := strings.ToLower(description)
 		isRitualCast := strings.Contains(descLower, "ritual") || strings.Contains(descLower, "as a ritual")
 		
+		// Parse upcast slot level from description (v0.8.28)
+		// Supports: "at level 5", "at 5th level", "using a level 5 slot", "using 5th level slot"
+		requestedSlotLevel := 0
+		upcastPatterns := []string{
+			`at level (\d+)`,
+			`at (\d+)(?:st|nd|rd|th) level`,
+			`using (?:a )?level (\d+)`,
+			`using (?:a )?(\d+)(?:st|nd|rd|th) level`,
+			`with (?:a )?level (\d+)`,
+			`with (?:a )?(\d+)(?:st|nd|rd|th) level`,
+		}
+		for _, pattern := range upcastPatterns {
+			re := regexp.MustCompile(pattern)
+			if matches := re.FindStringSubmatch(descLower); len(matches) > 1 {
+				if lvl, err := strconv.Atoi(matches[1]); err == nil {
+					requestedSlotLevel = lvl
+					break
+				}
+			}
+		}
+		
 		// Get spellcasting ability modifier
 		classKey := strings.ToLower(class)
 		spellMod := 0
@@ -11952,28 +12010,42 @@ func resolveAction(action, description string, charID int) string {
 				return fmt.Sprintf("Ritual casting %s (takes 10 extra minutes, no spell slot used). (DC %d) %s", spell.Name, saveDC, spell.Description)
 			}
 			
-			// Check and use spell slot (non-ritual)
+			// Determine slot level to use (base spell level or upcast level)
 			slotLevel := spell.Level
+			if requestedSlotLevel > 0 {
+				if requestedSlotLevel < spell.Level {
+					return fmt.Sprintf("Cannot cast %s at level %d - spell requires at least level %d!", spell.Name, requestedSlotLevel, spell.Level)
+				}
+				if requestedSlotLevel > 9 {
+					return fmt.Sprintf("Cannot cast at level %d - maximum spell slot level is 9!", requestedSlotLevel)
+				}
+				slotLevel = requestedSlotLevel
+			}
+			
+			// Check and use spell slot (non-ritual)
 			if slotLevel > 0 {
 				slots := getSpellSlots(class, level)
-				if totalSlots, ok := slots[slotLevel]; ok && totalSlots > 0 {
-					// Get used slots
-					var usedJSON []byte
-					db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
-					var used map[string]int
-					json.Unmarshal(usedJSON, &used)
-					
-					usedKey := fmt.Sprintf("%d", slotLevel)
-					usedSlots := used[usedKey]
-					if usedSlots >= totalSlots {
-						return fmt.Sprintf("Cannot cast %s - no level %d spell slots remaining!", spell.Name, slotLevel)
-					}
-					
-					// Use the slot
-					used[usedKey] = usedSlots + 1
-					updatedJSON, _ := json.Marshal(used)
-					db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, charID)
+				totalSlots, hasSlot := slots[slotLevel]
+				if !hasSlot || totalSlots == 0 {
+					return fmt.Sprintf("Cannot cast %s - you don't have level %d spell slots!", spell.Name, slotLevel)
 				}
+				
+				// Get used slots
+				var usedJSON []byte
+				db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+				var used map[string]int
+				json.Unmarshal(usedJSON, &used)
+				
+				usedKey := fmt.Sprintf("%d", slotLevel)
+				usedSlots := used[usedKey]
+				if usedSlots >= totalSlots {
+					return fmt.Sprintf("Cannot cast %s - no level %d spell slots remaining!", spell.Name, slotLevel)
+				}
+				
+				// Use the slot
+				used[usedKey] = usedSlots + 1
+				updatedJSON, _ := json.Marshal(used)
+				db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, charID)
 			}
 			
 			// Handle concentration
@@ -11982,18 +12054,45 @@ func resolveAction(action, description string, charID int) string {
 				db.Exec("UPDATE characters SET concentrating_on = $1 WHERE id = $2", spell.Name, charID)
 			}
 			
+			// Determine damage/healing dice based on slot level (upcasting v0.8.28)
+			upcastInfo := ""
+			if requestedSlotLevel > spell.Level {
+				upcastInfo = fmt.Sprintf(" (upcast at level %d)", requestedSlotLevel)
+			}
+			
 			if spell.DamageDice != "" {
-				dmg := rollDamage(spell.DamageDice, false)
+				// Check for upcast damage
+				damageDice := spell.DamageDice
+				slotKey := fmt.Sprintf("%d", slotLevel)
+				if len(spell.DamageAtSlotLevel) > 0 {
+					if upcastDice, ok := spell.DamageAtSlotLevel[slotKey]; ok {
+						damageDice = upcastDice
+					}
+				}
+				
+				dmg := rollDamage(damageDice, false)
 				saveInfo := ""
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s! %d %s damage%s. %s", spell.Name, dmg, spell.DamageType, saveInfo, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s. %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, spell.Description)
 			} else if spell.Healing != "" {
-				heal := rollDamage(spell.Healing, false) + spellMod
-				return fmt.Sprintf("Cast %s! Heals %d HP. %s", spell.Name, heal, spell.Description)
+				// Check for upcast healing
+				healDice := spell.Healing
+				slotKey := fmt.Sprintf("%d", slotLevel)
+				if len(spell.HealAtSlotLevel) > 0 {
+					if upcastDice, ok := spell.HealAtSlotLevel[slotKey]; ok {
+						// Replace "MOD" with actual modifier
+						healDice = strings.Replace(upcastDice, " + MOD", "", 1)
+						healDice = strings.Replace(upcastDice, "+ MOD", "", 1)
+						healDice = strings.Replace(upcastDice, "+MOD", "", 1)
+					}
+				}
+				
+				heal := rollDamage(healDice, false) + spellMod
+				return fmt.Sprintf("Cast %s%s! Heals %d HP. %s", spell.Name, upcastInfo, heal, spell.Description)
 			}
-			return fmt.Sprintf("Cast %s! (DC %d) %s", spell.Name, saveDC, spell.Description)
+			return fmt.Sprintf("Cast %s%s! (DC %d) %s", spell.Name, upcastInfo, saveDC, spell.Description)
 		}
 		return fmt.Sprintf("Cast spell: %s (Save DC: %d)", description, saveDC)
 	
@@ -15902,21 +16001,23 @@ type SRDAction struct {
 // srdMonsters lives in Postgres - queried via handleUniverseMonster(s)
 
 type SRDSpell struct {
-	Name        string `json:"name"`
-	Level       int    `json:"level"`
-	School      string `json:"school"`
-	CastingTime string `json:"casting_time"`
-	Range       string `json:"range"`
-	Components  string `json:"components"`
-	Duration    string `json:"duration"`
-	Description string `json:"description"`
-	DamageDice  string `json:"damage_dice,omitempty"`
-	DamageType  string `json:"damage_type,omitempty"`
-	SavingThrow string `json:"saving_throw,omitempty"`
-	Healing     string `json:"healing,omitempty"`
-	IsRitual    bool   `json:"is_ritual,omitempty"`
-	AoEShape    string `json:"aoe_shape,omitempty"`
-	AoESize     int    `json:"aoe_size,omitempty"`
+	Name               string            `json:"name"`
+	Level              int               `json:"level"`
+	School             string            `json:"school"`
+	CastingTime        string            `json:"casting_time"`
+	Range              string            `json:"range"`
+	Components         string            `json:"components"`
+	Duration           string            `json:"duration"`
+	Description        string            `json:"description"`
+	DamageDice         string            `json:"damage_dice,omitempty"`
+	DamageType         string            `json:"damage_type,omitempty"`
+	SavingThrow        string            `json:"saving_throw,omitempty"`
+	Healing            string            `json:"healing,omitempty"`
+	IsRitual           bool              `json:"is_ritual,omitempty"`
+	AoEShape           string            `json:"aoe_shape,omitempty"`
+	AoESize            int               `json:"aoe_size,omitempty"`
+	DamageAtSlotLevel  map[string]string `json:"damage_at_slot_level,omitempty"`
+	HealAtSlotLevel    map[string]string `json:"heal_at_slot_level,omitempty"`
 }
 
 // srdSpells lives in Postgres - queried via handleUniverseSpell(s), cached in srdSpellsMemory for resolveAction
