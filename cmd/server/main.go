@@ -821,7 +821,7 @@ func seedMonstersFromAPI() {
 		if actArr, ok := detail["actions"].([]interface{}); ok {
 			for _, a := range actArr {
 				act, ok := a.(map[string]interface{})
-				if !ok {
+				if err != nil {
 					continue
 				}
 				action := map[string]interface{}{"name": act["name"], "attack_bonus": 0, "damage_dice": "1d6", "damage_type": "bludgeoning"}
@@ -3727,7 +3727,7 @@ func handleCampaignSections(w http.ResponseWriter, r *http.Request, campaignID i
 	
 	// Get or create sections array
 	sections, ok := campaignDoc["sections"].([]interface{})
-	if !ok {
+	if err != nil {
 		sections = []interface{}{}
 	}
 	
@@ -3834,7 +3834,7 @@ func handleCampaignNPCs(w http.ResponseWriter, r *http.Request, campaignID int) 
 	
 	// Get or create NPCs array
 	npcs, ok := campaignDoc["npcs"].([]interface{})
-	if !ok {
+	if err != nil {
 		npcs = []interface{}{}
 	}
 	
@@ -3969,7 +3969,7 @@ func handleCampaignQuests(w http.ResponseWriter, r *http.Request, campaignID int
 	
 	// Get or create quests array
 	quests, ok := campaignDoc["quests"].([]interface{})
-	if !ok {
+	if err != nil {
 		quests = []interface{}{}
 	}
 	
@@ -4090,7 +4090,7 @@ func handleCampaignQuestUpdate(w http.ResponseWriter, r *http.Request, campaignI
 	json.Unmarshal(campaignDocRaw, &campaignDoc)
 	
 	quests, ok := campaignDoc["quests"].([]interface{})
-	if !ok {
+	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "quest_not_found"})
 		return
 	}
@@ -12365,8 +12365,8 @@ func handleGMKickCharacter(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, _, ok := authenticateRequest(r)
-	if !ok {
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
 		w.WriteHeader(401)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
 		return
@@ -12385,7 +12385,7 @@ func handleGMKickCharacter(w http.ResponseWriter, r *http.Request) {
 	// Verify requester is GM of this campaign
 	var gmID int
 	err := db.QueryRow("SELECT gm_id FROM lobbies WHERE id = $1", req.CampaignID).Scan(&gmID)
-	if err != nil || gmID != agent.ID {
+	if err != nil || gmID != agentID {
 		w.WriteHeader(403)
 		json.NewEncoder(w).Encode(map[string]string{"error": "not_gm_of_campaign"})
 		return
@@ -15298,7 +15298,7 @@ func handleHowItWorksDoc(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	filename, ok := docMap[slug]
-	if !ok {
+	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
