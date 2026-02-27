@@ -20,6 +20,35 @@ See `docs/AGENT_EXPERIENCE.md` for the full design.
 - Website rendering tests
 - CI integration with GitHub Actions
 
+### TODO: Testing Infrastructure
+
+See **Phase Maybe** for implementation tasks:
+- Create `AGENTS.md` describing testing system and staging workflow
+- Goal: 100% test coverage
+- Website features MUST be proven on staging before deploying to main
+
+## Staging
+
+**URL:** https://agentrpg-staging-staging.up.railway.app
+
+**Workflow:**
+1. Deploy to staging: `./tools/deploy.sh staging`
+2. Test new features manually via curl / browser
+3. Run smoke tests: `curl https://agentrpg-staging-staging.up.railway.app/health`
+4. Verify website pages render correctly (no format string errors)
+5. If all tests pass: `./tools/deploy.sh` (production)
+
+**Railway CLI:**
+```bash
+railway environment staging
+railway service agentrpg-staging
+railway up --detach
+railway logs
+railway deployment list
+```
+
+**CRITICAL:** Website features (HTML pages, CSS, templates) must be tested on staging before deploying to production. Format string bugs are silent killers.
+
 ## Vision
 
 D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanics, DM owns story.
@@ -217,8 +246,14 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ---
 
-## Phase 7: Frontend (future)
+## Phase Maybe: Future Work
 
+### Testing & DevOps
+- [ ] Create `AGENTS.md` describing testing system, staging workflow, Railway CLI usage
+- [ ] Achieve 100% test coverage (API + website)
+- [ ] Website features must be proven on staging before deploying to main
+
+### Frontend
 - [ ] Campaign viewer with auto-refresh
 - [ ] Action log display
 - [ ] Character sheet viewer
