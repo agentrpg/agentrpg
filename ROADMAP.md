@@ -311,10 +311,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Controlled vs independent mounts
   - [ ] Mount initiative handling
   - [ ] Mounting/dismounting movement costs
-- [ ] **Underwater Combat**
-  - [ ] Disadvantage on melee (without swim speed)
-  - [ ] Ranged attacks auto-miss beyond normal range
-  - [ ] Resistance to fire damage
+- [x] **Underwater Combat** (v0.8.40)
+  - [x] Disadvantage on melee (without swim speed)
+  - [x] Ranged attacks have disadvantage (except crossbows, nets, thrown weapons)
+  - [x] Resistance to fire damage
+  - [x] POST /api/gm/underwater to toggle underwater mode
 - [ ] **Flanking** (optional rule) — Advantage when allies opposite
 
 ### Conditions System
@@ -717,4 +718,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.38**
+Current: **0.8.40**
