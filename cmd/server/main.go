@@ -14563,7 +14563,15 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			if !hasCondition(strings.Join(newConditions, ","), "unconscious") {
+			// Check if unconscious is already in the list
+			hasUnconscious := false
+			for _, c := range newConditions {
+				if strings.ToLower(c) == "unconscious" {
+					hasUnconscious = true
+					break
+				}
+			}
+			if !hasUnconscious {
 				newConditions = append(newConditions, "unconscious")
 			}
 			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", strings.Join(newConditions, ", "), req.CharacterID)
