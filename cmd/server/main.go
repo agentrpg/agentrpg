@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.36
+// @version 0.8.40
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.39"
+const version = "0.8.40"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -106,6 +106,17 @@ func applyDamageResistance(charID int, damage int, damageType string) DamageModR
 			result.Resistances = append(result.Resistances, "all (petrified)")
 			result.WasHalved = true
 			break
+		}
+	}
+	
+	// Underwater combat: fire damage is halved (v0.8.40)
+	if strings.ToLower(damageType) == "fire" {
+		var lobbyID int
+		db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1", charID).Scan(&lobbyID)
+		if isUnderwaterCombat(lobbyID) && !result.WasHalved {
+			result.FinalDamage = result.FinalDamage / 2
+			result.Resistances = append(result.Resistances, "fire (underwater)")
+			result.WasHalved = true
 		}
 	}
 	
@@ -375,6 +386,7 @@ func main() {
 	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
 	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
 	http.HandleFunc("/api/gm/suffocation", handleGMSuffocation)
+	http.HandleFunc("/api/gm/underwater", handleGMUnderwater)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/observe", handleObserve)
@@ -635,6 +647,11 @@ func initDB() {
 		-- Lair action tracking (v0.8.37) - only one lair action per round
 		-- Tracks which round a lair action was last used in
 		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS lair_action_used_round INTEGER DEFAULT 0;
+		
+		-- Underwater combat tracking (v0.8.40)
+		-- When true, melee attacks have disadvantage, ranged attacks have disadvantage
+		-- (unless crossbow/net/thrown), and fire damage is halved
+		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS underwater BOOLEAN DEFAULT FALSE;
 		
 		-- Magic item attunement (max 3 attuned items per character)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attuned_items JSONB DEFAULT '[]';
@@ -13153,6 +13170,22 @@ func resolveAction(action, description string, charID int) string {
 		// Get condition-based advantage/disadvantage (pass isRanged for prone handling)
 		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{}, isRangedAttack)
 		
+		// Underwater combat check (v0.8.40)
+		// Melee attacks have disadvantage, ranged attacks have disadvantage unless exempt weapon
+		var lobbyID int
+		db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1", charID).Scan(&lobbyID)
+		if isUnderwaterCombat(lobbyID) {
+			if !isRangedAttack {
+				// Melee attacks always have disadvantage underwater (unless creature has swim speed - not tracked)
+				hasDisadvantage = true
+			} else {
+				// Ranged attacks have disadvantage unless crossbow/net/thrown
+				if !isUnderwaterExemptWeapon(weaponKey) {
+					hasDisadvantage = true
+				}
+			}
+		}
+		
 		// Override with explicit request
 		if requestedAdvantage {
 			hasAdvantage = true
@@ -14675,6 +14708,163 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 			"valid_actions": []string{"start", "tick", "end"},
 		})
 	}
+}
+
+// isUnderwaterCombat checks if combat in the given campaign is underwater
+func isUnderwaterCombat(lobbyID int) bool {
+	var underwater bool
+	err := db.QueryRow("SELECT COALESCE(underwater, false) FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&underwater)
+	if err != nil {
+		return false
+	}
+	return underwater
+}
+
+// isUnderwaterExemptWeapon checks if a weapon is exempt from underwater disadvantage
+// Crossbows, nets, and thrown weapons (javelin, trident, spear, dart) work normally
+func isUnderwaterExemptWeapon(weaponKey string) bool {
+	exemptWeapons := map[string]bool{
+		"crossbow-light": true,
+		"crossbow-heavy": true,
+		"crossbow-hand":  true,
+		"net":            true,
+		"javelin":        true,
+		"trident":        true,
+		"spear":          true,
+		"dart":           true,
+	}
+	return exemptWeapons[strings.ToLower(weaponKey)]
+}
+
+// handleGMUnderwater godoc
+// @Summary Toggle underwater combat mode
+// @Description Set or toggle underwater combat for a campaign. When underwater: melee attacks have disadvantage, ranged attacks have disadvantage (unless crossbow/net/thrown), fire damage is halved.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{campaign_id=integer,underwater=boolean} true "Underwater combat settings. If underwater is omitted, toggles current state."
+// @Success 200 {object} map[string]interface{} "Underwater status updated"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/underwater [post]
+func handleGMUnderwater(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CampaignID int   `json:"campaign_id"`
+		Underwater *bool `json:"underwater"` // Pointer to allow nil (toggle)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CampaignID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "campaign_id required",
+		})
+		return
+	}
+	
+	// Verify agent is DM
+	var dmID int
+	err = db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", req.CampaignID).Scan(&dmID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "campaign_not_found",
+			"message": fmt.Sprintf("Campaign %d not found", req.CampaignID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this campaign",
+		})
+		return
+	}
+	
+	// Check if combat state exists
+	var currentUnderwater bool
+	err = db.QueryRow("SELECT COALESCE(underwater, false) FROM combat_state WHERE lobby_id = $1", req.CampaignID).Scan(&currentUnderwater)
+	if err != nil {
+		// No combat state - create one (can set underwater even outside active combat)
+		newState := false
+		if req.Underwater != nil {
+			newState = *req.Underwater
+		}
+		_, err = db.Exec(`
+			INSERT INTO combat_state (lobby_id, active, underwater)
+			VALUES ($1, false, $2)
+			ON CONFLICT (lobby_id) DO UPDATE SET underwater = $2
+		`, req.CampaignID, newState)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "message": err.Error()})
+			return
+		}
+		currentUnderwater = newState
+	} else {
+		// Determine new state (toggle if not specified)
+		newState := !currentUnderwater
+		if req.Underwater != nil {
+			newState = *req.Underwater
+		}
+		
+		_, err = db.Exec("UPDATE combat_state SET underwater = $1 WHERE lobby_id = $2", newState, req.CampaignID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "message": err.Error()})
+			return
+		}
+		currentUnderwater = newState
+	}
+	
+	// Log the action
+	statusText := "The party surfaces"
+	if currentUnderwater {
+		statusText = "The party submerges into water"
+	}
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4)
+	`, req.CampaignID, "environment", statusText,
+		fmt.Sprintf("Underwater combat: %v", currentUnderwater))
+	
+	effects := []string{}
+	if currentUnderwater {
+		effects = append(effects, "Melee attacks have disadvantage (without swim speed)")
+		effects = append(effects, "Ranged attacks have disadvantage (except crossbows, nets, and thrown weapons)")
+		effects = append(effects, "Fire damage is halved (resistance)")
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"campaign_id": req.CampaignID,
+		"underwater": currentUnderwater,
+		"effects":    effects,
+		"message":    statusText,
+		"note":       "Underwater effects apply to all combatants. Crossbows, nets, and thrown weapons (javelin, trident, spear, dart) work normally for ranged attacks.",
+	})
 }
 
 // handleGMCounterspell godoc
