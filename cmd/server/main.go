@@ -67,6 +67,36 @@ var xpThresholds = map[int]int{
 }
 
 // getLevelForXP returns the level a character should be at given their XP
+
+// DamageModifier holds damage resistance calculation results
+type DamageModifier struct {
+	OriginalDamage int
+	FinalDamage    int
+	WasHalved      bool
+	Resistances    []string
+}
+
+// applyDamageResistance checks for damage resistance conditions and returns modified damage
+func applyDamageResistance(characterID int, damage int, damageType string) DamageModifier {
+	result := DamageModifier{
+		OriginalDamage: damage,
+		FinalDamage:    damage,
+		WasHalved:      false,
+		Resistances:    []string{},
+	}
+	
+	// Check for petrified condition (halves all damage per 5e PHB p291)
+	var conditions string
+	db.QueryRow("SELECT COALESCE(conditions, '') FROM characters WHERE id = $1", characterID).Scan(&conditions)
+	
+	if strings.Contains(strings.ToLower(conditions), "petrified") {
+		result.FinalDamage = damage / 2
+		result.WasHalved = true
+		result.Resistances = append(result.Resistances, "petrified")
+	}
+	
+	return result
+}
 func getLevelForXP(xp int) int {
 	level := 1
 	for l := 20; l >= 1; l-- {
@@ -1534,6 +1564,51 @@ func getSaveDisadvantage(charID int, ability string) bool {
 		}
 	}
 	return false
+}
+
+// ============================================
+// DAMAGE RESISTANCE/IMMUNITY (v0.8.26)
+// ============================================
+
+// DamageModResult holds the result of damage modification from resistances/immunities
+type DamageModResult struct {
+	FinalDamage  int
+	Resistances  []string // Types of resistance applied
+	Immunities   []string // Types of immunity applied
+	WasHalved    bool     // True if any resistance halved damage
+	WasNegated   bool     // True if damage was negated by immunity
+}
+
+// applyDamageResistance checks for damage resistance/immunity conditions
+// Currently handles:
+// - Petrified: resistance (half damage) to ALL damage types
+// Returns modified damage and info about applied modifiers
+func applyDamageResistance(charID int, damage int, damageType string) DamageModResult {
+	result := DamageModResult{
+		FinalDamage: damage,
+		Resistances: []string{},
+		Immunities:  []string{},
+	}
+	
+	if damage <= 0 {
+		return result
+	}
+	
+	conditions := getCharConditions(charID)
+	
+	for _, c := range conditions {
+		cLower := strings.ToLower(c)
+		
+		// Petrified: resistance to ALL damage (5e PHB p291)
+		if cLower == "petrified" {
+			result.FinalDamage = damage / 2 // Integer division rounds down
+			result.Resistances = append(result.Resistances, "all (petrified)")
+			result.WasHalved = true
+			break // Resistance doesn't stack
+		}
+	}
+	
+	return result
 }
 
 // ============================================
