@@ -15246,8 +15246,19 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	// Get party members
-	var party strings.Builder
+	// Get party members with turn tracking
+	type PartyMember struct {
+		CharID    int
+		CharName  string
+		Class     string
+		Race      string
+		Level     int
+		HP        int
+		MaxHP     int
+		AgentID   int
+		AgentName string
+	}
+	var partyMembers []PartyMember
 	partyRows, _ := db.Query(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, a.id, a.name
 		FROM characters c
@@ -15257,26 +15268,79 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	playerCount := 0
 	if partyRows != nil {
 		for partyRows.Next() {
-			var charID, level, hp, maxHP, agentID int
-			var charName, class, race, agentName string
-			partyRows.Scan(&charID, &charName, &class, &race, &level, &hp, &maxHP, &agentID, &agentName)
+			var pm PartyMember
+			partyRows.Scan(&pm.CharID, &pm.CharName, &pm.Class, &pm.Race, &pm.Level, &pm.HP, &pm.MaxHP, &pm.AgentID, &pm.AgentName)
 			playerCount++
-			hpStatus := "healthy"
-			if hp < maxHP/2 {
-				hpStatus = "wounded"
-			}
-			if hp < maxHP/4 {
-				hpStatus = "critical"
-			}
-			party.WriteString(fmt.Sprintf(`
+			partyMembers = append(partyMembers, pm)
+		}
+		partyRows.Close()
+	}
+	
+	// Build party boxes with turn highlighting
+	var partyBoxes strings.Builder
+	// GM box first
+	gmHighlight := ""
+	if !combatActive {
+		// Exploration mode - GM is not highlighted (players are)
+		gmHighlight = ""
+	}
+	if dmName.Valid && dmID.Valid {
+		partyBoxes.WriteString(fmt.Sprintf(`
+<div class="party-box gm-box%s">
+  <div class="box-label">GM</div>
+  <h4><a href="/profile/%d">%s</a></h4>
+</div>`, gmHighlight, dmID.Int64, dmName.String))
+	}
+	
+	// Player boxes
+	for _, pm := range partyMembers {
+		hpStatus := "healthy"
+		if pm.HP < pm.MaxHP/2 {
+			hpStatus = "wounded"
+		}
+		if pm.HP < pm.MaxHP/4 {
+			hpStatus = "critical"
+		}
+		
+		// Determine if this player's turn
+		isCurrentTurn := combatActive && pm.CharName == currentTurnName
+		isOpenEnded := !combatActive // Exploration mode = all players can act
+		
+		highlightClass := ""
+		turnLabel := ""
+		if isCurrentTurn {
+			highlightClass = " current-turn"
+			turnLabel = `<div class="turn-label">Current Turn</div>`
+		} else if isOpenEnded {
+			highlightClass = " can-act"
+		}
+		
+		partyBoxes.WriteString(fmt.Sprintf(`
+<div class="party-box%s">
+  %s
+  <h4><a href="/character/%d">%s</a></h4>
+  <p class="class-info">%s %s</p>
+  <p class="%s">HP: %d/%d</p>
+</div>`, highlightClass, turnLabel, pm.CharID, pm.CharName, pm.Race, pm.Class, hpStatus, pm.HP, pm.MaxHP))
+	}
+	
+	// Legacy party grid for left column (keep for now)
+	var party strings.Builder
+	for _, pm := range partyMembers {
+		hpStatus := "healthy"
+		if pm.HP < pm.MaxHP/2 {
+			hpStatus = "wounded"
+		}
+		if pm.HP < pm.MaxHP/4 {
+			hpStatus = "critical"
+		}
+		party.WriteString(fmt.Sprintf(`
 <div class="party-member">
   <h4><a href="/character/%d">%s</a></h4>
   <p>Level %d %s %s</p>
   <p class="%s">HP: %d/%d</p>
   <p class="muted">Played by <a href="/profile/%d">%s</a></p>
-</div>`, charID, charName, level, race, class, hpStatus, hp, maxHP, agentID, agentName))
-		}
-		partyRows.Close()
+</div>`, pm.CharID, pm.CharName, pm.Level, pm.Race, pm.Class, hpStatus, pm.HP, pm.MaxHP, pm.AgentID, pm.AgentName))
 	}
 	
 	// Get observations
@@ -15428,22 +15492,49 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		actionsHTML = actions.String()
 	}
 	
-	turnInfoHTML := ""
-	if currentTurnName != "" {
-		turnInfoHTML = fmt.Sprintf(`<p class="turn-info" style="background:var(--note-bg);padding:1em;border-radius:8px;margin-top:1em;border-left:4px solid #ffc107;"><strong>⏳ Current Turn:</strong> <span style="font-size:1.2em;font-weight:bold;">%s</span></p>`, currentTurnName)
+	// Party boxes HTML for top of page
+	partyBoxesHTML := ""
+	if partyBoxes.Len() > 0 {
+		partyBoxesHTML = `<div class="party-boxes-row">` + partyBoxes.String() + `</div>`
 	}
 	
 	content := fmt.Sprintf(`
 <style>
-.campaign-header{margin-bottom:2em}
+.campaign-header{margin-bottom:1em}
 .badge{padding:0.3em 0.8em;border-radius:4px;font-size:0.9em}
 .badge.recruiting{background:#d4edda;color:#155724}
 .badge.active{background:#f8d7da;color:#721c24}
 @media(prefers-color-scheme:dark){.badge.recruiting{background:#2a4a2a;color:#8f8}.badge.active{background:#4a2a2a;color:#f88}}
 [data-theme="dark"] .badge.recruiting,[data-theme="catppuccin-mocha"] .badge.recruiting,[data-theme="tokyonight"] .badge.recruiting,[data-theme="solarized-dark"] .badge.recruiting{background:#2a4a2a;color:#8f8}
 [data-theme="dark"] .badge.active,[data-theme="catppuccin-mocha"] .badge.active,[data-theme="tokyonight"] .badge.active,[data-theme="solarized-dark"] .badge.active{background:#4a2a2a;color:#f88}
-.meta{color:var(--muted);margin:1em 0}
+.meta{color:var(--muted);margin:0.5em 0}
 .setting{background:var(--note-bg);padding:1.5em;border-radius:8px;margin:1em 0;white-space:pre-wrap;line-height:1.6}
+/* Party boxes at top */
+.party-boxes-row{display:flex;flex-wrap:wrap;gap:1em;margin:1.5em 0;padding:1em;background:var(--note-bg);border-radius:8px}
+.party-box{background:var(--bg);padding:0.8em 1.2em;border-radius:8px;border:2px solid var(--border);min-width:120px;text-align:center;position:relative}
+.party-box h4{margin:0 0 0.3em 0;font-size:1em}
+.party-box .class-info{margin:0;font-size:0.85em;color:var(--muted)}
+.party-box .healthy{color:#28a745;margin:0.3em 0 0 0;font-size:0.9em}
+.party-box .wounded{color:#ffc107;margin:0.3em 0 0 0;font-size:0.9em}
+.party-box .critical{color:#dc3545;margin:0.3em 0 0 0;font-size:0.9em}
+.party-box.gm-box{border-color:#6c757d;background:var(--note-bg)}
+.party-box .box-label{font-size:0.7em;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em}
+/* Current turn highlight */
+.party-box.current-turn{border-color:#ffc107;box-shadow:0 0 12px rgba(255,193,7,0.5)}
+.party-box .turn-label{position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#ffc107;color:#000;font-size:0.7em;padding:0.2em 0.6em;border-radius:4px;font-weight:bold;white-space:nowrap}
+/* Open-ended (exploration) - all players can act */
+.party-box.can-act{border-color:#28a745;box-shadow:0 0 8px rgba(40,167,69,0.4)}
+@media(prefers-color-scheme:dark){
+  .party-box .healthy{color:#8f8}
+  .party-box .wounded{color:#ff8}
+  .party-box .critical{color:#f88}
+  .party-box.current-turn{box-shadow:0 0 12px rgba(255,193,7,0.3)}
+  .party-box.can-act{box-shadow:0 0 8px rgba(40,167,69,0.3)}
+}
+[data-theme="dark"] .party-box .healthy,[data-theme="catppuccin-mocha"] .party-box .healthy,[data-theme="tokyonight"] .party-box .healthy,[data-theme="solarized-dark"] .party-box .healthy{color:#8f8}
+[data-theme="dark"] .party-box .wounded,[data-theme="catppuccin-mocha"] .party-box .wounded,[data-theme="tokyonight"] .party-box .wounded,[data-theme="solarized-dark"] .party-box .wounded{color:#ff8}
+[data-theme="dark"] .party-box .critical,[data-theme="catppuccin-mocha"] .party-box .critical,[data-theme="tokyonight"] .party-box .critical,[data-theme="solarized-dark"] .party-box .critical{color:#f88}
+/* Legacy party grid */
 .party-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:1em}
 .party-member{background:var(--note-bg);padding:1em;border-radius:8px}
 .party-member h4{margin:0 0 0.5em 0}
@@ -15484,18 +15575,15 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
     <strong>Players:</strong> %d/%d |
     <strong>Started:</strong> %s
   </p>
-  %s
 </div>
+
+%s
 
 <div class="campaign-layout">
   <div class="left-column">
     <div class="section" style="margin:0">
       <h2>📜 Setting</h2>
       <div class="setting">%s</div>
-    </div>
-    <div class="section" style="margin:0">
-      <h2>⚔️ The Party</h2>
-      %s
     </div>
     <div class="section" style="margin:0">
       <h2>👁️ Observations</h2>
@@ -15512,7 +15600,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 
 <p class="muted"><a href="/api/campaigns/%d">View raw API data →</a></p>
 `, name, statusBadge, dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("January 2, 2006"),
-		turnInfoHTML, setting, partyHTML, obsHTML, actionsHTML, campaignID)
+		partyBoxesHTML, setting, obsHTML, actionsHTML, campaignID)
 	
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
