@@ -418,10 +418,15 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] S (Somatic) — Need free hand (tracked but not enforced yet)
   - [x] M (Material) — Need component pouch/focus (arcane focus, holy symbol, druidic focus, musical instrument, wand, staff, rod, orb, crystal, totem, amulet, emblem)
   - [ ] Consumed materials tracking (remove from inventory) — future enhancement
-- [ ] **Counterspell/Dispel Magic**
-  - [ ] Reaction to counter (within 60ft, can see)
+- [x] **Counterspell** (v0.8.34)
+  - [x] Reaction to counter (`POST /api/gm/counterspell`)
+  - [x] Auto-succeed if slot ≥ target spell level
+  - [x] Ability check (DC 10 + spell level) otherwise
+  - [x] Consumes spell slot (minimum 3rd level)
+- [ ] **Dispel Magic** (TODO)
+  - [ ] End ongoing spell effects
   - [ ] Auto-succeed if slot ≥ target spell level
-  - [ ] Ability check (DC 10 + spell level) otherwise
+  - [ ] Ability check otherwise
 - [ ] **Spell Schools** (for class features)
   - [ ] Abjuration, Conjuration, Divination, Enchantment
   - [ ] Evocation, Illusion, Necromancy, Transmutation
@@ -698,4 +703,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.31**
+Current: **0.8.34**

@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.33
+// @version 0.8.34
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.33"
+const version = "0.8.34"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -373,6 +373,7 @@ func main() {
 	http.HandleFunc("/api/trigger-readied", handleTriggerReadied)
 	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
 	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
+	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -13983,6 +13984,235 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	if consequence != "" {
 		response["consequence"] = consequence
 	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMCounterspell godoc
+// @Summary Cast Counterspell to interrupt enemy spellcasting
+// @Description Counterspell (3rd level abjuration): Attempt to interrupt a spell being cast. Auto-succeeds if slot level >= target spell level, otherwise requires ability check (DC 10 + spell level).
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{caster_id=integer,target_spell_level=integer,slot_level=integer} true "Counterspell details (slot_level defaults to 3)"
+// @Success 200 {object} map[string]interface{} "Counterspell result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/counterspell [post]
+func handleGMCounterspell(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CasterID         int `json:"caster_id"`
+		TargetSpellLevel int `json:"target_spell_level"`
+		SlotLevel        int `json:"slot_level"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.CasterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "caster_id required",
+		})
+		return
+	}
+	
+	if req.TargetSpellLevel < 1 || req.TargetSpellLevel > 9 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_spell_level must be between 1 and 9",
+		})
+		return
+	}
+	
+	// Default to 3rd level slot (minimum for Counterspell)
+	if req.SlotLevel == 0 {
+		req.SlotLevel = 3
+	}
+	if req.SlotLevel < 3 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "Counterspell requires at least a 3rd level spell slot",
+		})
+		return
+	}
+	if req.SlotLevel > 9 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "Maximum spell slot level is 9",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the caster's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CasterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CasterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var level, intl, wis, cha int
+	err = db.QueryRow(`
+		SELECT name, class, level, intl, wis, cha FROM characters WHERE id = $1
+	`, req.CasterID).Scan(&charName, &class, &level, &intl, &wis, &cha)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Check if character has the spell slot
+	slots := getSpellSlots(class, level)
+	totalSlots, hasSlot := slots[req.SlotLevel]
+	if !hasSlot || totalSlots == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_spell_slots",
+			"message": fmt.Sprintf("%s doesn't have level %d spell slots!", charName, req.SlotLevel),
+		})
+		return
+	}
+	
+	// Get used slots
+	var usedJSON []byte
+	db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", req.CasterID).Scan(&usedJSON)
+	var used map[string]int
+	json.Unmarshal(usedJSON, &used)
+	
+	usedKey := fmt.Sprintf("%d", req.SlotLevel)
+	usedSlots := used[usedKey]
+	if usedSlots >= totalSlots {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_spell_slots",
+			"message": fmt.Sprintf("%s has no level %d spell slots remaining!", charName, req.SlotLevel),
+		})
+		return
+	}
+	
+	// Get spellcasting ability modifier
+	classKey := strings.ToLower(class)
+	spellMod := 0
+	if c, ok := srdClasses[classKey]; ok {
+		switch c.Spellcasting {
+		case "INT":
+			spellMod = modifier(intl)
+		case "WIS":
+			spellMod = modifier(wis)
+		case "CHA":
+			spellMod = modifier(cha)
+		}
+	}
+	
+	// Use the spell slot
+	used[usedKey] = usedSlots + 1
+	updatedJSON, _ := json.Marshal(used)
+	db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, req.CasterID)
+	
+	// Determine success
+	success := false
+	roll := 0
+	totalCheck := 0
+	dc := 10 + req.TargetSpellLevel
+	autoSuccess := req.SlotLevel >= req.TargetSpellLevel
+	
+	if autoSuccess {
+		success = true
+	} else {
+		// Roll d20 + spellcasting modifier vs DC
+		roll = rollDie(20)
+		totalCheck = roll + spellMod
+		success = totalCheck >= dc
+	}
+	
+	// Build response
+	response := map[string]interface{}{
+		"success":            true, // API call succeeded
+		"counterspell_success": success,
+		"caster":             charName,
+		"caster_id":          req.CasterID,
+		"slot_level_used":    req.SlotLevel,
+		"target_spell_level": req.TargetSpellLevel,
+		"spell_slot_consumed": true,
+		"slots_remaining":    totalSlots - used[usedKey],
+	}
+	
+	var actionResult string
+	if autoSuccess {
+		response["auto_success"] = true
+		response["message"] = fmt.Sprintf("✨ %s casts Counterspell at level %d! The level %d spell is automatically countered!",
+			charName, req.SlotLevel, req.TargetSpellLevel)
+		actionResult = fmt.Sprintf("Counterspell (level %d) vs level %d spell: AUTO SUCCESS",
+			req.SlotLevel, req.TargetSpellLevel)
+	} else {
+		response["ability_check_required"] = true
+		response["dc"] = dc
+		response["roll"] = roll
+		response["spellcasting_modifier"] = spellMod
+		response["total_check"] = totalCheck
+		
+		if success {
+			response["message"] = fmt.Sprintf("✨ %s casts Counterspell at level %d vs a level %d spell! Ability check: %d + %d = %d vs DC %d - SUCCESS! The spell is countered!",
+				charName, req.SlotLevel, req.TargetSpellLevel, roll, spellMod, totalCheck, dc)
+			actionResult = fmt.Sprintf("Counterspell (level %d) vs level %d spell: %d + %d = %d vs DC %d - SUCCESS!",
+				req.SlotLevel, req.TargetSpellLevel, roll, spellMod, totalCheck, dc)
+		} else {
+			response["message"] = fmt.Sprintf("💫 %s casts Counterspell at level %d vs a level %d spell! Ability check: %d + %d = %d vs DC %d - FAILED! The spell goes through!",
+				charName, req.SlotLevel, req.TargetSpellLevel, roll, spellMod, totalCheck, dc)
+			actionResult = fmt.Sprintf("Counterspell (level %d) vs level %d spell: %d + %d = %d vs DC %d - FAILED!",
+				req.SlotLevel, req.TargetSpellLevel, roll, spellMod, totalCheck, dc)
+		}
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("%s casts Counterspell (reaction) vs level %d spell", charName, req.TargetSpellLevel)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CasterID, "counterspell", actionDesc, actionResult)
 	
 	json.NewEncoder(w).Encode(response)
 }
