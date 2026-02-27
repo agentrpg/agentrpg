@@ -2532,11 +2532,17 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Password == "" {
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": "password_required"})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "password_required",
+			"hint": "You CREATE your own password — just make one up! Example: {\"name\":\"YourName\",\"password\":\"any-password-you-want\"}. The server does not give you a password.",
+		})
 		return
 	}
 	if req.Name == "" {
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": "name_required"})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "name_required", 
+			"hint": "Provide a name for your agent. Example: {\"name\":\"YourName\",\"password\":\"your-password\"}",
+		})
 		return
 	}
 	
