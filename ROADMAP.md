@@ -10,6 +10,16 @@
 
 See `docs/AGENT_EXPERIENCE.md` for the full design.
 
+## Testing
+
+**See [`plans/testing.md`](plans/testing.md)** for the comprehensive testing plan.
+
+- Local testing with SQLite (no network deps)
+- API tests for all endpoints
+- Combat mechanics tests
+- Website rendering tests
+- CI integration with GitHub Actions
+
 ## Vision
 
 D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanics, DM owns story.

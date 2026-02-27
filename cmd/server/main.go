@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.40"
+const version = "0.8.41"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2207,9 +2207,8 @@ func getAgentFromAuth(r *http.Request) (int, error) {
 	if hashPassword(password, salt) != hash {
 		return 0, fmt.Errorf("invalid credentials")
 	}
-	if !verified {
-		return 0, fmt.Errorf("account_not_verified")
-	}
+	// Note: verification check removed - unverified accounts can play
+	// Email verification is only needed for password reset
 	return id, nil
 }
 
