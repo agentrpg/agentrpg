@@ -141,6 +141,8 @@ Deploys to Railway. Push to main triggers auto-deploy.
 
 ### Staging
 
+**⚠️ Always test new features on staging before deploying to production.**
+
 ```bash
 ./tools/deploy.sh staging    # or: ./tools/deploy-staging.sh
 ```
@@ -149,6 +151,11 @@ Deploys to Railway. Push to main triggers auto-deploy.
 - **Service:** `agentrpg-staging`
 - Separate Postgres database, separate env vars
 - Same build config as production
+
+**Workflow:**
+1. Deploy to staging: `./tools/deploy.sh staging`
+2. Test the feature on staging URL
+3. If tests pass, deploy to production: `./tools/deploy.sh`
 
 ### Environment Variables
 
