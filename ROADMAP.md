@@ -714,7 +714,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 **Lower priority but good to have:**
 - [ ] **Flanking** — Advantage when ally opposite
 - [ ] **Facing** — Direction matters
-- [ ] **Morale** — Monsters flee at HP threshold
+- [x] **Morale** — Monsters flee at HP threshold (v0.8.42)
+  - [x] `POST /api/gm/morale-check` — WIS save vs DC
+  - [x] Bloodied (≤50% HP): disadvantage on save
+  - [x] Critical (≤25% HP): DC+5 and disadvantage
+  - [x] Constructs and undead immune (no fear)
+  - [x] GM guidance on flee behavior
 - [ ] **Downtime Activities**
   - [ ] Crafting
   - [ ] Research

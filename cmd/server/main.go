@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.40
+// @version 0.8.42
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.41"
+const version = "0.8.42"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -387,6 +387,7 @@ func main() {
 	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
 	http.HandleFunc("/api/gm/suffocation", handleGMSuffocation)
 	http.HandleFunc("/api/gm/underwater", handleGMUnderwater)
+	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/observe", handleObserve)
@@ -15125,6 +15126,247 @@ func handleGMUnderwater(w http.ResponseWriter, r *http.Request) {
 		"message":    statusText,
 		"note":       "Underwater effects apply to all combatants. Crossbows, nets, and thrown weapons (javelin, trident, spear, dart) work normally for ranged attacks.",
 	})
+}
+
+// handleGMMoraleCheck godoc
+// @Summary Check if a monster/NPC attempts to flee (optional morale rule)
+// @Description Optional morale rule: When a creature takes significant damage, it may attempt to flee. Makes a WIS saving throw vs DC (default 10). Below 50% HP = disadvantage, below 25% HP = DC+5. Constructs and undead typically don't make morale checks.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{campaign_id=integer,combatant_name=string,dc=integer,reason=string} true "combatant_name is the monster's name in combat, dc defaults to 10, reason is optional flavor"
+// @Success 200 {object} map[string]interface{} "Morale check result with flee recommendation"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or combatant not found"
+// @Router /gm/morale-check [post]
+func handleGMMoraleCheck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CampaignID    int    `json:"campaign_id"`
+		CombatantName string `json:"combatant_name"`
+		DC            int    `json:"dc"`
+		Reason        string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CampaignID == 0 || req.CombatantName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "campaign_id and combatant_name required",
+		})
+		return
+	}
+	
+	// Default DC is 10
+	if req.DC == 0 {
+		req.DC = 10
+	}
+	
+	// Verify agent is DM
+	var dmID int
+	err = db.QueryRow("SELECT dm_id FROM lobbies WHERE id = $1", req.CampaignID).Scan(&dmID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "campaign_not_found",
+			"message": fmt.Sprintf("Campaign %d not found", req.CampaignID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this campaign",
+		})
+		return
+	}
+	
+	// Get combat state and find the combatant
+	var turnOrderJSON string
+	err = db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", req.CampaignID).Scan(&turnOrderJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_combat",
+			"message": "No active combat in this campaign",
+		})
+		return
+	}
+	
+	// Parse turn order to find the combatant
+	type CombatEntry struct {
+		Name       string `json:"name"`
+		MonsterKey string `json:"monster_key"`
+		HP         int    `json:"hp"`
+		MaxHP      int    `json:"max_hp"`
+		Type       string `json:"type"`
+	}
+	var entries []CombatEntry
+	json.Unmarshal([]byte(turnOrderJSON), &entries)
+	
+	// Find the combatant by name (case-insensitive)
+	var target *CombatEntry
+	for i := range entries {
+		if strings.EqualFold(entries[i].Name, req.CombatantName) {
+			target = &entries[i]
+			break
+		}
+	}
+	
+	if target == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "combatant_not_found",
+			"message": fmt.Sprintf("Combatant '%s' not found in combat", req.CombatantName),
+		})
+		return
+	}
+	
+	// Get monster WIS score from SRD (default to 10 if not found)
+	wisScore := 10
+	var monsterType string
+	if target.MonsterKey != "" {
+		var wis int
+		var mType string
+		err = db.QueryRow("SELECT COALESCE(wis, 10), COALESCE(type, '') FROM monsters WHERE slug = $1", target.MonsterKey).Scan(&wis, &mType)
+		if err == nil {
+			wisScore = wis
+			monsterType = strings.ToLower(mType)
+		}
+	}
+	
+	// Check for creature types that typically don't make morale checks
+	immuneTypes := []string{"construct", "undead"}
+	for _, t := range immuneTypes {
+		if strings.Contains(monsterType, t) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":       true,
+				"combatant":     target.Name,
+				"morale_immune": true,
+				"creature_type": monsterType,
+				"message":       fmt.Sprintf("%s is a %s and does not make morale checks (no fear, no self-preservation)", target.Name, monsterType),
+				"flees":         false,
+			})
+			return
+		}
+	}
+	
+	// Calculate HP percentage
+	hpPercent := 100
+	if target.MaxHP > 0 {
+		hpPercent = (target.HP * 100) / target.MaxHP
+	}
+	
+	// Determine modifiers based on HP
+	effectiveDC := req.DC
+	hasDisadvantage := false
+	modifierNotes := []string{}
+	
+	if hpPercent <= 25 {
+		effectiveDC += 5
+		hasDisadvantage = true
+		modifierNotes = append(modifierNotes, "Critically wounded (≤25% HP): DC+5 and disadvantage")
+	} else if hpPercent <= 50 {
+		hasDisadvantage = true
+		modifierNotes = append(modifierNotes, "Bloodied (≤50% HP): disadvantage on save")
+	}
+	
+	// Calculate WIS modifier
+	wisMod := (wisScore - 10) / 2
+	
+	// Roll WIS saving throw
+	roll1 := rollD20()
+	roll2 := rollD20()
+	usedRoll := roll1
+	
+	if hasDisadvantage {
+		if roll2 < roll1 {
+			usedRoll = roll2
+		}
+	}
+	
+	total := usedRoll + wisMod
+	passed := total >= effectiveDC
+	flees := !passed
+	
+	// Build result message
+	resultStr := ""
+	if hasDisadvantage {
+		resultStr = fmt.Sprintf("d20(%d,%d→%d) + %d (WIS) = %d vs DC %d", roll1, roll2, usedRoll, wisMod, total, effectiveDC)
+	} else {
+		resultStr = fmt.Sprintf("d20(%d) + %d (WIS) = %d vs DC %d", usedRoll, wisMod, total, effectiveDC)
+	}
+	
+	outcome := "HOLDS GROUND"
+	if flees {
+		outcome = "ATTEMPTS TO FLEE"
+	}
+	
+	// Log the action
+	reason := req.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("at %d%% HP", hpPercent)
+	}
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4)
+	`, req.CampaignID, "morale_check", fmt.Sprintf("Morale check: %s %s", target.Name, reason),
+		fmt.Sprintf("%s — %s", resultStr, outcome))
+	
+	response := map[string]interface{}{
+		"success":       true,
+		"combatant":     target.Name,
+		"monster_key":   target.MonsterKey,
+		"creature_type": monsterType,
+		"hp_current":    target.HP,
+		"hp_max":        target.MaxHP,
+		"hp_percent":    hpPercent,
+		"wisdom_score":  wisScore,
+		"wisdom_mod":    wisMod,
+		"dc":            effectiveDC,
+		"roll":          usedRoll,
+		"total":         total,
+		"passed":        passed,
+		"flees":         flees,
+		"message":       fmt.Sprintf("%s %s: %s — %s", target.Name, reason, resultStr, outcome),
+	}
+	
+	if hasDisadvantage {
+		response["disadvantage"] = true
+		response["rolls"] = []int{roll1, roll2}
+	}
+	
+	if len(modifierNotes) > 0 {
+		response["modifiers"] = modifierNotes
+	}
+	
+	if flees {
+		response["gm_guidance"] = "The creature attempts to flee! Consider: Dash action toward exit, Disengage to avoid opportunity attacks, or if cornered, surrender or fight desperately."
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleGMCounterspell godoc
