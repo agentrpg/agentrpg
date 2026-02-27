@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.35
+// @version 0.8.36
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.35"
+const version = "0.8.36"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -611,7 +611,13 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS xp INTEGER DEFAULT 0;
 		
 		-- Gold/Currency tracking (Economy & Inventory - roadmap item)
+		-- Full currency system: cp (copper), sp (silver), ep (electrum), gp (gold), pp (platinum)
+		-- Conversion: 10 cp = 1 sp, 10 sp = 1 gp, 10 gp = 1 pp, 1 ep = 5 sp
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS gold INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS copper INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS silver INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS electrum INTEGER DEFAULT 0;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS platinum INTEGER DEFAULT 0;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS inventory JSONB DEFAULT '[]';
 		
 		-- Ability Score Improvements tracking (Character Advancement - roadmap item)
@@ -5193,7 +5199,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var isStable, isDead, hasInspiration bool
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
-	var gold int
+	var gold, copper, silver, electrum, platinum int
 	var inventoryJSON []byte
 	var skillProfsRaw string
 	var toolProfsRaw string
@@ -5209,7 +5215,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
 			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
-			COALESCE(gold, 0), COALESCE(inventory, '[]'), COALESCE(pending_asi, 0),
+			COALESCE(gold, 0), COALESCE(copper, 0), COALESCE(silver, 0), 
+			COALESCE(electrum, 0), COALESCE(platinum, 0),
+			COALESCE(inventory, '[]'), COALESCE(pending_asi, 0),
 			COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0),
 			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false),
 			COALESCE(tool_proficiencies, ''),
@@ -5220,7 +5228,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
-		&gold, &inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
+		&gold, &copper, &silver, &electrum, &platinum,
+		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw)
 	
 	if err != nil {
@@ -5344,7 +5353,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		"xp":                  xp,
 		"xp_to_next_level":    xpToNextLevel - xp,
 		"xp_threshold":        xpToNextLevel,
-		"gold":                gold,
+		"currency": map[string]interface{}{
+			"cp": copper,
+			"sp": silver,
+			"ep": electrum,
+			"gp": gold,
+			"pp": platinum,
+			"total_in_gp": float64(copper)/100 + float64(silver)/10 + float64(electrum)/2 + float64(gold) + float64(platinum)*10,
+		},
+		"gold":                gold, // Keep for backwards compatibility
 		"inventory":           inventory,
 		"pending_asi":         pendingASI,
 		"hit_dice": map[string]interface{}{
@@ -5455,6 +5472,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	
 	// Get character and campaign info
 	var charID, lobbyID, hp, maxHP, ac, level, tempHP, charXP, charGold int
+	var charCopper, charSilver, charElectrum, charPlatinum int
 	var str, dex, con, intl, wis, cha int
 	var charName, class, race, lobbyName, setting, lobbyStatus string
 	var conditionsJSON, slotsUsedJSON []byte
@@ -5468,7 +5486,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.temp_hp, 0), COALESCE(c.conditions, '[]'), COALESCE(c.spell_slots_used, '{}'),
 			COALESCE(c.concentrating_on, ''), COALESCE(c.death_save_successes, 0), COALESCE(c.death_save_failures, 0),
 			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false),
-			COALESCE(c.xp, 0), COALESCE(c.gold, 0), COALESCE(c.pending_asi, 0),
+			COALESCE(c.xp, 0), COALESCE(c.gold, 0), COALESCE(c.copper, 0), COALESCE(c.silver, 0),
+			COALESCE(c.electrum, 0), COALESCE(c.platinum, 0), COALESCE(c.pending_asi, 0),
 			COALESCE(c.action_used, false), COALESCE(c.bonus_action_used, false), COALESCE(c.movement_remaining, 30)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
@@ -5478,7 +5497,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&str, &dex, &con, &intl, &wis, &cha,
 		&lobbyID, &lobbyName, &setting, &lobbyStatus,
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
-		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &pendingASI,
+		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &charCopper, &charSilver,
+		&charElectrum, &charPlatinum, &pendingASI,
 		&actionUsed, &bonusActionUsed, &movementRemaining)
 	
 	if err != nil {
@@ -5711,7 +5731,11 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"proficiency_bonus": proficiencyBonus(level),
 		"xp":                charXP,
 		"xp_to_next_level":  xpToNext,
-		"gold":              charGold,
+		"currency": map[string]interface{}{
+			"cp": charCopper, "sp": charSilver, "ep": charElectrum, "gp": charGold, "pp": charPlatinum,
+			"total_in_gp": float64(charCopper)/100 + float64(charSilver)/10 + float64(charElectrum)/2 + float64(charGold) + float64(charPlatinum)*10,
+		},
+		"gold":              charGold, // Keep for backwards compatibility
 		"pending_asi":       pendingASI,
 		"stats": map[string]int{
 			"str": str, "dex": dex, "con": con,
@@ -10032,15 +10056,33 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// getCurrencyColumn maps currency type to database column
+func getCurrencyColumn(currencyType string) (string, string, bool) {
+	switch strings.ToLower(currencyType) {
+	case "cp", "copper":
+		return "copper", "cp", true
+	case "sp", "silver":
+		return "silver", "sp", true
+	case "ep", "electrum":
+		return "electrum", "ep", true
+	case "gp", "gold", "":
+		return "gold", "gp", true
+	case "pp", "platinum":
+		return "platinum", "pp", true
+	default:
+		return "", "", false
+	}
+}
+
 // handleGMGold godoc
-// @Summary Award or deduct gold from characters
-// @Description GM adjusts gold for one or more characters. Use positive amount to award, negative to deduct.
+// @Summary Award or deduct currency from characters
+// @Description GM adjusts currency for one or more characters. Use positive amount to award, negative to deduct. Supports all D&D currencies: cp (copper), sp (silver), ep (electrum), gp (gold, default), pp (platinum).
 // @Tags GM
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{character_ids=[]integer,amount=integer,reason=string} true "Gold adjustment"
-// @Success 200 {object} map[string]interface{} "Gold adjusted"
+// @Param request body object{character_ids=[]integer,amount=integer,currency=string,reason=string} true "Currency adjustment"
+// @Success 200 {object} map[string]interface{} "Currency adjusted"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 403 {object} map[string]interface{} "Not the GM"
 // @Failure 400 {object} map[string]interface{} "Invalid request"
@@ -10062,6 +10104,7 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CharacterIDs []int  `json:"character_ids"`
 		Amount       int    `json:"amount"`
+		Currency     string `json:"currency"` // cp, sp, ep, gp (default), pp
 		Reason       string `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -10075,6 +10118,17 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":   "invalid_request",
 			"message": "character_ids and non-zero amount required",
+		})
+		return
+	}
+	
+	// Get currency column (defaults to gold)
+	column, abbrev, valid := getCurrencyColumn(req.Currency)
+	if !valid {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_currency",
+			"message": "currency must be one of: cp (copper), sp (silver), ep (electrum), gp (gold), pp (platinum)",
 		})
 		return
 	}
@@ -10107,48 +10161,64 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	// Adjust gold for each character
+	// Adjust currency for each character
 	results := []map[string]interface{}{}
 	
 	for _, charID := range req.CharacterIDs {
 		var name string
-		var currentGold int
-		err = db.QueryRow(`
-			SELECT name, COALESCE(gold, 0) FROM characters WHERE id = $1
-		`, charID).Scan(&name, &currentGold)
+		var currentAmount int
+		err = db.QueryRow(fmt.Sprintf(`
+			SELECT name, COALESCE(%s, 0) FROM characters WHERE id = $1
+		`, column), charID).Scan(&name, &currentAmount)
 		
 		if err != nil {
 			continue
 		}
 		
-		newGold := currentGold + req.Amount
-		if newGold < 0 {
-			newGold = 0 // Don't allow negative gold
+		newAmount := currentAmount + req.Amount
+		if newAmount < 0 {
+			newAmount = 0 // Don't allow negative currency
 		}
 		
-		_, err = db.Exec(`UPDATE characters SET gold = $1 WHERE id = $2`, newGold, charID)
+		_, err = db.Exec(fmt.Sprintf(`UPDATE characters SET %s = $1 WHERE id = $2`, column), newAmount, charID)
 		if err != nil {
 			continue
 		}
+		
+		// Get full currency breakdown for result
+		var cp, sp, ep, gp, pp int
+		db.QueryRow(`SELECT COALESCE(copper,0), COALESCE(silver,0), COALESCE(electrum,0), COALESCE(gold,0), COALESCE(platinum,0) FROM characters WHERE id = $1`, charID).Scan(&cp, &sp, &ep, &gp, &pp)
 		
 		result := map[string]interface{}{
-			"character_id":   charID,
-			"character_name": name,
-			"gold_change":    req.Amount,
-			"previous_gold":  currentGold,
-			"current_gold":   newGold,
+			"character_id":    charID,
+			"character_name":  name,
+			"currency":        abbrev,
+			"change":          req.Amount,
+			"previous":        currentAmount,
+			"current":         newAmount,
+			"full_currency": map[string]interface{}{
+				"cp": cp, "sp": sp, "ep": ep, "gp": gp, "pp": pp,
+				"total_in_gp": float64(cp)/100 + float64(sp)/10 + float64(ep)/2 + float64(gp) + float64(pp)*10,
+			},
+		}
+		
+		// Backwards compatibility for gold
+		if abbrev == "gp" {
+			result["gold_change"] = req.Amount
+			result["previous_gold"] = currentAmount
+			result["current_gold"] = newAmount
 		}
 		
 		results = append(results, result)
 	}
 	
-	// Log gold change as an action
+	// Log currency change as an action
 	reason := req.Reason
 	if reason == "" {
 		if req.Amount > 0 {
-			reason = fmt.Sprintf("Gold award: %d gp", req.Amount)
+			reason = fmt.Sprintf("Currency award: %d %s", req.Amount, abbrev)
 		} else {
-			reason = fmt.Sprintf("Gold deduction: %d gp", -req.Amount)
+			reason = fmt.Sprintf("Currency deduction: %d %s", -req.Amount, abbrev)
 		}
 	}
 	
@@ -10166,8 +10236,8 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 			
 			_, err = db.Exec(`
 				INSERT INTO actions (lobby_id, action_type, description, result)
-				VALUES ($1, 'gold_change', $2, $3)
-			`, lobbyID, reason, fmt.Sprintf("%d gp to: %s", req.Amount, strings.Join(charNames, ", ")))
+				VALUES ($1, 'currency_change', $2, $3)
+			`, lobbyID, reason, fmt.Sprintf("%d %s to: %s", req.Amount, abbrev, strings.Join(charNames, ", ")))
 		}
 	}
 	
