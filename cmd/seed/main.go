@@ -74,12 +74,13 @@ func seedMonsters(db *sql.DB) {
 	fmt.Printf(" %d found\n", list.Count)
 
 	stmt, _ := db.Prepare(`
-		INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count, damage_resistances, damage_immunities, damage_vulnerabilities, condition_immunities)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 		ON CONFLICT (slug) DO UPDATE SET
 			name=$2, size=$3, type=$4, ac=$5, hp=$6, hit_dice=$7, speed=$8,
 			str=$9, dex=$10, con=$11, intl=$12, wis=$13, cha=$14, cr=$15, xp=$16, actions=$17,
-			legendary_resistances=$18, legendary_actions=$19, legendary_action_count=$20
+			legendary_resistances=$18, legendary_actions=$19, legendary_action_count=$20,
+			damage_resistances=$21, damage_immunities=$22, damage_vulnerabilities=$23, condition_immunities=$24
 	`)
 
 	for i, item := range list.Results {
@@ -165,6 +166,12 @@ func seedMonsters(db *sql.DB) {
 			}
 		}
 		legendaryActionsJSON, _ := json.Marshal(legendaryActions)
+		
+		// Parse damage resistances/immunities/vulnerabilities (v0.8.31)
+		damageResistances := extractDamageTypes(m, "damage_resistances")
+		damageImmunities := extractDamageTypes(m, "damage_immunities")
+		damageVulnerabilities := extractDamageTypes(m, "damage_vulnerabilities")
+		conditionImmunities := extractConditionImmunities(m)
 
 		stmt.Exec(
 			item.Index,
@@ -187,6 +194,10 @@ func seedMonsters(db *sql.DB) {
 			legendaryResistances,
 			string(legendaryActionsJSON),
 			legendaryActionCount,
+			damageResistances,
+			damageImmunities,
+			damageVulnerabilities,
+			conditionImmunities,
 		)
 
 		if (i+1)%50 == 0 {
@@ -530,4 +541,37 @@ func seedEquipment(db *sql.DB) {
 		}
 	}
 	fmt.Printf("  Inserted %d weapons, %d armor\n", weapons, armors)
+}
+
+// extractDamageTypes extracts damage type strings from SRD API response
+// The API returns damage_resistances/immunities/vulnerabilities as arrays of strings
+// e.g., ["fire", "cold"] or complex strings like "bludgeoning, piercing, and slashing from nonmagical attacks"
+func extractDamageTypes(m map[string]interface{}, field string) string {
+	if arr, ok := m[field].([]interface{}); ok && len(arr) > 0 {
+		types := []string{}
+		for _, item := range arr {
+			if str, ok := item.(string); ok {
+				types = append(types, strings.ToLower(str))
+			}
+		}
+		return strings.Join(types, ", ")
+	}
+	return ""
+}
+
+// extractConditionImmunities extracts condition immunity names from SRD API response
+// The API returns condition_immunities as array of objects: [{index: "poisoned", name: "Poisoned"}]
+func extractConditionImmunities(m map[string]interface{}) string {
+	if arr, ok := m["condition_immunities"].([]interface{}); ok && len(arr) > 0 {
+		conditions := []string{}
+		for _, item := range arr {
+			if condMap, ok := item.(map[string]interface{}); ok {
+				if name, ok := condMap["name"].(string); ok {
+					conditions = append(conditions, strings.ToLower(name))
+				}
+			}
+		}
+		return strings.Join(conditions, ", ")
+	}
+	return ""
 }

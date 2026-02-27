@@ -395,10 +395,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Attacks have advantage (implemented in getAttackModifiers)
 - [x] **Unconscious** ✅ (v0.8.8)
   - [x] Incapacitated, can't move or speak, unaware (enforced)
-  - [ ] Drop held items, fall prone (not automated)
-  - [ ] Auto-fail STR/DEX saves
-  - [ ] Attacks have advantage
-  - [ ] Hits within 5ft are automatic crits
+  - [ ] Drop held items, fall prone (not automated — requires equipment tracking)
+  - [x] Auto-fail STR/DEX saves (in autoFailsSave)
+  - [x] Attacks have advantage (in getAttackModifiers)
+  - [x] Hits within 5ft are automatic crits (in isAutoCrit)
 
 ### Spellcasting
 
@@ -603,12 +603,15 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Specific effects per monster
 - [ ] **Regional Effects**
   - [ ] Passive effects around legendary creature's lair
-- [ ] **Damage Resistances/Immunities/Vulnerabilities**
-  - [ ] Resistance: half damage
-  - [ ] Immunity: no damage
-  - [ ] Vulnerability: double damage
-  - [ ] Type-specific (fire, cold, bludgeoning, etc.)
-  - [ ] Conditional (nonmagical weapons, silver, etc.)
+- [x] **Damage Resistances/Immunities/Vulnerabilities (v0.8.31)**
+  - [x] Resistance: half damage
+  - [x] Immunity: no damage
+  - [x] Vulnerability: double damage (applied before resistance)
+  - [x] Type-specific (fire, cold, bludgeoning, etc.)
+  - [x] Seeded from SRD API into monsters table
+  - [x] Shown in `/api/gm/status` monster guidance
+  - [x] Applied in AoE spell damage
+  - [ ] Conditional (nonmagical weapons, silver, etc.) — tracked but simplified for now
 
 ### Environmental & Exploration
 
@@ -673,7 +676,8 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 9. ~~**Legendary Actions/Resistances** — Boss fights~~ ✅ (Resistances v0.8.29, Actions v0.8.30)
 10. **Full Currency** — Economic gameplay
 11. ~~**Ammunition** — Resource management~~ ✅ (v0.8.18)
-12. **Feats** — Build variety
+12. ~~**Damage Resistances/Immunities/Vulnerabilities**~~ ✅ (v0.8.31)
+13. **Feats** — Build variety
 
 ### P3 — Nice to Have
 13. **Environmental Hazards**
@@ -692,4 +696,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.30**
+Current: **0.8.31**

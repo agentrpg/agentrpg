@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.0
+// @version 0.8.31
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -69,19 +69,23 @@ var xpThresholds = map[int]int{
 
 // DamageModResult holds damage resistance calculation results
 type DamageModResult struct {
-	FinalDamage  int
-	Resistances  []string
-	Immunities   []string
-	WasHalved    bool
-	WasNegated   bool
+	FinalDamage     int
+	Resistances     []string
+	Immunities      []string
+	Vulnerabilities []string
+	WasHalved       bool
+	WasDoubled      bool
+	WasNegated      bool
 }
 
 // applyDamageResistance checks for damage resistance conditions and returns modified damage
+// For characters (positive ID) checks conditions. For monsters, use applyMonsterDamageResistance.
 func applyDamageResistance(charID int, damage int, damageType string) DamageModResult {
 	result := DamageModResult{
-		FinalDamage: damage,
-		Resistances: []string{},
-		Immunities:  []string{},
+		FinalDamage:     damage,
+		Resistances:     []string{},
+		Immunities:      []string{},
+		Vulnerabilities: []string{},
 	}
 	
 	if damage <= 0 {
@@ -106,6 +110,103 @@ func applyDamageResistance(charID int, damage int, damageType string) DamageModR
 	}
 	
 	return result
+}
+
+// applyMonsterDamageResistance checks monster damage resistances/immunities/vulnerabilities (v0.8.31)
+// monsterKey is the slug of the monster from the SRD (e.g., "ancient-red-dragon")
+// damageType is the type of damage being dealt (e.g., "fire", "slashing", "bludgeoning")
+func applyMonsterDamageResistance(monsterKey string, damage int, damageType string) DamageModResult {
+	result := DamageModResult{
+		FinalDamage:     damage,
+		Resistances:     []string{},
+		Immunities:      []string{},
+		Vulnerabilities: []string{},
+	}
+	
+	if damage <= 0 || monsterKey == "" || damageType == "" {
+		return result
+	}
+	
+	damageType = strings.ToLower(damageType)
+	
+	// Look up monster damage resistances/immunities/vulnerabilities from SRD data
+	var resistances, immunities, vulnerabilities string
+	err := db.QueryRow(`
+		SELECT COALESCE(damage_resistances, ''), COALESCE(damage_immunities, ''), COALESCE(damage_vulnerabilities, '')
+		FROM monsters WHERE slug = $1
+	`, monsterKey).Scan(&resistances, &immunities, &vulnerabilities)
+	
+	if err != nil {
+		return result // Monster not found, return original damage
+	}
+	
+	// Check for immunity first (no damage)
+	if immunities != "" {
+		for _, immunity := range strings.Split(immunities, ",") {
+			immunity = strings.TrimSpace(strings.ToLower(immunity))
+			if matchesDamageType(damageType, immunity) {
+				result.FinalDamage = 0
+				result.Immunities = append(result.Immunities, immunity)
+				result.WasNegated = true
+				return result
+			}
+		}
+	}
+	
+	// Check for vulnerability (double damage) - applied before resistance
+	if vulnerabilities != "" {
+		for _, vulnerability := range strings.Split(vulnerabilities, ",") {
+			vulnerability = strings.TrimSpace(strings.ToLower(vulnerability))
+			if matchesDamageType(damageType, vulnerability) {
+				result.FinalDamage = damage * 2
+				result.Vulnerabilities = append(result.Vulnerabilities, vulnerability)
+				result.WasDoubled = true
+				// Don't return - check resistance next
+				break
+			}
+		}
+	}
+	
+	// Check for resistance (half damage)
+	if resistances != "" {
+		for _, resistance := range strings.Split(resistances, ",") {
+			resistance = strings.TrimSpace(strings.ToLower(resistance))
+			if matchesDamageType(damageType, resistance) {
+				if result.WasDoubled {
+					// Vulnerability + Resistance = normal damage
+					result.FinalDamage = damage
+					result.WasDoubled = false
+				} else {
+					result.FinalDamage = damage / 2
+				}
+				result.Resistances = append(result.Resistances, resistance)
+				result.WasHalved = !result.WasDoubled && true
+				break
+			}
+		}
+	}
+	
+	return result
+}
+
+// matchesDamageType checks if a damage type matches a resistance/immunity/vulnerability string
+// Handles both simple ("fire") and complex ("bludgeoning, piercing, and slashing from nonmagical attacks") entries
+func matchesDamageType(damageType, resistanceEntry string) bool {
+	// Simple match
+	if damageType == resistanceEntry {
+		return true
+	}
+	
+	// Check if damage type is contained in the entry (for complex strings)
+	// e.g., "bludgeoning, piercing, and slashing from nonmagical attacks"
+	if strings.Contains(resistanceEntry, damageType) {
+		// TODO: In the future, track if weapon is magical to handle
+		// "from nonmagical attacks" properly. For now, assume all attacks
+		// are nonmagical unless noted.
+		return true
+	}
+	
+	return false
 }
 
 // getLevelForXP returns the level a character should be at given their XP
@@ -561,6 +662,14 @@ func initDB() {
 		-- Most boss monsters get 3 legendary action points per round
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS legendary_actions JSONB DEFAULT '[]';
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS legendary_action_count INTEGER DEFAULT 0;
+		
+		-- Monster Damage Resistances/Immunities/Vulnerabilities (v0.8.31 - Phase 8 P2)
+		-- Stored as comma-separated strings for easy querying
+		-- e.g., "fire, cold" or "bludgeoning, piercing, slashing from nonmagical attacks"
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS damage_resistances TEXT DEFAULT '';
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS damage_immunities TEXT DEFAULT '';
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS damage_vulnerabilities TEXT DEFAULT '';
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS condition_immunities TEXT DEFAULT '';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -6106,9 +6215,16 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 					var mType string
 					var mAC, mHP int
 					var actionsJSON []byte
+					var dmgResistances, dmgImmunities, dmgVulnerabilities, condImmunities string
 					err := db.QueryRow(`
-						SELECT type, ac, hp, actions FROM monsters WHERE slug = $1
-					`, e.MonsterKey).Scan(&mType, &mAC, &mHP, &actionsJSON)
+						SELECT type, ac, hp, actions, 
+							COALESCE(damage_resistances, ''), 
+							COALESCE(damage_immunities, ''), 
+							COALESCE(damage_vulnerabilities, ''),
+							COALESCE(condition_immunities, '')
+						FROM monsters WHERE slug = $1
+					`, e.MonsterKey).Scan(&mType, &mAC, &mHP, &actionsJSON, 
+						&dmgResistances, &dmgImmunities, &dmgVulnerabilities, &condImmunities)
 					
 					if err == nil {
 						var actions []map[string]interface{}
@@ -6125,6 +6241,20 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 						guidance["ac"] = mAC
 						guidance["abilities"] = actionNames
 						guidance["behavior"] = getMonsterBehavior(mType)
+						
+						// Damage resistances/immunities/vulnerabilities (v0.8.31)
+						if dmgResistances != "" {
+							guidance["damage_resistances"] = dmgResistances
+						}
+						if dmgImmunities != "" {
+							guidance["damage_immunities"] = dmgImmunities
+						}
+						if dmgVulnerabilities != "" {
+							guidance["damage_vulnerabilities"] = dmgVulnerabilities
+						}
+						if condImmunities != "" {
+							guidance["condition_immunities"] = condImmunities
+						}
 						
 						// Tactical suggestions based on HP
 						if e.HP <= e.MaxHP/4 {
@@ -10773,24 +10903,85 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			"damage":      damage,
 		}
 		
-		// Apply damage to characters
-		if targetID > 0 && damage > 0 {
-			// Apply damage resistance (v0.8.26)
-			dmgMod := applyDamageResistance(targetID, damage, damageType)
-			if dmgMod.WasHalved {
-				damage = dmgMod.FinalDamage
-				result["resistances_applied"] = dmgMod.Resistances
+		// Apply damage to characters or monsters
+		if damage > 0 {
+			if targetID > 0 {
+				// Character - apply condition-based resistance (v0.8.26)
+				dmgMod := applyDamageResistance(targetID, damage, damageType)
+				if dmgMod.WasHalved || dmgMod.WasNegated {
+					damage = dmgMod.FinalDamage
+					result["resistances_applied"] = dmgMod.Resistances
+					if dmgMod.WasNegated {
+						result["immunities_applied"] = dmgMod.Immunities
+					}
+				}
+				
+				newHP := targetHP - damage
+				if newHP < 0 {
+					newHP = 0
+				}
+				db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, targetID)
+				result["hp_before"] = targetHP
+				result["hp_after"] = newHP
+				result["damage"] = damage // Update with resisted damage
+				totalDamageDealt += damage
+			} else {
+				// Monster in combat - apply monster damage resistance (v0.8.31)
+				// Get monster_key from turn_order
+				var turnOrderJSON []byte
+				db.QueryRow(`SELECT turn_order FROM combat_state WHERE lobby_id = $1`, campaignID).Scan(&turnOrderJSON)
+				if turnOrderJSON != nil {
+					type CombatEntry struct {
+						ID         int    `json:"id"`
+						Name       string `json:"name"`
+						MonsterKey string `json:"monster_key"`
+						HP         int    `json:"hp"`
+						MaxHP      int    `json:"max_hp"`
+					}
+					var entries []CombatEntry
+					json.Unmarshal(turnOrderJSON, &entries)
+					
+					for i, e := range entries {
+						if e.ID == targetID {
+							targetName = e.Name
+							targetHP = e.HP
+							targetMaxHP = e.MaxHP
+							
+							// Apply monster damage resistance
+							if e.MonsterKey != "" && damageType != "" {
+								dmgMod := applyMonsterDamageResistance(e.MonsterKey, damage, damageType)
+								if dmgMod.WasNegated {
+									damage = 0
+									result["immunities_applied"] = dmgMod.Immunities
+								} else if dmgMod.WasDoubled {
+									damage = dmgMod.FinalDamage
+									result["vulnerabilities_applied"] = dmgMod.Vulnerabilities
+								} else if dmgMod.WasHalved {
+									damage = dmgMod.FinalDamage
+									result["resistances_applied"] = dmgMod.Resistances
+								}
+							}
+							
+							newHP := e.HP - damage
+							if newHP < 0 {
+								newHP = 0
+							}
+							entries[i].HP = newHP
+							
+							// Update turn_order with new HP
+							updatedJSON, _ := json.Marshal(entries)
+							db.Exec(`UPDATE combat_state SET turn_order = $1 WHERE lobby_id = $2`, updatedJSON, campaignID)
+							
+							result["target_name"] = e.Name
+							result["hp_before"] = e.HP
+							result["hp_after"] = newHP
+							result["damage"] = damage
+							totalDamageDealt += damage
+							break
+						}
+					}
+				}
 			}
-			
-			newHP := targetHP - damage
-			if newHP < 0 {
-				newHP = 0
-			}
-			db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, targetID)
-			result["hp_before"] = targetHP
-			result["hp_after"] = newHP
-			result["damage"] = damage // Update with resisted damage
-			totalDamageDealt += damage
 		}
 		
 		results = append(results, result)
