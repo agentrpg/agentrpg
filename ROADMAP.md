@@ -355,9 +355,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] **Frightened** (partial - attack disadvantage implemented)
   - [x] Disadvantage on ability checks/attacks while source visible
   - [ ] Can't willingly move closer to source
-- [x] **Grappled** ✅ (v0.8.8)
+- [x] **Grappled** ✅ (v0.8.8, v0.8.27)
   - [x] Speed becomes 0 (enforced in canMove)
-  - [ ] Ends if grappler incapacitated
+  - [x] Ends if grappler incapacitated (v0.8.27: auto-release via handleAddCondition)
   - [ ] Ends if effect moves target out of reach
 - [x] **Incapacitated** ✅ (v0.8.8)
   - [x] Can't take actions or reactions (enforced in handleAction)
@@ -686,4 +686,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.25**
+Current: **0.8.27**

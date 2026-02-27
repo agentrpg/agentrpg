@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.26"
+const version = "0.8.27"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1577,6 +1577,77 @@ func getSaveDisadvantage(charID int, ability string) bool {
 		if hasCondition(charID, "restrained") {
 			return true
 		}
+	}
+	return false
+}
+
+// ============================================
+// GRAPPLE AUTO-RELEASE (v0.8.27)
+// ============================================
+
+// getCharacterName returns the name of a character by ID
+func getCharacterName(charID int) string {
+	var name string
+	db.QueryRow("SELECT COALESCE(name, 'Unknown') FROM characters WHERE id = $1", charID).Scan(&name)
+	return name
+}
+
+// releaseAllGrapplesFrom releases all creatures that the specified character is grappling
+// Called when a grappler becomes incapacitated (5e PHB: grapple ends if grappler incapacitated)
+// Returns list of character names that were released
+func releaseAllGrapplesFrom(grapplerID int) []string {
+	released := []string{}
+	grappleCondition := fmt.Sprintf("grappled:%d", grapplerID)
+	
+	// Find all characters with this grapple condition
+	rows, err := db.Query(`
+		SELECT id, name, COALESCE(conditions, '[]') 
+		FROM characters 
+		WHERE conditions::text LIKE $1`, "%"+grappleCondition+"%")
+	if err != nil {
+		return released
+	}
+	defer rows.Close()
+	
+	for rows.Next() {
+		var charID int
+		var charName string
+		var condJSON []byte
+		rows.Scan(&charID, &charName, &condJSON)
+		
+		var conditions []string
+		json.Unmarshal(condJSON, &conditions)
+		
+		// Remove the grapple condition
+		newConditions := []string{}
+		wasGrappled := false
+		for _, c := range conditions {
+			if c == grappleCondition {
+				wasGrappled = true
+			} else {
+				newConditions = append(newConditions, c)
+			}
+		}
+		
+		if wasGrappled {
+			updated, _ := json.Marshal(newConditions)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+			released = append(released, charName)
+		}
+	}
+	
+	return released
+}
+
+// isIncapacitatingCondition checks if a condition prevents taking actions
+func isIncapacitatingCondition(condition string) bool {
+	baseCondition := condition
+	if idx := strings.Index(condition, ":"); idx != -1 {
+		baseCondition = condition[:idx]
+	}
+	switch strings.ToLower(baseCondition) {
+	case "incapacitated", "paralyzed", "stunned", "unconscious", "petrified":
+		return true
 	}
 	return false
 }
@@ -13858,12 +13929,26 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 	updated, _ := json.Marshal(conditions)
 	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":    true,
 		"condition":  condition,
-		"effect":     conditionEffects[condition],
+		"effect":     conditionEffects[baseCondition],
 		"conditions": conditions,
-	})
+	}
+	
+	// v0.8.27: Auto-release grapples if character becomes incapacitated
+	// Per 5e PHB: "The condition also ends if an effect removes the grappled creature 
+	// from the reach of the grappler or grappling effect, such as when a creature is 
+	// hurled away by the thunderwave spell." AND "if the grappler is incapacitated"
+	if isIncapacitatingCondition(condition) {
+		released := releaseAllGrapplesFrom(charID)
+		if len(released) > 0 {
+			response["grapples_released"] = released
+			response["grapple_note"] = fmt.Sprintf("Grapple(s) ended because %s became incapacitated", getCharacterName(charID))
+		}
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleRemoveCondition godoc
