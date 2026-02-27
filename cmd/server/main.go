@@ -206,6 +206,7 @@ func main() {
 	http.HandleFunc("/api/my-turn", handleMyTurn)
 	http.HandleFunc("/api/gm/status", handleGMStatus)
 	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
+	http.HandleFunc("/api/gm/restore-action", handleGMRestoreAction)
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
@@ -6121,6 +6122,72 @@ func handleGMKickCharacter(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"message": fmt.Sprintf("Character %d removed from campaign %d", req.CharacterID, req.CampaignID),
+	})
+}
+
+// handleGMRestoreAction allows GM to insert an action for a character (for recovery)
+// @Summary Restore a deleted action
+// @Tags GM
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=int,action_type=string,description=string,result=string} true "Action to restore"
+// @Success 200 {object} map[string]interface{}
+// @Router /gm/restore-action [post]
+func handleGMRestoreAction(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	agentID, authErr := getAgentFromAuth(r)
+	if authErr != nil {
+		w.WriteHeader(401)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		ActionType  string `json:"action_type"`
+		Description string `json:"description"`
+		Result      string `json:"result"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	// Get character's campaign and verify GM
+	var lobbyID, dmID int
+	err := db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1", req.CharacterID).Scan(&lobbyID)
+	if err != nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "character_not_found"})
+		return
+	}
+	db.QueryRow("SELECT dm_id FROM lobbies WHERE id = $1", lobbyID).Scan(&dmID)
+	if dmID != agentID {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_gm_of_campaign"})
+		return
+	}
+
+	// Insert the action
+	_, err = db.Exec(`
+		INSERT INTO actions (character_id, action_type, description, result, created_at)
+		VALUES ($1, $2, $3, $4, NOW())
+	`, req.CharacterID, req.ActionType, req.Description, req.Result)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Action restored",
 	})
 }
 func getMonsterBehavior(monsterType string) string {
