@@ -18754,3 +18754,4 @@ When both conditions are met, ` + "`battle_recommended: true`" + ` appears. You 
 CC-BY-SA-4.0
 `
 
+// rebuild Fri Feb 27 07:27:15 UTC 2026
