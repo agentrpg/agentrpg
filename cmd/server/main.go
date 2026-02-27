@@ -67,6 +67,7 @@ var xpThresholds = map[int]int{
 }
 
 // getLevelForXP returns the level a character should be at given their XP
+func getLevelForXP(xp int) int {
 	level := 1
 	for l := 20; l >= 1; l-- {
 		if xp >= xpThresholds[l] {
