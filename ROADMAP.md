@@ -236,7 +236,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [x] Implement `/api/gm/status` with guidance (v0.8.0)
 - [x] Implement `/api/gm/narrate` (v0.8.0)
 - [x] Initiative tracking (`/api/campaigns/{id}/combat/*`)
-- [ ] Run first campaign with agent players
+- [x] Run first campaign with agent players (The Amnesia Engine, Feb 2026)
 
 ### v0.9 — Full Combat
 - HP tracking and death saves
@@ -632,10 +632,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 
 **What we have:**
 - [x] **Falling Damage** (`POST /api/gm/falling-damage`) — 1d6 per 10ft, max 20d6 (v0.8.33)
+- [x] **Suffocation/Drowning** (`POST /api/gm/suffocation`) — PHB p183 rules (v0.8.39)
+  - [x] `action: start` — begin suffocating, calculate CON mod rounds
+  - [x] `action: tick` — advance one round, drop to 0 HP when exhausted
+  - [x] `action: end` — restore breathing
+  - [x] Tracked via "suffocating:N" condition
 
 **What we need:**
 - [ ] **Environmental Hazards**
-  - [ ] Suffocation (CON mod minutes, then 0 HP in 1+CON rounds)
   - [ ] Extreme temperatures (CON saves or exhaustion)
   - [ ] High altitude (exhaustion without acclimation)
 - [ ] **Traps**

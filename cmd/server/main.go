@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.38"
+const version = "0.8.39"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -374,6 +374,7 @@ func main() {
 	http.HandleFunc("/api/trigger-readied", handleTriggerReadied)
 	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
 	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
+	http.HandleFunc("/api/gm/suffocation", handleGMSuffocation)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/observe", handleObserve)
@@ -14378,6 +14379,294 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMSuffocation godoc
+// @Summary Handle suffocation/drowning for a character
+// @Description Apply 5e suffocation rules. A creature can hold breath for 1 + CON modifier minutes (min 30 sec). After that, it can survive CON modifier rounds (min 1). Then drops to 0 HP. Use action: "start" to begin tracking, "tick" to advance one round when suffocating, "end" to restore breathing.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,action=string,reason=string} true "action: start|tick|end, reason optional"
+// @Success 200 {object} map[string]interface{} "Suffocation status"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/suffocation [post]
+func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Action      string `json:"action"` // start, tick, end
+		Reason      string `json:"reason"` // optional flavor text
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	if req.Action == "" {
+		req.Action = "tick" // Default to advancing suffocation
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, conditions string
+	var currentHP, maxHP, con int
+	err = db.QueryRow(`
+		SELECT name, hp, max_hp, con, COALESCE(conditions, '') 
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &currentHP, &maxHP, &con, &conditions)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	conMod := modifier(con)
+	
+	// Check for existing suffocating condition
+	condList := strings.Split(conditions, ",")
+	suffocatingIdx := -1
+	roundsRemaining := 0
+	for i, c := range condList {
+		c = strings.TrimSpace(c)
+		if strings.HasPrefix(c, "suffocating:") {
+			suffocatingIdx = i
+			fmt.Sscanf(c, "suffocating:%d", &roundsRemaining)
+			break
+		}
+	}
+	
+	reason := req.Reason
+	if reason == "" {
+		reason = "drowning/suffocation"
+	}
+	
+	switch strings.ToLower(req.Action) {
+	case "start":
+		// Begin suffocating - calculate rounds they can survive
+		// PHB: After running out of breath, creature can survive CON modifier rounds (min 1)
+		// We assume they've already exhausted their breath-hold time
+		roundsRemaining = conMod
+		if roundsRemaining < 1 {
+			roundsRemaining = 1
+		}
+		
+		// Add suffocating condition
+		if suffocatingIdx >= 0 {
+			// Already suffocating, update rounds
+			condList[suffocatingIdx] = fmt.Sprintf("suffocating:%d", roundsRemaining)
+		} else {
+			if conditions == "" {
+				condList = []string{fmt.Sprintf("suffocating:%d", roundsRemaining)}
+			} else {
+				condList = append(condList, fmt.Sprintf("suffocating:%d", roundsRemaining))
+			}
+		}
+		
+		newConditions := strings.Join(condList, ", ")
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", newConditions, req.CharacterID)
+		
+		// Log the action
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.CharacterID, "suffocation", 
+			fmt.Sprintf("%s begins %s", charName, reason),
+			fmt.Sprintf("Can survive %d rounds (CON mod %+d, min 1)", roundsRemaining, conMod))
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"action":           "start",
+			"character":        charName,
+			"character_id":     req.CharacterID,
+			"con_modifier":     conMod,
+			"rounds_remaining": roundsRemaining,
+			"message":          fmt.Sprintf("⚠️ %s is suffocating! Can survive %d more rounds before dropping to 0 HP.", charName, roundsRemaining),
+			"rules_note":       "PHB p183: A creature can hold its breath for 1 + CON modifier minutes. After running out of breath, it can survive for CON modifier rounds (min 1). At the start of its next turn after that, it drops to 0 HP and is dying.",
+		})
+		
+	case "tick":
+		// Advance suffocation by one round
+		if suffocatingIdx < 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_suffocating",
+				"message": fmt.Sprintf("%s is not currently suffocating. Use action='start' first.", charName),
+			})
+			return
+		}
+		
+		roundsRemaining--
+		
+		if roundsRemaining <= 0 {
+			// Character drops to 0 HP!
+			newHP := 0
+			db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, req.CharacterID)
+			
+			// Remove suffocating condition but add unconscious
+			newConditions := []string{}
+			for i, c := range condList {
+				if i != suffocatingIdx {
+					c = strings.TrimSpace(c)
+					if c != "" {
+						newConditions = append(newConditions, c)
+					}
+				}
+			}
+			if !hasCondition(strings.Join(newConditions, ","), "unconscious") {
+				newConditions = append(newConditions, "unconscious")
+			}
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", strings.Join(newConditions, ", "), req.CharacterID)
+			
+			// Log the action
+			db.Exec(`
+				INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+				VALUES ($1, $2, $3, $4, $5)
+			`, lobbyID, req.CharacterID, "suffocation",
+				fmt.Sprintf("%s suffocates from %s", charName, reason),
+				fmt.Sprintf("Dropped to 0 HP! Now unconscious and making death saves."))
+			
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":          true,
+				"action":           "tick",
+				"character":        charName,
+				"character_id":     req.CharacterID,
+				"rounds_remaining": 0,
+				"previous_hp":      currentHP,
+				"current_hp":       newHP,
+				"dropped":          true,
+				"message":          fmt.Sprintf("💀 %s has suffocated! Drops to 0 HP and is unconscious. Death saving throws required!", charName),
+			})
+		} else {
+			// Still hanging on
+			condList[suffocatingIdx] = fmt.Sprintf("suffocating:%d", roundsRemaining)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", strings.Join(condList, ", "), req.CharacterID)
+			
+			// Log the action
+			db.Exec(`
+				INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+				VALUES ($1, $2, $3, $4, $5)
+			`, lobbyID, req.CharacterID, "suffocation",
+				fmt.Sprintf("%s struggles without air", charName),
+				fmt.Sprintf("%d rounds remaining before dropping to 0 HP", roundsRemaining))
+			
+			urgency := ""
+			if roundsRemaining == 1 {
+				urgency = "🚨 CRITICAL: "
+			} else if roundsRemaining == 2 {
+				urgency = "⚠️ WARNING: "
+			}
+			
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":          true,
+				"action":           "tick",
+				"character":        charName,
+				"character_id":     req.CharacterID,
+				"rounds_remaining": roundsRemaining,
+				"current_hp":       currentHP,
+				"message":          fmt.Sprintf("%s%s is suffocating! %d rounds remaining before dropping to 0 HP.", urgency, charName, roundsRemaining),
+			})
+		}
+		
+	case "end":
+		// Character can breathe again - remove suffocating condition
+		if suffocatingIdx < 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      true,
+				"action":       "end",
+				"character":    charName,
+				"character_id": req.CharacterID,
+				"message":      fmt.Sprintf("%s was not suffocating.", charName),
+			})
+			return
+		}
+		
+		newConditions := []string{}
+		for i, c := range condList {
+			if i != suffocatingIdx {
+				c = strings.TrimSpace(c)
+				if c != "" {
+					newConditions = append(newConditions, c)
+				}
+			}
+		}
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", strings.Join(newConditions, ", "), req.CharacterID)
+		
+		// Log the action
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.CharacterID, "suffocation",
+			fmt.Sprintf("%s can breathe again", charName),
+			fmt.Sprintf("Suffocation ended with %d rounds remaining", roundsRemaining))
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"action":           "end",
+			"character":        charName,
+			"character_id":     req.CharacterID,
+			"rounds_remaining": roundsRemaining,
+			"message":          fmt.Sprintf("😮‍💨 %s can breathe again! Suffocation ended.", charName),
+		})
+		
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_action",
+			"message":       "action must be 'start', 'tick', or 'end'",
+			"valid_actions": []string{"start", "tick", "end"},
+		})
+	}
 }
 
 // handleGMCounterspell godoc
