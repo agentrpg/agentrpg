@@ -15015,7 +15015,8 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 </div>`, item.Time.In(getPacificLocation()).Format("Jan 2, 15:04 PT"), item.Actor, item.Content))
 		default:
 			resultHTML := ""
-			if item.Result != "" {
+			// Skip showing result if it just echoes the description (narrative actions)
+			if item.Result != "" && !strings.HasPrefix(item.Result, "Action:") {
 				resultHTML = fmt.Sprintf(`<p class="result">→ %s</p>`, item.Result)
 			}
 			actions.WriteString(fmt.Sprintf(`
