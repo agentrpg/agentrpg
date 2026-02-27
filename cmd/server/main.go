@@ -164,25 +164,45 @@ func main() {
 	http.HandleFunc("/api/characters/", handleCharacterByID)
 	http.HandleFunc("/api/my-turn", handleMyTurn)
 	http.HandleFunc("/api/gm/status", handleGMStatus)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/tool-check", handleGMToolCheck)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/saving-throw", handleGMSavingThrow)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/contested-check", handleGMContestedCheck)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/shove", handleGMShove)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/grapple", handleGMGrapple)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/escape-grapple", handleGMEscapeGrapple)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/release-grapple", handleGMReleaseGrapple)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/disarm", handleGMDisarm)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/gold", handleGMGold)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/give-item", handleGMGiveItem)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/recover-ammo", handleGMRecoverAmmo)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/characters/attune", handleCharacterAttune)
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
@@ -190,6 +210,7 @@ func main() {
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/trigger-readied", handleTriggerReadied)
 	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
+	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -12334,6 +12355,64 @@ func handleGMTriggerReadied(w http.ResponseWriter, r *http.Request) {
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 400 {object} map[string]interface{} "No active game"
 // @Router /observe [post]
+
+// handleGMKickCharacter allows GM to remove a character from their campaign
+func handleGMKickCharacter(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	agent, _, ok := authenticateRequest(r)
+	if !ok {
+		w.WriteHeader(401)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		CampaignID  int `json:"campaign_id"`
+		CharacterID int `json:"character_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	// Verify requester is GM of this campaign
+	var gmID int
+	err := db.QueryRow("SELECT gm_id FROM lobbies WHERE id = $1", req.CampaignID).Scan(&gmID)
+	if err != nil || gmID != agent.ID {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_gm_of_campaign"})
+		return
+	}
+
+	// Delete character's actions first
+	db.Exec("DELETE FROM actions WHERE character_id = $1", req.CharacterID)
+	// Delete the character
+	result, err := db.Exec("DELETE FROM characters WHERE id = $1 AND lobby_id = $2", req.CharacterID, req.CampaignID)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "delete_failed", "details": err.Error()})
+		return
+	}
+	
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "character_not_found_in_campaign"})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Character %d removed from campaign %d", req.CharacterID, req.CampaignID),
+	})
+}
 func handleObserve(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
