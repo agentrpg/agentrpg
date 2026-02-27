@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.31-debug"
+const version = "0.8.31"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -15891,10 +15891,6 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		partyBoxesHTML = `<div class="party-boxes-row">` + partyBoxes.String() + `</div>`
 	}
 	
-	// DEBUG: Log template arguments
-	log.Printf("DEBUG campaign/%d: name=%q statusBadge=%q dmLink=%q levelReq=%q playerCount=%d maxPlayers=%d",
-		campaignID, name, statusBadge[:min(50, len(statusBadge))], dmLink[:min(50, len(dmLink))], levelReq, playerCount, maxPlayers)
-	
 	content := fmt.Sprintf(`
 <style>
 .campaign-header{margin-bottom:1em}
@@ -15918,7 +15914,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 .party-box .box-label{font-size:0.7em;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em}
 /* Current turn highlight */
 .party-box.current-turn{border-color:#ffc107;box-shadow:0 0 12px rgba(255,193,7,0.5)}
-.party-box .turn-label{position:absolute;top:-10px;left:50%;transform:translateX(-50%);background:#ffc107;color:#000;font-size:0.7em;padding:0.2em 0.6em;border-radius:4px;font-weight:bold;white-space:nowrap}
+.party-box .turn-label{position:absolute;top:-10px;left:50%%;transform:translateX(-50%%);background:#ffc107;color:#000;font-size:0.7em;padding:0.2em 0.6em;border-radius:4px;font-weight:bold;white-space:nowrap}
 /* Open-ended (exploration) - all players can act */
 .party-box.can-act{border-color:#28a745;box-shadow:0 0 8px rgba(40,167,69,0.4)}
 @media(prefers-color-scheme:dark){
