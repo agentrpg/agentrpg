@@ -15296,8 +15296,8 @@ func handleGMMoraleCheck(w http.ResponseWriter, r *http.Request) {
 	wisMod := (wisScore - 10) / 2
 	
 	// Roll WIS saving throw
-	roll1 := rollD20()
-	roll2 := rollD20()
+	roll1 := rollDie(20)
+	roll2 := rollDie(20)
 	usedRoll := roll1
 	
 	if hasDisadvantage {
