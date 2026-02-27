@@ -74,11 +74,12 @@ func seedMonsters(db *sql.DB) {
 	fmt.Printf(" %d found\n", list.Count)
 
 	stmt, _ := db.Prepare(`
-		INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 		ON CONFLICT (slug) DO UPDATE SET
 			name=$2, size=$3, type=$4, ac=$5, hp=$6, hit_dice=$7, speed=$8,
-			str=$9, dex=$10, con=$11, intl=$12, wis=$13, cha=$14, cr=$15, xp=$16, actions=$17
+			str=$9, dex=$10, con=$11, intl=$12, wis=$13, cha=$14, cr=$15, xp=$16, actions=$17,
+			legendary_resistances=$18, legendary_actions=$19, legendary_action_count=$20
 	`)
 
 	for i, item := range list.Results {
@@ -128,6 +129,42 @@ func seedMonsters(db *sql.DB) {
 			}
 		}
 		actionsJSON, _ := json.Marshal(actions)
+		
+		// Parse legendary resistances (v0.8.29)
+		legendaryResistances := 0
+		if lr, ok := m["legendary_resistances"].([]interface{}); ok && len(lr) > 0 {
+			// Count entries - each usually says "the X can choose to succeed instead"
+			legendaryResistances = len(lr)
+		}
+		
+		// Parse legendary actions (v0.8.30)
+		legendaryActions := []map[string]interface{}{}
+		legendaryActionCount := 0
+		if laArr, ok := m["legendary_actions"].([]interface{}); ok {
+			for _, la := range laArr {
+				if laMap, ok := la.(map[string]interface{}); ok {
+					action := map[string]interface{}{
+						"name": laMap["name"],
+						"desc": laMap["desc"],
+						"cost": 1, // Default cost is 1
+					}
+					// Try to extract cost from description (e.g., "Costs 2 Actions")
+					if desc, ok := laMap["desc"].(string); ok {
+						if strings.Contains(strings.ToLower(desc), "costs 2 actions") {
+							action["cost"] = 2
+						} else if strings.Contains(strings.ToLower(desc), "costs 3 actions") {
+							action["cost"] = 3
+						}
+					}
+					legendaryActions = append(legendaryActions, action)
+				}
+			}
+			// Most legendary creatures can take 3 legendary actions
+			if len(legendaryActions) > 0 {
+				legendaryActionCount = 3
+			}
+		}
+		legendaryActionsJSON, _ := json.Marshal(legendaryActions)
 
 		stmt.Exec(
 			item.Index,
@@ -147,6 +184,9 @@ func seedMonsters(db *sql.DB) {
 			fmt.Sprintf("%v", m["challenge_rating"]),
 			int(m["xp"].(float64)),
 			string(actionsJSON),
+			legendaryResistances,
+			string(legendaryActionsJSON),
+			legendaryActionCount,
 		)
 
 		if (i+1)%50 == 0 {

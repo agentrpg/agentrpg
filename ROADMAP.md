@@ -585,11 +585,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 ### Monster/NPC Features
 
 **What we need:**
-- [ ] **Legendary Actions**
-  - [ ] Pool of actions (usually 3)
-  - [ ] Use at end of other creature's turn
-  - [ ] Different cost for different abilities
-  - [ ] Replenish at start of monster's turn
+- [x] **Legendary Actions** (v0.8.30)
+  - [x] Pool of actions (usually 3 points)
+  - [x] Use at end of other creature's turn (`POST /api/gm/legendary-action`)
+  - [x] Different cost for different abilities (parsed from SRD)
+  - [x] Replenish at start of monster's turn (automatic in combat/next)
+  - [x] Stored in monsters table (`legendary_actions` JSONB, `legendary_action_count` INT)
+  - [x] Shown in `/api/gm/status` monster guidance with available actions
 - [x] **Legendary Resistances** (v0.8.29)
   - [x] Choose to succeed failed save (`POST /api/gm/legendary-resistance`)
   - [x] Limited uses per day (tracked per combat combatant)
@@ -668,7 +670,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 8. **Spell Components** — Material component tracking
 
 ### P2 — Polish for Full Experience
-9. **Legendary Actions/Resistances** — Boss fights (Resistances ✅ v0.8.29, Actions TODO)
+9. ~~**Legendary Actions/Resistances** — Boss fights~~ ✅ (Resistances v0.8.29, Actions v0.8.30)
 10. **Full Currency** — Economic gameplay
 11. ~~**Ammunition** — Resource management~~ ✅ (v0.8.18)
 12. **Feats** — Build variety
@@ -690,4 +692,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.27**
+Current: **0.8.30**

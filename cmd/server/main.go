@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.29"
+const version = "0.8.30"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -231,6 +231,7 @@ func main() {
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
 	http.HandleFunc("/api/gm/legendary-resistance", handleGMLegendaryResistance)
+	http.HandleFunc("/api/gm/legendary-action", handleGMLegendaryAction)
 	http.HandleFunc("/api/characters/attune", handleCharacterAttune)
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
@@ -553,6 +554,13 @@ func initDB() {
 		-- Number of legendary resistances a monster has (usually 3 for bosses)
 		-- Allows monster to choose to succeed on a failed saving throw
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS legendary_resistances INTEGER DEFAULT 0;
+		
+		-- Legendary Actions (v0.8.30 - Phase 8 P2)
+		-- JSONB array of legendary actions a monster can take at end of other creatures' turns
+		-- Each action has: name, desc, cost (defaults to 1)
+		-- Most boss monsters get 3 legendary action points per round
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS legendary_actions JSONB DEFAULT '[]';
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS legendary_action_count INTEGER DEFAULT 0;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -5972,15 +5980,17 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	monsterGuidance := map[string]interface{}{}
 	if inCombat {
 		type InitEntry struct {
-			ID                    int    `json:"id"`
-			Name                  string `json:"name"`
-			Initiative            int    `json:"initiative"`
-			IsMonster             bool   `json:"is_monster"`
-			MonsterKey            string `json:"monster_key"`
-			HP                    int    `json:"hp"`
-			MaxHP                 int    `json:"max_hp"`
-			LegendaryResistances  int    `json:"legendary_resistances"`
-			LegendaryResUsed      int    `json:"legendary_resistances_used"`
+			ID                      int    `json:"id"`
+			Name                    string `json:"name"`
+			Initiative              int    `json:"initiative"`
+			IsMonster               bool   `json:"is_monster"`
+			MonsterKey              string `json:"monster_key"`
+			HP                      int    `json:"hp"`
+			MaxHP                   int    `json:"max_hp"`
+			LegendaryResistances    int    `json:"legendary_resistances"`
+			LegendaryResUsed        int    `json:"legendary_resistances_used"`
+			LegendaryActionsTotal   int    `json:"legendary_actions_total"`
+			LegendaryActionsUsed    int    `json:"legendary_actions_used"`
 		}
 		var entries []InitEntry
 		json.Unmarshal(turnOrderJSON, &entries)
@@ -5989,7 +5999,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			if e.IsMonster {
 				guidance := map[string]interface{}{
 					"hp":          fmt.Sprintf("%d/%d", e.HP, e.MaxHP),
-					"combatant_id": e.ID, // Include ID for use with legendary resistance endpoint
+					"combatant_id": e.ID, // Include ID for use with legendary resistance/action endpoints
 				}
 				
 				// Add legendary resistance info if monster has any (v0.8.29)
@@ -6000,6 +6010,54 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 						"used":      e.LegendaryResUsed,
 						"remaining": remaining,
 						"tip":       fmt.Sprintf("When %s fails a saving throw, you can use POST /api/gm/legendary-resistance with combatant_id:%d to auto-succeed", e.Name, e.ID),
+					}
+				}
+				
+				// Add legendary action info if monster has any (v0.8.30)
+				if e.MonsterKey != "" {
+					var legendaryActionsJSON []byte
+					var legendaryActionCount int
+					db.QueryRow(`SELECT COALESCE(legendary_actions, '[]'), COALESCE(legendary_action_count, 0) FROM monsters WHERE slug = $1`, 
+						e.MonsterKey).Scan(&legendaryActionsJSON, &legendaryActionCount)
+					
+					if legendaryActionCount > 0 {
+						// Initialize tracking if needed
+						laTotal := e.LegendaryActionsTotal
+						if laTotal == 0 {
+							laTotal = legendaryActionCount
+						}
+						laUsed := e.LegendaryActionsUsed
+						laRemaining := laTotal - laUsed
+						
+						// Parse available actions
+						type LegendaryAction struct {
+							Name string `json:"name"`
+							Desc string `json:"desc"`
+							Cost int    `json:"cost"`
+						}
+						var legendaryActions []LegendaryAction
+						json.Unmarshal(legendaryActionsJSON, &legendaryActions)
+						
+						actionsList := []map[string]interface{}{}
+						for _, a := range legendaryActions {
+							cost := a.Cost
+							if cost == 0 {
+								cost = 1
+							}
+							actionsList = append(actionsList, map[string]interface{}{
+								"name": a.Name,
+								"desc": a.Desc,
+								"cost": cost,
+							})
+						}
+						
+						guidance["legendary_actions"] = map[string]interface{}{
+							"total":     laTotal,
+							"used":      laUsed,
+							"remaining": laRemaining,
+							"actions":   actionsList,
+							"tip":       fmt.Sprintf("Use POST /api/gm/legendary-action with combatant_id:%d and action_name to take a legendary action at the end of another creature's turn. Points reset at start of %s's turn.", e.ID, e.Name),
+						}
 					}
 				}
 				
@@ -11021,6 +11079,240 @@ func handleGMLegendaryResistance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGMLegendaryAction godoc
+// @Summary Use a legendary action
+// @Description Allow a boss monster to take a legendary action at the end of another creature's turn. (v0.8.30)
+// @Description Most legendary creatures have 3 legendary action points that reset at the start of their turn.
+// @Description Each legendary action costs 1-3 points. Common actions: Detect (1), Attack (2-3), Wing Attack (2).
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{combatant_id=integer,action_name=string} true "Combat ID and action name"
+// @Success 200 {object} map[string]interface{} "Legendary action used"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or insufficient points"
+// @Router /gm/legendary-action [post]
+func handleGMLegendaryAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CombatantID int    `json:"combatant_id"` // Negative ID for monsters in combat
+		ActionName  string `json:"action_name"`  // Name of the legendary action to use
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CombatantID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "combatant_id required"})
+		return
+	}
+	if req.ActionName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "action_name required"})
+		return
+	}
+	
+	// Get combat state
+	var turnOrderJSON []byte
+	var active bool
+	err = db.QueryRow(`
+		SELECT turn_order, active FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&turnOrderJSON, &active)
+	
+	if err != nil || !active {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_active_combat",
+			"message": "No active combat in your campaign",
+		})
+		return
+	}
+	
+	// Parse turn order
+	type InitEntry struct {
+		ID                      int    `json:"id"`
+		Name                    string `json:"name"`
+		Initiative              int    `json:"initiative"`
+		DexScore                int    `json:"dex_score"`
+		IsMonster               bool   `json:"is_monster"`
+		MonsterKey              string `json:"monster_key"`
+		HP                      int    `json:"hp"`
+		MaxHP                   int    `json:"max_hp"`
+		AC                      int    `json:"ac"`
+		LegendaryResistances    int    `json:"legendary_resistances"`
+		LegendaryResUsed        int    `json:"legendary_resistances_used"`
+		LegendaryActionsTotal   int    `json:"legendary_actions_total"`
+		LegendaryActionsUsed    int    `json:"legendary_actions_used"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	// Find the combatant
+	var foundIndex = -1
+	for i, e := range entries {
+		if e.ID == req.CombatantID {
+			foundIndex = i
+			break
+		}
+	}
+	
+	if foundIndex == -1 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "combatant_not_found",
+			"message": fmt.Sprintf("No combatant with ID %d found in combat", req.CombatantID),
+		})
+		return
+	}
+	
+	entry := &entries[foundIndex]
+	
+	// Check if it's a monster
+	if !entry.IsMonster {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_monster",
+			"message": "Legendary actions are only for monsters/NPCs",
+		})
+		return
+	}
+	
+	// Get legendary actions from monster data
+	var legendaryActionsJSON []byte
+	var legendaryActionCount int
+	err = db.QueryRow(`
+		SELECT COALESCE(legendary_actions, '[]'), COALESCE(legendary_action_count, 0) 
+		FROM monsters WHERE slug = $1
+	`, entry.MonsterKey).Scan(&legendaryActionsJSON, &legendaryActionCount)
+	
+	if err != nil || legendaryActionCount == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_legendary_actions",
+			"message": fmt.Sprintf("%s does not have legendary actions", entry.Name),
+		})
+		return
+	}
+	
+	// Initialize legendary actions for this combat if needed
+	if entry.LegendaryActionsTotal == 0 {
+		entry.LegendaryActionsTotal = legendaryActionCount
+		entry.LegendaryActionsUsed = 0
+	}
+	
+	// Parse available legendary actions
+	type LegendaryAction struct {
+		Name string `json:"name"`
+		Desc string `json:"desc"`
+		Cost int    `json:"cost"`
+	}
+	var legendaryActions []LegendaryAction
+	json.Unmarshal(legendaryActionsJSON, &legendaryActions)
+	
+	// Find the requested action
+	var chosenAction *LegendaryAction
+	for i := range legendaryActions {
+		if strings.EqualFold(legendaryActions[i].Name, req.ActionName) {
+			chosenAction = &legendaryActions[i]
+			break
+		}
+	}
+	
+	if chosenAction == nil {
+		// List available actions in error
+		availableNames := []string{}
+		for _, a := range legendaryActions {
+			availableNames = append(availableNames, fmt.Sprintf("%s (cost: %d)", a.Name, a.Cost))
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":     "action_not_found",
+			"message":   fmt.Sprintf("'%s' is not a valid legendary action for %s", req.ActionName, entry.Name),
+			"available": availableNames,
+		})
+		return
+	}
+	
+	// Default cost is 1 if not specified
+	cost := chosenAction.Cost
+	if cost == 0 {
+		cost = 1
+	}
+	
+	// Check if enough points remaining
+	remaining := entry.LegendaryActionsTotal - entry.LegendaryActionsUsed
+	if remaining < cost {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":     "insufficient_points",
+			"message":   fmt.Sprintf("%s only has %d legendary action point(s) remaining, but %s costs %d", entry.Name, remaining, chosenAction.Name, cost),
+			"remaining": remaining,
+			"cost":      cost,
+			"tip":       "Legendary action points reset at the start of the monster's turn",
+		})
+		return
+	}
+	
+	// Use the legendary action
+	entry.LegendaryActionsUsed += cost
+	newRemaining := entry.LegendaryActionsTotal - entry.LegendaryActionsUsed
+	
+	// Save updated turn order
+	updatedJSON, _ := json.Marshal(entries)
+	_, err = db.Exec(`UPDATE combat_state SET turn_order = $1 WHERE lobby_id = $2`, updatedJSON, campaignID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Log the action
+	db.Exec(`INSERT INTO actions (lobby_id, action_type, description, result) VALUES ($1, 'legendary_action', $2, $3)`,
+		campaignID,
+		fmt.Sprintf("%s uses legendary action: %s", entry.Name, chosenAction.Name),
+		fmt.Sprintf("%d/%d legendary action points remaining. %s", newRemaining, entry.LegendaryActionsTotal, chosenAction.Desc))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"combatant":   entry.Name,
+		"action":      chosenAction.Name,
+		"description": chosenAction.Desc,
+		"cost":        cost,
+		"total":       entry.LegendaryActionsTotal,
+		"used":        entry.LegendaryActionsUsed,
+		"remaining":   newRemaining,
+		"message":     fmt.Sprintf("%s uses %s! (Cost: %d, %d points remaining)", entry.Name, chosenAction.Name, cost, newRemaining),
+		"tip":         "Legendary action points reset at the start of the monster's turn. Use POST /api/gm/narrate to describe the action's effect.",
+	})
+}
+
 // handleCharacterAttune godoc
 // @Summary Attune or unattune magic items
 // @Description Manage magic item attunement for a character. Max 3 attuned items per 5e rules.
@@ -13499,9 +13791,19 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 	
 	type InitEntry struct {
-		ID         int    `json:"id"`
-		Name       string `json:"name"`
-		Initiative int    `json:"initiative"`
+		ID                      int    `json:"id"`
+		Name                    string `json:"name"`
+		Initiative              int    `json:"initiative"`
+		DexScore                int    `json:"dex_score"`
+		IsMonster               bool   `json:"is_monster"`
+		MonsterKey              string `json:"monster_key"`
+		HP                      int    `json:"hp"`
+		MaxHP                   int    `json:"max_hp"`
+		AC                      int    `json:"ac"`
+		LegendaryResistances    int    `json:"legendary_resistances"`
+		LegendaryResUsed        int    `json:"legendary_resistances_used"`
+		LegendaryActionsTotal   int    `json:"legendary_actions_total"`
+		LegendaryActionsUsed    int    `json:"legendary_actions_used"`
 	}
 	var entries []InitEntry
 	json.Unmarshal(turnOrderJSON, &entries)
@@ -13535,27 +13837,51 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 		round++
 	}
 	
-	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
+	// Reset legendary actions if the new turn is a monster with legendary actions (v0.8.30)
+	needsUpdate := false
+	newEntry := &entries[turnIndex]
+	if newEntry.IsMonster && newEntry.LegendaryActionsTotal > 0 {
+		newEntry.LegendaryActionsUsed = 0
+		needsUpdate = true
+	}
 	
-	// Reset action economy for the new active character
+	// Save updated turn order if legendary actions were reset
+	if needsUpdate {
+		updatedTurnOrder, _ := json.Marshal(entries)
+		db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW(), turn_order = $3 WHERE lobby_id = $4", turnIndex, round, updatedTurnOrder, campaignID)
+	} else {
+		db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
+	}
+	
+	// Reset action economy for the new active character (only for player characters)
 	newActiveID := entries[turnIndex].ID
-	var race string
-	db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
-	speed := getMovementSpeed(race)
-	db.Exec(`
-		UPDATE characters 
-		SET action_used = false, bonus_action_used = false, 
-		    movement_remaining = $1, reaction_used = false
-		WHERE id = $2
-	`, speed, newActiveID)
+	if !newEntry.IsMonster {
+		var race string
+		db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
+		speed := getMovementSpeed(race)
+		db.Exec(`
+			UPDATE characters 
+			SET action_used = false, bonus_action_used = false, 
+			    movement_remaining = $1, reaction_used = false
+			WHERE id = $2
+		`, speed, newActiveID)
+	}
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":            true,
 		"round":              round,
 		"current_turn":       entries[turnIndex].Name,
 		"turn_index":         turnIndex,
 		"action_economy_reset": true,
-	})
+	}
+	
+	// Add legendary action reset message if applicable (v0.8.30)
+	if needsUpdate {
+		response["legendary_actions_reset"] = true
+		response["legendary_actions_message"] = fmt.Sprintf("%s's legendary action points have been reset to %d", newEntry.Name, newEntry.LegendaryActionsTotal)
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleCombatSkip godoc
@@ -13745,17 +14071,19 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	// Parse current turn order
 	type InitEntry struct {
-		ID                    int    `json:"id"`
-		Name                  string `json:"name"`
-		Initiative            int    `json:"initiative"`
-		DexScore              int    `json:"dex_score"`
-		IsMonster             bool   `json:"is_monster"`
-		MonsterKey            string `json:"monster_key"`
-		HP                    int    `json:"hp"`
-		MaxHP                 int    `json:"max_hp"`
-		AC                    int    `json:"ac"`
-		LegendaryResistances  int    `json:"legendary_resistances"`       // Total LR (usually 3)
-		LegendaryResUsed      int    `json:"legendary_resistances_used"`  // How many used this day
+		ID                      int    `json:"id"`
+		Name                    string `json:"name"`
+		Initiative              int    `json:"initiative"`
+		DexScore                int    `json:"dex_score"`
+		IsMonster               bool   `json:"is_monster"`
+		MonsterKey              string `json:"monster_key"`
+		HP                      int    `json:"hp"`
+		MaxHP                   int    `json:"max_hp"`
+		AC                      int    `json:"ac"`
+		LegendaryResistances    int    `json:"legendary_resistances"`       // Total LR (usually 3)
+		LegendaryResUsed        int    `json:"legendary_resistances_used"`  // How many used this day
+		LegendaryActionsTotal   int    `json:"legendary_actions_total"`     // Total LA points per round (v0.8.30)
+		LegendaryActionsUsed    int    `json:"legendary_actions_used"`      // How many used this round (v0.8.30)
 	}
 	var entries []InitEntry
 	json.Unmarshal(turnOrderJSON, &entries)
@@ -13791,11 +14119,11 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 		
 		// Look up monster stats if key provided
 		if c.MonsterKey != "" {
-			var dex, hp, ac, legendaryRes int
+			var dex, hp, ac, legendaryRes, legendaryActionCount int
 			err := db.QueryRow(`
-				SELECT COALESCE(dex, 10), COALESCE(hp, 10), COALESCE(ac, 10), COALESCE(legendary_resistances, 0)
+				SELECT COALESCE(dex, 10), COALESCE(hp, 10), COALESCE(ac, 10), COALESCE(legendary_resistances, 0), COALESCE(legendary_action_count, 0)
 				FROM monsters WHERE slug = $1
-			`, c.MonsterKey).Scan(&dex, &hp, &ac, &legendaryRes)
+			`, c.MonsterKey).Scan(&dex, &hp, &ac, &legendaryRes, &legendaryActionCount)
 			if err == nil {
 				// Roll initiative based on monster DEX if not provided
 				if c.Initiative == 0 {
@@ -13822,6 +14150,10 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 				// Set legendary resistances from monster data (v0.8.29)
 				entry.LegendaryResistances = legendaryRes
 				entry.LegendaryResUsed = 0
+				
+				// Set legendary actions from monster data (v0.8.30)
+				entry.LegendaryActionsTotal = legendaryActionCount
+				entry.LegendaryActionsUsed = 0
 			} else {
 				// Monster not found, use provided or defaults
 				if c.Initiative == 0 {
