@@ -933,13 +933,15 @@ func seedSpellsFromAPI() {
 		damageDice, damageType, savingThrow, healing := "", "", "", ""
 		damageAtSlotLevel := map[string]string{}
 		healAtSlotLevel := map[string]string{}
+		spellLevelStr := fmt.Sprintf("%d", int(detail["level"].(float64)))
 		if dmg, ok := detail["damage"].(map[string]interface{}); ok {
 			if slot, ok := dmg["damage_at_slot_level"].(map[string]interface{}); ok {
 				for k, v := range slot {
 					damageAtSlotLevel[k] = v.(string)
-					if damageDice == "" {
-						damageDice = v.(string) // Keep first as base for backward compat
-					}
+				}
+				// Use base spell level as damage_dice for backward compat
+				if baseDmg, ok := damageAtSlotLevel[spellLevelStr]; ok {
+					damageDice = baseDmg
 				}
 			}
 			if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
@@ -954,9 +956,11 @@ func seedSpellsFromAPI() {
 		if heal, ok := detail["heal_at_slot_level"].(map[string]interface{}); ok {
 			for k, v := range heal {
 				healAtSlotLevel[k] = v.(string)
-				if healing == "" {
-					healing = v.(string) // Keep first as base for backward compat
-				}
+			}
+			// Use base spell level as healing for backward compat
+			if baseHeal, ok := healAtSlotLevel[spellLevelStr]; ok {
+				// Strip the " + MOD" from healing for the base column
+				healing = strings.Replace(baseHeal, " + MOD", "", 1)
 			}
 		}
 		damageAtSlotLevelJSON, _ := json.Marshal(damageAtSlotLevel)
