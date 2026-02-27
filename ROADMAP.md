@@ -590,9 +590,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Use at end of other creature's turn
   - [ ] Different cost for different abilities
   - [ ] Replenish at start of monster's turn
-- [ ] **Legendary Resistances**
-  - [ ] Choose to succeed failed save
-  - [ ] Limited uses per day (usually 3)
+- [x] **Legendary Resistances** (v0.8.29)
+  - [x] Choose to succeed failed save (`POST /api/gm/legendary-resistance`)
+  - [x] Limited uses per day (tracked per combat combatant)
+  - [x] Shown in `/api/gm/status` monster guidance
+  - [x] Stored in monsters table (`legendary_resistances` column)
 - [ ] **Lair Actions**
   - [ ] Occur on initiative count 20
   - [ ] Only in monster's lair
@@ -666,7 +668,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 8. **Spell Components** — Material component tracking
 
 ### P2 — Polish for Full Experience
-9. **Legendary Actions/Resistances** — Boss fights
+9. **Legendary Actions/Resistances** — Boss fights (Resistances ✅ v0.8.29, Actions TODO)
 10. **Full Currency** — Economic gameplay
 11. ~~**Ammunition** — Resource management~~ ✅ (v0.8.18)
 12. **Feats** — Build variety
