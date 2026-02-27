@@ -297,7 +297,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] POST /api/gm/shove with attacker_id, target_id, effect (prone/push)
   - [x] Defender uses Athletics or Acrobatics (whichever is higher)
   - [x] Auto-applies prone condition on success
-- [ ] **Disarming** (optional rule) — Attack roll vs Athletics/Acrobatics
+- [x] **Disarming** (optional rule) — Attack roll vs Athletics/Acrobatics (v0.8.25)
+  - [x] POST /api/gm/disarm endpoint
+  - [x] Attack roll vs target's Athletics or Acrobatics (whichever is higher)
+  - [x] Disadvantage on check if target holding item with two hands
+  - [x] Respects skill proficiencies and expertise
 - [x] **Two-Weapon Fighting** (v0.8.14)
   - [x] Bonus action attack with light weapon (`offhand_attack` action)
   - [x] No ability modifier to damage (without Fighting Style)
@@ -682,4 +686,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.21**
+Current: **0.8.25**

@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.24"
+const version = "0.8.25"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -174,6 +174,7 @@ func main() {
 	http.HandleFunc("/api/gm/grapple", handleGMGrapple)
 	http.HandleFunc("/api/gm/escape-grapple", handleGMEscapeGrapple)
 	http.HandleFunc("/api/gm/release-grapple", handleGMReleaseGrapple)
+	http.HandleFunc("/api/gm/disarm", handleGMDisarm)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
 	http.HandleFunc("/api/gm/gold", handleGMGold)
@@ -8463,6 +8464,227 @@ func handleGMReleaseGrapple(w http.ResponseWriter, r *http.Request) {
 		"target_id":   req.TargetID,
 		"message":     fmt.Sprintf("%s releases %s from their grapple (no action cost)", grapplerName, targetName),
 	})
+}
+
+// handleGMDisarm godoc
+// @Summary Resolve a disarm attempt (DMG optional rule)
+// @Description GM resolves a disarm attack. Attacker makes attack roll vs target's Athletics or Acrobatics check. On success: target drops one held item.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{attacker_id=int,target_id=int,weapon=string,item_to_disarm=string,two_handed=boolean} true "Disarm details"
+// @Success 200 {object} map[string]interface{} "Disarm result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/disarm [post]
+func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		AttackerID   int    `json:"attacker_id"`
+		TargetID     int    `json:"target_id"`
+		Weapon       string `json:"weapon"`         // Attacker's weapon (for attack bonus calculation)
+		ItemToDisarm string `json:"item_to_disarm"` // What the target is holding that will be disarmed
+		TwoHanded    bool   `json:"two_handed"`     // If target is holding item with two hands (gives disadvantage)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.AttackerID == 0 || req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_id and target_id required"})
+		return
+	}
+	
+	// Get attacker stats
+	var attackerName string
+	var attackerStr, attackerDex, attackerLevel, attackerLobby int
+	var attackerSkillProfs, attackerExpertise string
+	err = db.QueryRow(`SELECT name, str, dex, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, '') 
+		FROM characters WHERE id = $1`, req.AttackerID).
+		Scan(&attackerName, &attackerStr, &attackerDex, &attackerLevel, &attackerLobby, &attackerSkillProfs, &attackerExpertise)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "attacker_not_found"})
+		return
+	}
+	
+	// Get target stats
+	var targetName string
+	var targetStr, targetDex, targetLevel, targetLobby int
+	var targetSkillProfs, targetExpertise string
+	err = db.QueryRow(`SELECT name, str, dex, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, '') 
+		FROM characters WHERE id = $1`, req.TargetID).
+		Scan(&targetName, &targetStr, &targetDex, &targetLevel, &targetLobby, &targetSkillProfs, &targetExpertise)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_found"})
+		return
+	}
+	
+	// Verify both are in this campaign
+	if attackerLobby != campaignID || targetLobby != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "characters_not_in_campaign"})
+		return
+	}
+	
+	// Calculate attacker's attack modifier
+	// Use STR for melee, DEX for finesse/ranged - simplified: use higher of STR/DEX
+	attackMod := modifier(attackerStr)
+	if modifier(attackerDex) > attackMod {
+		attackMod = modifier(attackerDex)
+	}
+	attackMod += proficiencyBonus(attackerLevel) // Assume proficiency with attack
+	
+	// Calculate target's Athletics or Acrobatics (whichever is higher)
+	// Parse skill proficiencies
+	targetSkills := strings.Split(targetSkillProfs, ",")
+	for i := range targetSkills {
+		targetSkills[i] = strings.TrimSpace(targetSkills[i])
+	}
+	targetExpSkills := strings.Split(targetExpertise, ",")
+	for i := range targetExpSkills {
+		targetExpSkills[i] = strings.TrimSpace(targetExpSkills[i])
+	}
+	
+	// Athletics (STR-based)
+	targetAthMod := modifier(targetStr)
+	if containsSkill(targetSkills, "athletics") {
+		if containsSkill(targetExpSkills, "athletics") {
+			targetAthMod += proficiencyBonus(targetLevel) * 2 // Expertise
+		} else {
+			targetAthMod += proficiencyBonus(targetLevel)
+		}
+	}
+	
+	// Acrobatics (DEX-based)
+	targetAcrMod := modifier(targetDex)
+	if containsSkill(targetSkills, "acrobatics") {
+		if containsSkill(targetExpSkills, "acrobatics") {
+			targetAcrMod += proficiencyBonus(targetLevel) * 2 // Expertise
+		} else {
+			targetAcrMod += proficiencyBonus(targetLevel)
+		}
+	}
+	
+	// Target uses whichever is higher
+	targetMod := targetAthMod
+	targetSkill := "Athletics"
+	if targetAcrMod > targetAthMod {
+		targetMod = targetAcrMod
+		targetSkill = "Acrobatics"
+	}
+	
+	// Roll the contest
+	// Attacker makes attack roll
+	attackerRoll := rollDie(20)
+	
+	// Target makes skill check, with disadvantage if two-handed
+	var targetRoll int
+	if req.TwoHanded {
+		// Disadvantage: roll twice, take lower
+		roll1 := rollDie(20)
+		roll2 := rollDie(20)
+		if roll1 < roll2 {
+			targetRoll = roll1
+		} else {
+			targetRoll = roll2
+		}
+	} else {
+		targetRoll = rollDie(20)
+	}
+	
+	attackerTotal := attackerRoll + attackMod
+	targetTotal := targetRoll + targetMod
+	
+	// Determine winner (ties go to defender)
+	success := attackerTotal > targetTotal
+	
+	// Build result text
+	var resultText string
+	if req.TwoHanded {
+		resultText = fmt.Sprintf("Disarm: %s attack (%d + %d = %d) vs %s %s (%d + %d = %d, disadvantage for two-handed)",
+			attackerName, attackerRoll, attackMod, attackerTotal,
+			targetName, targetSkill, targetRoll, targetMod, targetTotal)
+	} else {
+		resultText = fmt.Sprintf("Disarm: %s attack (%d + %d = %d) vs %s %s (%d + %d = %d)",
+			attackerName, attackerRoll, attackMod, attackerTotal,
+			targetName, targetSkill, targetRoll, targetMod, targetTotal)
+	}
+	
+	itemDisarmed := req.ItemToDisarm
+	if itemDisarmed == "" {
+		itemDisarmed = "held item"
+	}
+	
+	response := map[string]interface{}{
+		"success": success,
+		"attacker": map[string]interface{}{
+			"name":     attackerName,
+			"roll":     attackerRoll,
+			"modifier": attackMod,
+			"total":    attackerTotal,
+		},
+		"defender": map[string]interface{}{
+			"name":       targetName,
+			"skill":      targetSkill,
+			"roll":       targetRoll,
+			"modifier":   targetMod,
+			"total":      targetTotal,
+			"two_handed": req.TwoHanded,
+		},
+		"item_targeted": itemDisarmed,
+	}
+	
+	if success {
+		response["message"] = fmt.Sprintf("%s disarms %s! The %s falls to the ground.", 
+			attackerName, targetName, itemDisarmed)
+		response["effect"] = fmt.Sprintf("%s drops their %s", targetName, itemDisarmed)
+		response["gm_note"] = "The item lands at the target's feet. Either combatant can use their free object interaction to pick it up."
+	} else {
+		response["message"] = fmt.Sprintf("%s fails to disarm %s. %s maintains their grip on the %s.",
+			attackerName, targetName, targetName, itemDisarmed)
+	}
+	
+	// Record the action
+	actionResult := resultText
+	if success {
+		actionResult += fmt.Sprintf(" - SUCCESS: %s drops %s", targetName, itemDisarmed)
+	} else {
+		actionResult += " - FAILED"
+	}
+	
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'disarm', $3, $4)`,
+		campaignID, req.AttackerID, fmt.Sprintf("Disarm %s (%s)", targetName, itemDisarmed), actionResult)
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // containsSkill checks if a skill name is in the skill list (case-insensitive)
