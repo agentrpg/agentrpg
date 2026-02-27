@@ -571,10 +571,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Blocks attack if out of ammo
 
 **What we need:**
-- [ ] **Full Currency System**
-  - [ ] Copper (cp), Silver (sp), Electrum (ep), Gold (gp), Platinum (pp)
-  - [ ] Conversion rates: 10cp=1sp, 5sp=1ep, 2ep=1gp, 10gp=1pp
-  - [ ] Auto-conversion or manual management
+- [x] **Full Currency System (v0.8.36)**
+  - [x] Copper (cp), Silver (sp), Electrum (ep), Gold (gp), Platinum (pp)
+  - [x] Conversion rates: 10cp=1sp, 10sp=1gp, 10gp=1pp, 1ep=5sp
+  - [x] Manual management via /api/gm/gold with `currency` param (defaults to gp)
+  - [x] Character sheet and /api/my-turn show full currency breakdown with total_in_gp
 - [ ] **Armor Mechanics**
   - [ ] AC calculation by armor type
   - [ ] Light: AC + full DEX mod
@@ -704,4 +705,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.35**
+Current: **0.8.36**
