@@ -6201,18 +6201,29 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Battle recommendation: check if we should nudge GM toward combat
-	// Conditions: 3+ active players, 5+ actions since last combat, not currently in combat
+	// Conditions: 3+ RECENTLY active players (last 4 hours), 5+ actions since last combat
 	if !inCombat {
-		// Count distinct active players (those with actions in last 48 hours)
+		// Count distinct active players (those with actions in last 4 hours)
 		var activePlayerCount int
 		db.QueryRow(`
 			SELECT COUNT(DISTINCT c.agent_id) 
 			FROM actions a 
 			JOIN characters c ON a.character_id = c.id 
 			WHERE a.lobby_id = $1 
-			AND a.created_at > NOW() - INTERVAL '48 hours'
+			AND a.created_at > NOW() - INTERVAL '4 hours'
 			AND a.action_type NOT IN ('poll', 'joined')
 		`, campaignID).Scan(&activePlayerCount)
+		
+		// Count players active in last 12 hours (for dormancy check)
+		var recentPlayerCount int
+		db.QueryRow(`
+			SELECT COUNT(DISTINCT c.agent_id) 
+			FROM actions a 
+			JOIN characters c ON a.character_id = c.id 
+			WHERE a.lobby_id = $1 
+			AND a.created_at > NOW() - INTERVAL '12 hours'
+			AND a.action_type NOT IN ('poll', 'joined')
+		`, campaignID).Scan(&recentPlayerCount)
 		
 		// Count actions since last combat ended (or since campaign start)
 		var actionsSinceCombat int
@@ -6226,10 +6237,11 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			)
 		`, campaignID).Scan(&actionsSinceCombat)
 		
+		// Recommend combat only if 3+ players active in last 4 hours AND 5+ actions
 		if activePlayerCount >= 3 && actionsSinceCombat >= 5 {
 			response["battle_recommended"] = true
 			response["battle_guidance"] = map[string]interface{}{
-				"reason": fmt.Sprintf("%d active players, %d actions since last combat — time to raise the stakes!", activePlayerCount, actionsSinceCombat),
+				"reason": fmt.Sprintf("%d players active in last 4 hours, %d actions since last combat — time to raise the stakes!", activePlayerCount, actionsSinceCombat),
 				"suggestions": []string{
 					"Introduce a threat that blocks their path forward",
 					"Have something attack while they're exploring/talking",
@@ -6247,7 +6259,21 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			}
-			gmTasks = append(gmTasks, "⚔️ Battle recommended! The party has been exploring/talking for a while. Consider introducing combat.")
+			gmTasks = append(gmTasks, "⚔️ Battle recommended! 3+ players active, consider introducing combat.")
+		} else if recentPlayerCount < 3 && recentPlayerCount > 0 {
+			// Dormancy mode: fewer than 3 players active in 12 hours
+			response["campaign_dormant"] = true
+			response["dormancy_guidance"] = map[string]interface{}{
+				"reason": fmt.Sprintf("Only %d player(s) active in the last 12 hours. Campaign may be in a lull.", recentPlayerCount),
+				"suggestions": []string{
+					"Keep the campaign in story-mode for now",
+					"Draft a scene focused on the currently-active player(s)",
+					"Narrate a time skip or 'the party rests' moment",
+					"Send a gentle nudge to inactive players if they've been gone 24h+",
+					"Wait for more players before starting combat",
+				},
+			}
+			gmTasks = append(gmTasks, fmt.Sprintf("💤 Campaign quiet — only %d player(s) active in 12h. Consider story-mode until more return.", recentPlayerCount))
 		}
 	}
 	
