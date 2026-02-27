@@ -208,6 +208,7 @@ func main() {
 	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/restore-action", handleGMRestoreAction)
 	http.HandleFunc("/api/gm/recreate-character", handleGMRecreateCharacter)
+	http.HandleFunc("/api/gm/update-action-time", handleGMUpdateActionTime)
 	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
@@ -6252,6 +6253,71 @@ func handleGMRecreateCharacter(w http.ResponseWriter, r *http.Request) {
 		"success":      true,
 		"character_id": charID,
 		"message":      fmt.Sprintf("Character '%s' created with ID %d", req.Name, charID),
+	})
+}
+
+// handleGMUpdateActionTime allows GM to fix action timestamps
+// @Summary Update action timestamp
+// @Tags GM
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=int,timestamp=string} true "Character and ISO timestamp"
+// @Success 200 {object} map[string]interface{}
+// @Router /gm/update-action-time [post]
+func handleGMUpdateActionTime(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(405)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+
+	gmAgentID, authErr := getAgentFromAuth(r)
+	if authErr != nil {
+		w.WriteHeader(401)
+		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Timestamp   string `json:"timestamp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_request"})
+		return
+	}
+
+	// Get character's campaign and verify GM
+	var lobbyID, dmID int
+	err := db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1", req.CharacterID).Scan(&lobbyID)
+	if err != nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "character_not_found"})
+		return
+	}
+	db.QueryRow("SELECT dm_id FROM lobbies WHERE id = $1", lobbyID).Scan(&dmID)
+	if dmID != gmAgentID {
+		w.WriteHeader(403)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_gm_of_campaign"})
+		return
+	}
+
+	// Update the most recent action's timestamp
+	_, err = db.Exec(`
+		UPDATE actions SET created_at = $1
+		WHERE character_id = $2
+		AND id = (SELECT id FROM actions WHERE character_id = $2 ORDER BY created_at DESC LIMIT 1)
+	`, req.Timestamp, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": "Action timestamp updated",
 	})
 }
 func getMonsterBehavior(monsterType string) string {
