@@ -886,6 +886,42 @@ func seedMonstersFromAPI() {
 		}
 		actionsJSON, _ := json.Marshal(actions)
 		
+		// Parse legendary resistances (v0.8.29)
+		legendaryResistances := 0
+		if lr, ok := detail["legendary_resistances"].([]interface{}); ok && len(lr) > 0 {
+			legendaryResistances = len(lr)
+		}
+		
+		// Parse legendary actions (v0.8.30)
+		legendaryActions := []map[string]interface{}{}
+		legendaryActionCount := 0
+		if laArr, ok := detail["legendary_actions"].([]interface{}); ok {
+			for _, la := range laArr {
+				if laMap, ok := la.(map[string]interface{}); ok {
+					action := map[string]interface{}{
+						"name": laMap["name"],
+						"desc": laMap["desc"],
+						"cost": 1, // Default cost is 1
+					}
+					// Try to extract cost from description (e.g., "Costs 2 Actions")
+					if desc, ok := laMap["desc"].(string); ok {
+						descLower := strings.ToLower(desc)
+						if strings.Contains(descLower, "costs 2 actions") {
+							action["cost"] = 2
+						} else if strings.Contains(descLower, "costs 3 actions") {
+							action["cost"] = 3
+						}
+					}
+					legendaryActions = append(legendaryActions, action)
+				}
+			}
+			// Most legendary creatures can take 3 legendary actions
+			if len(legendaryActions) > 0 {
+				legendaryActionCount = 3
+			}
+		}
+		legendaryActionsJSON, _ := json.Marshal(legendaryActions)
+		
 		// Safe extraction with defaults
 		hp := 1
 		if v, ok := detail["hit_points"].(float64); ok {
@@ -901,16 +937,20 @@ func seedMonstersFromAPI() {
 		xp := 0
 		if v, ok := detail["xp"].(float64); ok { xp = int(v) }
 		
-		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name, size = EXCLUDED.size, type = EXCLUDED.type,
 				ac = EXCLUDED.ac, hp = EXCLUDED.hp, hit_dice = EXCLUDED.hit_dice,
 				speed = EXCLUDED.speed, str = EXCLUDED.str, dex = EXCLUDED.dex,
 				con = EXCLUDED.con, intl = EXCLUDED.intl, wis = EXCLUDED.wis,
-				cha = EXCLUDED.cha, cr = EXCLUDED.cr, xp = EXCLUDED.xp, actions = EXCLUDED.actions`,
+				cha = EXCLUDED.cha, cr = EXCLUDED.cr, xp = EXCLUDED.xp, actions = EXCLUDED.actions,
+				legendary_resistances = EXCLUDED.legendary_resistances,
+				legendary_actions = EXCLUDED.legendary_actions,
+				legendary_action_count = EXCLUDED.legendary_action_count`,
 			r["index"], detail["name"], detail["size"], detail["type"], ac, hp,
-			detail["hit_dice"], speed, str, dex, con, intl, wis, cha, fmt.Sprintf("%v", detail["challenge_rating"]), xp, string(actionsJSON))
+			detail["hit_dice"], speed, str, dex, con, intl, wis, cha, fmt.Sprintf("%v", detail["challenge_rating"]), xp, string(actionsJSON),
+			legendaryResistances, string(legendaryActionsJSON), legendaryActionCount)
 	}
 	log.Println("Monsters seeded")
 }
@@ -16998,25 +17038,33 @@ func handleUniverseMonster(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/universe/monsters/")
 	var m struct {
-		Name    string          `json:"name"`
-		Size    string          `json:"size"`
-		Type    string          `json:"type"`
-		AC      int             `json:"ac"`
-		HP      int             `json:"hp"`
-		HitDice string          `json:"hit_dice"`
-		Speed   int             `json:"speed"`
-		STR     int             `json:"str"`
-		DEX     int             `json:"dex"`
-		CON     int             `json:"con"`
-		INT     int             `json:"int"`
-		WIS     int             `json:"wis"`
-		CHA     int             `json:"cha"`
-		CR      string          `json:"cr"`
-		XP      int             `json:"xp"`
-		Actions json.RawMessage `json:"actions"`
+		Name                   string          `json:"name"`
+		Size                   string          `json:"size"`
+		Type                   string          `json:"type"`
+		AC                     int             `json:"ac"`
+		HP                     int             `json:"hp"`
+		HitDice                string          `json:"hit_dice"`
+		Speed                  int             `json:"speed"`
+		STR                    int             `json:"str"`
+		DEX                    int             `json:"dex"`
+		CON                    int             `json:"con"`
+		INT                    int             `json:"int"`
+		WIS                    int             `json:"wis"`
+		CHA                    int             `json:"cha"`
+		CR                     string          `json:"cr"`
+		XP                     int             `json:"xp"`
+		Actions                json.RawMessage `json:"actions"`
+		LegendaryResistances   int             `json:"legendary_resistances,omitempty"`
+		LegendaryActions       json.RawMessage `json:"legendary_actions,omitempty"`
+		LegendaryActionCount   int             `json:"legendary_action_count,omitempty"`
 	}
-	err := db.QueryRow("SELECT name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions FROM monsters WHERE slug = $1", id).Scan(
-		&m.Name, &m.Size, &m.Type, &m.AC, &m.HP, &m.HitDice, &m.Speed, &m.STR, &m.DEX, &m.CON, &m.INT, &m.WIS, &m.CHA, &m.CR, &m.XP, &m.Actions)
+	err := db.QueryRow(`
+		SELECT name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions,
+			COALESCE(legendary_resistances, 0), COALESCE(legendary_actions, '[]'), COALESCE(legendary_action_count, 0)
+		FROM monsters WHERE slug = $1
+	`, id).Scan(
+		&m.Name, &m.Size, &m.Type, &m.AC, &m.HP, &m.HitDice, &m.Speed, &m.STR, &m.DEX, &m.CON, &m.INT, &m.WIS, &m.CHA, &m.CR, &m.XP, &m.Actions,
+		&m.LegendaryResistances, &m.LegendaryActions, &m.LegendaryActionCount)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": "monster_not_found"})
 		return
