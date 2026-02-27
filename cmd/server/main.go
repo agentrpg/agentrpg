@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.31"
+const version = "0.8.32"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -207,6 +207,38 @@ func matchesDamageType(damageType, resistanceEntry string) bool {
 	}
 	
 	return false
+}
+
+// extractDamageTypesFromAPI extracts damage type strings from SRD API response (v0.8.31)
+// The API returns damage_resistances/immunities/vulnerabilities as arrays of strings
+func extractDamageTypesFromAPI(m map[string]interface{}, field string) string {
+	if arr, ok := m[field].([]interface{}); ok && len(arr) > 0 {
+		types := []string{}
+		for _, item := range arr {
+			if str, ok := item.(string); ok {
+				types = append(types, strings.ToLower(str))
+			}
+		}
+		return strings.Join(types, ", ")
+	}
+	return ""
+}
+
+// extractConditionImmunitiesFromAPI extracts condition immunity names from SRD API response (v0.8.31)
+// The API returns condition_immunities as array of objects: [{index: "poisoned", name: "Poisoned"}]
+func extractConditionImmunitiesFromAPI(m map[string]interface{}) string {
+	if arr, ok := m["condition_immunities"].([]interface{}); ok && len(arr) > 0 {
+		conditions := []string{}
+		for _, item := range arr {
+			if condMap, ok := item.(map[string]interface{}); ok {
+				if name, ok := condMap["name"].(string); ok {
+					conditions = append(conditions, strings.ToLower(name))
+				}
+			}
+		}
+		return strings.Join(conditions, ", ")
+	}
+	return ""
 }
 
 // getLevelForXP returns the level a character should be at given their XP
@@ -638,6 +670,10 @@ func initDB() {
 		-- Cleared at start of turn, triggered via reaction
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS readied_action JSONB;
 		
+		-- Player activity status: 'active' (default), 'inactive' (no activity for 4h+)
+		-- Inactive players are skipped in combat and may be auto-removed
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
+		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
 		ALTER TABLE classes ADD COLUMN IF NOT EXISTS skill_choices TEXT DEFAULT '';
@@ -1031,6 +1067,12 @@ func seedMonstersFromAPI() {
 		}
 		legendaryActionsJSON, _ := json.Marshal(legendaryActions)
 		
+		// Parse damage resistances/immunities/vulnerabilities (v0.8.31)
+		damageResistances := extractDamageTypesFromAPI(detail, "damage_resistances")
+		damageImmunities := extractDamageTypesFromAPI(detail, "damage_immunities")
+		damageVulnerabilities := extractDamageTypesFromAPI(detail, "damage_vulnerabilities")
+		conditionImmunities := extractConditionImmunitiesFromAPI(detail)
+		
 		// Safe extraction with defaults
 		hp := 1
 		if v, ok := detail["hit_points"].(float64); ok {
@@ -1046,8 +1088,8 @@ func seedMonstersFromAPI() {
 		xp := 0
 		if v, ok := detail["xp"].(float64); ok { xp = int(v) }
 		
-		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count, damage_resistances, damage_immunities, damage_vulnerabilities, condition_immunities)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name, size = EXCLUDED.size, type = EXCLUDED.type,
 				ac = EXCLUDED.ac, hp = EXCLUDED.hp, hit_dice = EXCLUDED.hit_dice,
@@ -1056,10 +1098,15 @@ func seedMonstersFromAPI() {
 				cha = EXCLUDED.cha, cr = EXCLUDED.cr, xp = EXCLUDED.xp, actions = EXCLUDED.actions,
 				legendary_resistances = EXCLUDED.legendary_resistances,
 				legendary_actions = EXCLUDED.legendary_actions,
-				legendary_action_count = EXCLUDED.legendary_action_count`,
+				legendary_action_count = EXCLUDED.legendary_action_count,
+				damage_resistances = EXCLUDED.damage_resistances,
+				damage_immunities = EXCLUDED.damage_immunities,
+				damage_vulnerabilities = EXCLUDED.damage_vulnerabilities,
+				condition_immunities = EXCLUDED.condition_immunities`,
 			r["index"], detail["name"], detail["size"], detail["type"], ac, hp,
 			detail["hit_dice"], speed, str, dex, con, intl, wis, cha, fmt.Sprintf("%v", detail["challenge_rating"]), xp, string(actionsJSON),
-			legendaryResistances, string(legendaryActionsJSON), legendaryActionCount)
+			legendaryResistances, string(legendaryActionsJSON), legendaryActionCount,
+			damageResistances, damageImmunities, damageVulnerabilities, conditionImmunities)
 	}
 	log.Println("Monsters seeded")
 }
@@ -2121,8 +2168,8 @@ func updateCharacterActivity(characterID int, activityType, description string) 
 	if db == nil || characterID == 0 {
 		return
 	}
-	// Update last_active
-	db.Exec(`UPDATE characters SET last_active = NOW() WHERE id = $1`, characterID)
+	// Update last_active and reset status to active (in case they were marked inactive)
+	db.Exec(`UPDATE characters SET last_active = NOW(), status = 'active' WHERE id = $1`, characterID)
 	
 	// Get lobby_id for the character
 	var lobbyID int
@@ -5988,6 +6035,82 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	gameState := "exploration"
 	if inCombat {
 		gameState = "combat"
+	}
+	
+	// Lazy inactivity check: mark players inactive if no activity in 4+ hours
+	// Also remove inactive players from combat turn order
+	inactiveThreshold := 4 * time.Hour
+	var inactiveCharIDs []int
+	inactiveRows, _ := db.Query(`
+		SELECT c.id, c.name FROM characters c
+		WHERE c.lobby_id = $1
+		AND c.status != 'inactive'
+		AND NOT EXISTS (
+			SELECT 1 FROM actions a 
+			WHERE a.character_id = c.id 
+			AND a.created_at > NOW() - INTERVAL '4 hours'
+		)
+	`, campaignID)
+	if inactiveRows != nil {
+		for inactiveRows.Next() {
+			var charID int
+			var charName string
+			inactiveRows.Scan(&charID, &charName)
+			inactiveCharIDs = append(inactiveCharIDs, charID)
+			log.Printf("Marking character %s (ID %d) as inactive (no activity in %v)", charName, charID, inactiveThreshold)
+		}
+		inactiveRows.Close()
+		
+		// Mark them inactive in the database
+		for _, charID := range inactiveCharIDs {
+			db.Exec(`UPDATE characters SET status = 'inactive' WHERE id = $1`, charID)
+		}
+		
+		// Remove inactive players from combat turn order
+		if inCombat && len(inactiveCharIDs) > 0 {
+			type TurnEntry struct {
+				ID         int    `json:"id"`
+				Name       string `json:"name"`
+				Initiative int    `json:"initiative"`
+				DexScore   int    `json:"dex_score"`
+				IsMonster  bool   `json:"is_monster"`
+				MonsterKey string `json:"monster_key"`
+				HP         int    `json:"hp"`
+				MaxHP      int    `json:"max_hp"`
+				AC         int    `json:"ac"`
+			}
+			var turnOrder []TurnEntry
+			json.Unmarshal(turnOrderJSON, &turnOrder)
+			
+			// Filter out inactive characters
+			newTurnOrder := []TurnEntry{}
+			for _, entry := range turnOrder {
+				isInactive := false
+				for _, inactiveID := range inactiveCharIDs {
+					if entry.ID == inactiveID {
+						isInactive = true
+						break
+					}
+				}
+				if !isInactive {
+					newTurnOrder = append(newTurnOrder, entry)
+				}
+			}
+			
+			// Update turn order if changed
+			if len(newTurnOrder) != len(turnOrder) {
+				newOrderJSON, _ := json.Marshal(newTurnOrder)
+				// Adjust turn index if needed
+				newIndex := turnIndex
+				if newIndex >= len(newTurnOrder) {
+					newIndex = 0
+				}
+				db.Exec(`UPDATE combat_state SET turn_order = $1, current_turn_index = $2 WHERE lobby_id = $3`,
+					newOrderJSON, newIndex, campaignID)
+				turnOrderJSON = newOrderJSON
+				turnIndex = newIndex
+			}
+		}
 	}
 	
 	// Get the last action
@@ -17248,14 +17371,20 @@ func handleUniverseMonster(w http.ResponseWriter, r *http.Request) {
 		LegendaryResistances   int             `json:"legendary_resistances,omitempty"`
 		LegendaryActions       json.RawMessage `json:"legendary_actions,omitempty"`
 		LegendaryActionCount   int             `json:"legendary_action_count,omitempty"`
+		DamageResistances      string          `json:"damage_resistances,omitempty"`
+		DamageImmunities       string          `json:"damage_immunities,omitempty"`
+		DamageVulnerabilities  string          `json:"damage_vulnerabilities,omitempty"`
+		ConditionImmunities    string          `json:"condition_immunities,omitempty"`
 	}
 	err := db.QueryRow(`
 		SELECT name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions,
-			COALESCE(legendary_resistances, 0), COALESCE(legendary_actions, '[]'), COALESCE(legendary_action_count, 0)
+			COALESCE(legendary_resistances, 0), COALESCE(legendary_actions, '[]'), COALESCE(legendary_action_count, 0),
+			COALESCE(damage_resistances, ''), COALESCE(damage_immunities, ''), COALESCE(damage_vulnerabilities, ''), COALESCE(condition_immunities, '')
 		FROM monsters WHERE slug = $1
 	`, id).Scan(
 		&m.Name, &m.Size, &m.Type, &m.AC, &m.HP, &m.HitDice, &m.Speed, &m.STR, &m.DEX, &m.CON, &m.INT, &m.WIS, &m.CHA, &m.CR, &m.XP, &m.Actions,
-		&m.LegendaryResistances, &m.LegendaryActions, &m.LegendaryActionCount)
+		&m.LegendaryResistances, &m.LegendaryActions, &m.LegendaryActionCount,
+		&m.DamageResistances, &m.DamageImmunities, &m.DamageVulnerabilities, &m.ConditionImmunities)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": "monster_not_found"})
 		return
