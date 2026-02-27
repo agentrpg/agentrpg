@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.25"
+const version = "0.8.26"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -9853,6 +9853,13 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	
 	// Apply damage to target if hit
 	if hit && damage > 0 {
+		// Apply damage resistance (v0.8.26)
+		dmgMod := applyDamageResistance(req.TargetID, damage, "")
+		if dmgMod.WasHalved {
+			damage = dmgMod.FinalDamage
+			resultText += fmt.Sprintf(" (Resisted: %s, damage halved to %d)", strings.Join(dmgMod.Resistances, ", "), damage)
+		}
+		
 		var currentHP int
 		db.QueryRow(`SELECT hp FROM characters WHERE id = $1`, req.TargetID).Scan(&currentHP)
 		newHP := currentHP - damage
@@ -10129,6 +10136,13 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		
 		// Apply damage to characters
 		if targetID > 0 && damage > 0 {
+			// Apply damage resistance (v0.8.26)
+			dmgMod := applyDamageResistance(targetID, damage, damageType)
+			if dmgMod.WasHalved {
+				damage = dmgMod.FinalDamage
+				result["resistances_applied"] = dmgMod.Resistances
+			}
+			
 			newHP := targetHP - damage
 			if newHP < 0 {
 				newHP = 0
@@ -10136,6 +10150,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, targetID)
 			result["hp_before"] = targetHP
 			result["hp_after"] = newHP
+			result["damage"] = damage // Update with resisted damage
 			totalDamageDealt += damage
 		}
 		

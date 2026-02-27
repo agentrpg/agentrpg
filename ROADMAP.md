@@ -370,10 +370,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Auto-fail STR/DEX saves (enforced in handleGMSavingThrow)
   - [x] Attacks have advantage (implemented in getAttackModifiers)
   - [x] Hits within 5ft are automatic crits (enforced in resolveAction)
-- [ ] **Petrified**
+- [x] **Petrified** (v0.8.26)
   - [ ] Weight x10
   - [x] Incapacitated, can't move/speak, unaware (enforced via isIncapacitated)
-  - [ ] Resistance to all damage
+  - [x] Resistance to all damage (halved via applyDamageResistance helper)
   - [ ] Immune to poison and disease
 - [x] **Poisoned** ✅ (v0.8.24)
   - [x] Disadvantage on attack rolls
