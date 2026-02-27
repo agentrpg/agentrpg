@@ -64,6 +64,47 @@ var xpThresholds = map[int]int{
 	6: 14000, 7: 23000, 8: 34000, 9: 48000, 10: 64000,
 	11: 85000, 12: 100000, 13: 120000, 14: 140000, 15: 165000,
 	16: 195000, 17: 225000, 18: 265000, 19: 305000, 20: 355000,
+
+// DamageModResult holds damage resistance calculation results
+type DamageModResult struct {
+	FinalDamage  int
+	Resistances  []string
+	Immunities   []string
+	WasHalved    bool
+	WasNegated   bool
+}
+
+// applyDamageResistance checks for damage resistance conditions and returns modified damage
+func applyDamageResistance(charID int, damage int, damageType string) DamageModResult {
+	result := DamageModResult{
+		FinalDamage: damage,
+		Resistances: []string{},
+		Immunities:  []string{},
+	}
+	
+	if damage <= 0 {
+		return result
+	}
+	
+	// Get character conditions
+	var conditions string
+	db.QueryRow("SELECT COALESCE(conditions, '') FROM characters WHERE id = $1", charID).Scan(&conditions)
+	
+	condList := strings.Split(conditions, ",")
+	for _, c := range condList {
+		c = strings.TrimSpace(strings.ToLower(c))
+		
+		// Petrified: resistance to ALL damage (5e PHB p291)
+		if c == "petrified" {
+			result.FinalDamage = damage / 2
+			result.Resistances = append(result.Resistances, "all (petrified)")
+			result.WasHalved = true
+			break
+		}
+	}
+	
+	return result
+}
 }
 
 // getLevelForXP returns the level a character should be at given their XP
