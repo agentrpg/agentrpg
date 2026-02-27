@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.37"
+const version = "0.8.38"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -601,6 +601,10 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS action_used BOOLEAN DEFAULT FALSE;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS bonus_action_used BOOLEAN DEFAULT FALSE;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS movement_remaining INTEGER DEFAULT 30;
+		
+		-- Bonus Action Spell tracking (v0.8.38) - PHB rule:
+		-- "If you cast a spell as a bonus action, you can only cast a cantrip with your action"
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS bonus_action_spell_cast BOOLEAN DEFAULT FALSE;
 		
 		-- Cover tracking
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS cover_bonus INTEGER DEFAULT 0;
@@ -1549,20 +1553,21 @@ func loadSRDFromDB() {
 	}
 
 	// Load spells (for resolveAction)
-	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, ''), COALESCE(damage_at_slot_level, '{}'), COALESCE(heal_at_slot_level, '{}') FROM spells")
+	// v0.8.38: Added casting_time for bonus action spell restriction
+	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, ''), COALESCE(damage_at_slot_level, '{}'), COALESCE(heal_at_slot_level, '{}'), COALESCE(casting_time, '1 action') FROM spells")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape, components string
+			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape, components, castingTime string
 			var damageAtSlotLevelJSON, healAtSlotLevelJSON []byte
 			var level, aoeSize int
 			var isRitual bool
-			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components, &damageAtSlotLevelJSON, &healAtSlotLevelJSON)
+			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components, &damageAtSlotLevelJSON, &healAtSlotLevelJSON, &castingTime)
 			damageAtSlotLevel := map[string]string{}
 			healAtSlotLevel := map[string]string{}
 			json.Unmarshal(damageAtSlotLevelJSON, &damageAtSlotLevel)
 			json.Unmarshal(healAtSlotLevelJSON, &healAtSlotLevel)
-			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components, DamageAtSlotLevel: damageAtSlotLevel, HealAtSlotLevel: healAtSlotLevel}
+			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, CastingTime: castingTime, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components, DamageAtSlotLevel: damageAtSlotLevel, HealAtSlotLevel: healAtSlotLevel}
 		}
 		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
 	}
@@ -5506,7 +5511,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var conditionsJSON, slotsUsedJSON []byte
 	var concentratingOn string
 	var deathSuccesses, deathFailures, pendingASI, movementRemaining int
-	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed bool
+	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed, bonusActionSpellCast bool
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
@@ -5516,7 +5521,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.is_stable, false), COALESCE(c.is_dead, false), COALESCE(c.reaction_used, false),
 			COALESCE(c.xp, 0), COALESCE(c.gold, 0), COALESCE(c.copper, 0), COALESCE(c.silver, 0),
 			COALESCE(c.electrum, 0), COALESCE(c.platinum, 0), COALESCE(c.pending_asi, 0),
-			COALESCE(c.action_used, false), COALESCE(c.bonus_action_used, false), COALESCE(c.movement_remaining, 30)
+			COALESCE(c.action_used, false), COALESCE(c.bonus_action_used, false), COALESCE(c.movement_remaining, 30),
+			COALESCE(c.bonus_action_spell_cast, false)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -5527,7 +5533,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
 		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &charCopper, &charSilver,
 		&charElectrum, &charPlatinum, &pendingASI,
-		&actionUsed, &bonusActionUsed, &movementRemaining)
+		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5851,6 +5857,11 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	if bonusActionUsed {
 		bonusActionStatus = "You have already used your bonus action this turn."
 	}
+	// v0.8.38: Bonus action spell restriction warning
+	cantripsOnlyWarning := ""
+	if bonusActionSpellCast && !actionUsed {
+		cantripsOnlyWarning = "⚠️ You cast a bonus action spell - you may only cast cantrips with your action this turn."
+	}
 	
 	// Update character activity (log poll, update last_active)
 	updateCharacterActivity(charID, "poll", "Checked game status")
@@ -5886,6 +5897,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				"reaction_status":   reactionStatus,
 				"movement_remaining_ft": movementRemaining,
 				"movement_speed_ft": getMovementSpeed(race),
+				"bonus_action_spell_cast": bonusActionSpellCast,
+				"cantrips_only_warning": cantripsOnlyWarning,
 			},
 		},
 		"tactical_suggestions": suggestions,
@@ -7236,11 +7249,11 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 			db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
 			speed := getMovementSpeed(race)
 			
-			// Reset turn resources: action, bonus action, movement, and reaction (resets on your turn)
+			// Reset turn resources: action, bonus action, movement, reaction, and bonus action spell tracking (resets on your turn)
 			db.Exec(`
 				UPDATE characters 
 				SET action_used = false, bonus_action_used = false, 
-				    movement_remaining = $1, reaction_used = false
+				    movement_remaining = $1, reaction_used = false, bonus_action_spell_cast = false
 				WHERE id = $2
 			`, speed, newActiveID)
 			
@@ -12870,11 +12883,12 @@ func resetTurnResources(charID int, raceSpeed int) {
 	db.Exec(`
 		UPDATE characters 
 		SET action_used = false, bonus_action_used = false, movement_remaining = $1,
-		    readied_action = NULL
+		    readied_action = NULL, bonus_action_spell_cast = false
 		WHERE id = $2
 	`, raceSpeed, charID)
 	// Note: reaction_used resets at start of YOUR turn, not when turn advances to you
 	// Note: readied_action is also cleared - if not triggered, it's lost
+	// Note: bonus_action_spell_cast is also cleared - the cantrip-only restriction is per turn
 }
 
 // Reset reaction at start of character's turn
@@ -13293,6 +13307,26 @@ func resolveAction(action, description string, charID int) string {
 			
 			if compErr := checkSpellComponents(spell.Components, conditions, inventory); compErr != "" {
 				return compErr
+			}
+			
+			// v0.8.38: Bonus Action Spell Restriction (PHB p.202)
+			// "A spell cast with a bonus action is especially swift. [...] You can't cast another
+			// spell during the same turn, except for a cantrip with a casting time of 1 action."
+			isBonusActionSpell := strings.Contains(strings.ToLower(spell.CastingTime), "bonus action")
+			var bonusActionSpellCast bool
+			db.QueryRow("SELECT COALESCE(bonus_action_spell_cast, false) FROM characters WHERE id = $1", charID).Scan(&bonusActionSpellCast)
+			
+			if bonusActionSpellCast && !isBonusActionSpell {
+				// A bonus action spell was already cast this turn - only cantrips allowed
+				if spell.Level > 0 {
+					return fmt.Sprintf("Cannot cast %s (level %d) - you already cast a bonus action spell this turn. You may only cast cantrips with your action.", spell.Name, spell.Level)
+				}
+				// Cantrip is allowed - continue
+			}
+			
+			if isBonusActionSpell {
+				// Mark that a bonus action spell is being cast this turn
+				db.Exec("UPDATE characters SET bonus_action_spell_cast = true WHERE id = $1", charID)
 			}
 			
 			// Check if ritual casting is valid

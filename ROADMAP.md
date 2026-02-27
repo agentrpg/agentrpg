@@ -428,6 +428,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Auto-succeed if slot ≥ target spell level
   - [x] Ability check (DC 10 + spell level) otherwise
   - [x] Clears concentration on target if successful
+- [x] **Bonus Action Spell Restriction** (v0.8.38)
+  - [x] Track when bonus action spell is cast (bonus_action_spell_cast column)
+  - [x] Enforce: only cantrips allowed as action when bonus action spell was cast
+  - [x] Reset at start of turn
+  - [x] Warning shown in /api/my-turn action_economy
 - [ ] **Spell Schools** (for class features)
   - [ ] Abjuration, Conjuration, Divination, Enchantment
   - [ ] Evocation, Illusion, Necromancy, Transmutation
@@ -708,4 +713,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.36**
+Current: **0.8.38**
