@@ -604,10 +604,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Limited uses per day (tracked per combat combatant)
   - [x] Shown in `/api/gm/status` monster guidance
   - [x] Stored in monsters table (`legendary_resistances` column)
-- [ ] **Lair Actions**
-  - [ ] Occur on initiative count 20
-  - [ ] Only in monster's lair
-  - [ ] Specific effects per monster
+- [x] **Lair Actions** (v0.8.37)
+  - [x] Occur on initiative count 20 (`POST /api/gm/lair-action`)
+  - [x] Only one lair action per round (tracked via `lair_action_used_round` in combat_state)
+  - [x] Support for predefined (from SRD) and custom/freeform lair actions
+  - [x] Stored in monsters table (`lair_actions` JSONB)
+  - [x] Shown in `/api/gm/status` monster guidance with availability
+  - [x] Action logged to campaign feed
 - [ ] **Regional Effects**
   - [ ] Passive effects around legendary creature's lair
 - [x] **Damage Resistances/Immunities/Vulnerabilities (v0.8.31)**

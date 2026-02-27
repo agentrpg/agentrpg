@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.36"
+const version = "0.8.37"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -365,6 +365,7 @@ func main() {
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
 	http.HandleFunc("/api/gm/legendary-resistance", handleGMLegendaryResistance)
 	http.HandleFunc("/api/gm/legendary-action", handleGMLegendaryAction)
+	http.HandleFunc("/api/gm/lair-action", handleGMLairAction)
 	http.HandleFunc("/api/characters/attune", handleCharacterAttune)
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
@@ -626,6 +627,10 @@ func initDB() {
 		-- Turn timeout tracking (Timing & Cadence - roadmap item)
 		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
 		
+		-- Lair action tracking (v0.8.37) - only one lair action per round
+		-- Tracks which round a lair action was last used in
+		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS lair_action_used_round INTEGER DEFAULT 0;
+		
 		-- Magic item attunement (max 3 attuned items per character)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attuned_items JSONB DEFAULT '[]';
 		
@@ -707,6 +712,12 @@ func initDB() {
 		-- Most boss monsters get 3 legendary action points per round
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS legendary_actions JSONB DEFAULT '[]';
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS legendary_action_count INTEGER DEFAULT 0;
+		
+		-- Lair Actions (v0.8.37 - Phase 8 P2)
+		-- JSONB array of lair actions that occur on initiative count 20
+		-- Each action has: name, desc
+		-- Only one lair action can be used per round
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS lair_actions JSONB DEFAULT '[]';
 		
 		-- Monster Damage Resistances/Immunities/Vulnerabilities (v0.8.31 - Phase 8 P2)
 		-- Stored as comma-separated strings for easy querying
@@ -1076,6 +1087,22 @@ func seedMonstersFromAPI() {
 		}
 		legendaryActionsJSON, _ := json.Marshal(legendaryActions)
 		
+		// Parse lair actions (v0.8.37)
+		// Lair actions occur on initiative count 20 (losing ties) in the monster's lair
+		lairActions := []map[string]interface{}{}
+		if laArr, ok := detail["lair_actions"].([]interface{}); ok {
+			for _, la := range laArr {
+				if laMap, ok := la.(map[string]interface{}); ok {
+					action := map[string]interface{}{
+						"name": laMap["name"],
+						"desc": laMap["desc"],
+					}
+					lairActions = append(lairActions, action)
+				}
+			}
+		}
+		lairActionsJSON, _ := json.Marshal(lairActions)
+		
 		// Parse damage resistances/immunities/vulnerabilities (v0.8.31)
 		damageResistances := extractDamageTypesFromAPI(detail, "damage_resistances")
 		damageImmunities := extractDamageTypesFromAPI(detail, "damage_immunities")
@@ -1097,8 +1124,8 @@ func seedMonstersFromAPI() {
 		xp := 0
 		if v, ok := detail["xp"].(float64); ok { xp = int(v) }
 		
-		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count, damage_resistances, damage_immunities, damage_vulnerabilities, condition_immunities)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count, lair_actions, damage_resistances, damage_immunities, damage_vulnerabilities, condition_immunities)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name, size = EXCLUDED.size, type = EXCLUDED.type,
 				ac = EXCLUDED.ac, hp = EXCLUDED.hp, hit_dice = EXCLUDED.hit_dice,
@@ -1108,13 +1135,14 @@ func seedMonstersFromAPI() {
 				legendary_resistances = EXCLUDED.legendary_resistances,
 				legendary_actions = EXCLUDED.legendary_actions,
 				legendary_action_count = EXCLUDED.legendary_action_count,
+				lair_actions = EXCLUDED.lair_actions,
 				damage_resistances = EXCLUDED.damage_resistances,
 				damage_immunities = EXCLUDED.damage_immunities,
 				damage_vulnerabilities = EXCLUDED.damage_vulnerabilities,
 				condition_immunities = EXCLUDED.condition_immunities`,
 			r["index"], detail["name"], detail["size"], detail["type"], ac, hp,
 			detail["hit_dice"], speed, str, dex, con, intl, wis, cha, fmt.Sprintf("%v", detail["challenge_rating"]), xp, string(actionsJSON),
-			legendaryResistances, string(legendaryActionsJSON), legendaryActionCount,
+			legendaryResistances, string(legendaryActionsJSON), legendaryActionCount, string(lairActionsJSON),
 			damageResistances, damageImmunities, damageVulnerabilities, conditionImmunities)
 	}
 	log.Println("Monsters seeded")
@@ -6356,6 +6384,44 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 							"remaining": laRemaining,
 							"actions":   actionsList,
 							"tip":       fmt.Sprintf("Use POST /api/gm/legendary-action with combatant_id:%d and action_name to take a legendary action at the end of another creature's turn. Points reset at start of %s's turn.", e.ID, e.Name),
+						}
+					}
+					
+					// Add lair action info if monster has any (v0.8.37)
+					var lairActionsJSON []byte
+					db.QueryRow(`SELECT COALESCE(lair_actions, '[]') FROM monsters WHERE slug = $1`, 
+						e.MonsterKey).Scan(&lairActionsJSON)
+					
+					type LairAction struct {
+						Name string `json:"name"`
+						Desc string `json:"desc"`
+					}
+					var lairActions []LairAction
+					json.Unmarshal(lairActionsJSON, &lairActions)
+					
+					if len(lairActions) > 0 {
+						// Check if lair action was used this round
+						var lairActionUsedRound int
+						var currentRound int
+						db.QueryRow(`SELECT COALESCE(lair_action_used_round, 0), COALESCE(round_number, 1) FROM combat_state WHERE lobby_id = $1`, 
+							campaignID).Scan(&lairActionUsedRound, &currentRound)
+						
+						lairActionsList := []map[string]interface{}{}
+						for _, a := range lairActions {
+							lairActionsList = append(lairActionsList, map[string]interface{}{
+								"name": a.Name,
+								"desc": a.Desc,
+							})
+						}
+						
+						available := lairActionUsedRound < currentRound
+						guidance["lair_actions"] = map[string]interface{}{
+							"actions":          lairActionsList,
+							"available":        available,
+							"used_this_round":  !available,
+							"current_round":    currentRound,
+							"tip":              fmt.Sprintf("Lair actions occur on initiative count 20. Use POST /api/gm/lair-action with combatant_id:%d and action_name.", e.ID),
+							"initiative_20":    "Lair actions resolve on initiative 20 (losing ties), before or between creature turns.",
 						}
 					}
 				}
@@ -11737,6 +11803,227 @@ func handleGMLegendaryAction(w http.ResponseWriter, r *http.Request) {
 		"remaining":   newRemaining,
 		"message":     fmt.Sprintf("%s uses %s! (Cost: %d, %d points remaining)", entry.Name, chosenAction.Name, cost, newRemaining),
 		"tip":         "Legendary action points reset at the start of the monster's turn. Use POST /api/gm/narrate to describe the action's effect.",
+	})
+}
+
+// handleGMLairAction godoc
+// @Summary Use a lair action
+// @Description Execute a lair action on initiative count 20 during combat in a monster's lair. (v0.8.37)
+// @Description Lair actions represent environmental effects triggered by powerful creatures in their domain.
+// @Description Only one lair action can be used per round. The GM can either use a predefined lair action
+// @Description from the monster's stat block, or describe a custom lair action for homebrew/improvised scenarios.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{combatant_id=integer,action_name=string,custom_action=string} true "Lair action (use action_name for predefined, custom_action for freeform)"
+// @Success 200 {object} map[string]interface{} "Lair action executed"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or lair action already used this round"
+// @Router /gm/lair-action [post]
+func handleGMLairAction(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CombatantID  int    `json:"combatant_id"`  // Negative ID for monsters in combat
+		ActionName   string `json:"action_name"`   // Name of predefined lair action
+		CustomAction string `json:"custom_action"` // Freeform lair action description
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CombatantID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "combatant_id required"})
+		return
+	}
+	if req.ActionName == "" && req.CustomAction == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "action_required",
+			"message": "Provide either action_name (for predefined lair actions) or custom_action (for freeform)",
+		})
+		return
+	}
+	
+	// Get combat state
+	var turnOrderJSON []byte
+	var active bool
+	var currentRound int
+	var lairActionUsedRound int
+	err = db.QueryRow(`
+		SELECT turn_order, active, COALESCE(round, 1), COALESCE(lair_action_used_round, 0) 
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&turnOrderJSON, &active, &currentRound, &lairActionUsedRound)
+	
+	if err != nil || !active {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_active_combat",
+			"message": "No active combat in your campaign",
+		})
+		return
+	}
+	
+	// Check if lair action already used this round
+	if lairActionUsedRound >= currentRound {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "lair_action_used",
+			"message": fmt.Sprintf("A lair action has already been used in round %d. Only one lair action per round.", currentRound),
+			"round":   currentRound,
+			"tip":     "Lair actions occur on initiative count 20 (losing initiative ties). Wait for the next round.",
+		})
+		return
+	}
+	
+	// Parse turn order to find the combatant
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+		IsMonster  bool   `json:"is_monster"`
+		MonsterKey string `json:"monster_key"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	// Find the combatant
+	var found *InitEntry
+	for i := range entries {
+		if entries[i].ID == req.CombatantID {
+			found = &entries[i]
+			break
+		}
+	}
+	
+	if found == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "combatant_not_found",
+			"message": fmt.Sprintf("No combatant with ID %d found in combat", req.CombatantID),
+		})
+		return
+	}
+	
+	// Check if it's a monster
+	if !found.IsMonster {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_monster",
+			"message": "Lair actions are only for monsters/NPCs",
+		})
+		return
+	}
+	
+	var actionDescription string
+	var actionName string
+	
+	if req.CustomAction != "" {
+		// Using a custom/freeform lair action
+		actionName = "Custom Lair Action"
+		actionDescription = req.CustomAction
+	} else {
+		// Look up predefined lair actions from monster data
+		var lairActionsJSON []byte
+		err = db.QueryRow(`
+			SELECT COALESCE(lair_actions, '[]') FROM monsters WHERE slug = $1
+		`, found.MonsterKey).Scan(&lairActionsJSON)
+		
+		type LairAction struct {
+			Name string `json:"name"`
+			Desc string `json:"desc"`
+		}
+		var lairActions []LairAction
+		json.Unmarshal(lairActionsJSON, &lairActions)
+		
+		if len(lairActions) == 0 {
+			// No predefined lair actions - suggest using custom_action
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_predefined_lair_actions",
+				"message": fmt.Sprintf("%s does not have predefined lair actions in the SRD", found.Name),
+				"tip":     "Use custom_action parameter to describe a freeform lair action for this encounter",
+			})
+			return
+		}
+		
+		// Find the requested action
+		var chosenAction *LairAction
+		for i := range lairActions {
+			if strings.EqualFold(lairActions[i].Name, req.ActionName) {
+				chosenAction = &lairActions[i]
+				break
+			}
+		}
+		
+		if chosenAction == nil {
+			// List available actions in error
+			availableNames := []string{}
+			for _, a := range lairActions {
+				availableNames = append(availableNames, a.Name)
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":     "action_not_found",
+				"message":   fmt.Sprintf("'%s' is not a valid lair action for %s", req.ActionName, found.Name),
+				"available": availableNames,
+				"tip":       "Or use custom_action for a freeform lair action",
+			})
+			return
+		}
+		
+		actionName = chosenAction.Name
+		actionDescription = chosenAction.Desc
+	}
+	
+	// Mark lair action as used for this round
+	_, err = db.Exec(`UPDATE combat_state SET lair_action_used_round = $1 WHERE lobby_id = $2`, currentRound, campaignID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Log the lair action
+	db.Exec(`INSERT INTO actions (lobby_id, action_type, description, result) VALUES ($1, 'lair_action', $2, $3)`,
+		campaignID,
+		fmt.Sprintf("LAIR ACTION (Initiative 20) - %s's lair: %s", found.Name, actionName),
+		actionDescription)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"combatant":   found.Name,
+		"action":      actionName,
+		"description": actionDescription,
+		"round":       currentRound,
+		"message":     fmt.Sprintf("On initiative count 20, %s's lair triggers: %s", found.Name, actionName),
+		"tip":         "Use POST /api/gm/narrate to describe the effects and have affected characters make saving throws as appropriate.",
 	})
 }
 
