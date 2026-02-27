@@ -339,8 +339,8 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Condition format: "charmed" (generic) or "charmed:ID" (charmed by specific character)
 - [x] **Deafened** ✅ (v0.8.23)
   - [x] Auto-fail checks requiring hearing (requires_hearing param in skill checks)
-- [x] **Exhaustion (CRITICAL — 6 levels!)** ✅ (v0.8.7 tracking + v0.8.8 effects)
-  - [x] Level 1: Disadvantage on ability checks (displayed in sheet)
+- [x] **Exhaustion (CRITICAL — 6 levels!)** ✅ (v0.8.7 tracking + v0.8.8 effects + v0.8.24 ability check enforcement)
+  - [x] Level 1: Disadvantage on ability checks (displayed in sheet + enforced in skill/tool checks)
   - [x] Level 2: Speed halved (displayed in sheet)
   - [x] Level 3: Disadvantage on attacks/saves (enforced in saving throws)
   - [x] Level 4: HP maximum halved (displayed in sheet)
@@ -371,9 +371,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Incapacitated, can't move/speak, unaware (enforced via isIncapacitated)
   - [ ] Resistance to all damage
   - [ ] Immune to poison and disease
-- [x] **Poisoned** (partial - attack disadvantage implemented)
+- [x] **Poisoned** ✅ (v0.8.24)
   - [x] Disadvantage on attack rolls
-  - [ ] Disadvantage on ability checks
+  - [x] Disadvantage on ability checks (skill checks and tool checks)
 - [x] **Prone** (partial - v0.8.23 improved)
   - [x] Disadvantage on attack rolls
   - [x] Attacks within 5ft have advantage

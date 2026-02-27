@@ -38,7 +38,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.23"
+const version = "0.8.24"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -6667,6 +6667,22 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.8.22: Poisoned condition gives disadvantage on ability checks
+	poisonedDisadvantage := false
+	if hasCondition(req.CharacterID, "poisoned") {
+		req.Disadvantage = true
+		poisonedDisadvantage = true
+	}
+	
+	// v0.8.22: Exhaustion level 1+ gives disadvantage on ability checks
+	exhaustionDisadvantage := false
+	var charExhaustion int
+	db.QueryRow("SELECT COALESCE(exhaustion_level, 0) FROM characters WHERE id = $1", req.CharacterID).Scan(&charExhaustion)
+	if charExhaustion >= 1 {
+		req.Disadvantage = true
+		exhaustionDisadvantage = true
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -6683,6 +6699,13 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
 		rollType = "disadvantage"
+		if poisonedDisadvantage && exhaustionDisadvantage {
+			rollType = "disadvantage (poisoned, exhaustion)"
+		} else if poisonedDisadvantage {
+			rollType = "disadvantage (poisoned)"
+		} else if exhaustionDisadvantage {
+			rollType = "disadvantage (exhaustion)"
+		}
 	} else {
 		finalRoll = rollDie(20)
 		roll1 = finalRoll
@@ -6761,6 +6784,20 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	if usedInspiration {
 		response["used_inspiration"] = true
 		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this check", charName)
+	}
+	// v0.8.22: Add condition notes for disadvantage sources
+	if poisonedDisadvantage {
+		response["poisoned"] = true
+		response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (poisoned)", charName)
+	}
+	if exhaustionDisadvantage {
+		response["exhausted"] = true
+		response["exhaustion_level"] = charExhaustion
+		if poisonedDisadvantage {
+			response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (poisoned, exhaustion level %d)", charName, charExhaustion)
+		} else {
+			response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (exhaustion level %d)", charName, charExhaustion)
+		}
 	}
 	json.NewEncoder(w).Encode(response)
 }
@@ -6968,6 +7005,22 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.8.22: Poisoned condition gives disadvantage on ability checks (tool checks are ability checks)
+	poisonedDisadvantage := false
+	if hasCondition(req.CharacterID, "poisoned") {
+		req.Disadvantage = true
+		poisonedDisadvantage = true
+	}
+	
+	// v0.8.22: Exhaustion level 1+ gives disadvantage on ability checks
+	exhaustionDisadvantage := false
+	var charExhaustion int
+	db.QueryRow("SELECT COALESCE(exhaustion_level, 0) FROM characters WHERE id = $1", req.CharacterID).Scan(&charExhaustion)
+	if charExhaustion >= 1 {
+		req.Disadvantage = true
+		exhaustionDisadvantage = true
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -6981,6 +7034,13 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
 		rollType = "disadvantage"
+		if poisonedDisadvantage && exhaustionDisadvantage {
+			rollType = "disadvantage (poisoned, exhaustion)"
+		} else if poisonedDisadvantage {
+			rollType = "disadvantage (poisoned)"
+		} else if exhaustionDisadvantage {
+			rollType = "disadvantage (exhaustion)"
+		}
 	} else {
 		finalRoll = rollDie(20)
 		roll1 = finalRoll
@@ -6994,7 +7054,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
 	if rollType == "advantage" || rollType == "advantage (inspiration)" {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
-	} else if rollType == "disadvantage" {
+	} else if strings.HasPrefix(rollType, "disadvantage") {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
 	}
 	
@@ -7056,6 +7116,20 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	if usedInspiration {
 		response["used_inspiration"] = true
 		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this check", charName)
+	}
+	// v0.8.22: Add condition notes for disadvantage sources
+	if poisonedDisadvantage {
+		response["poisoned"] = true
+		response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (poisoned)", charName)
+	}
+	if exhaustionDisadvantage {
+		response["exhausted"] = true
+		response["exhaustion_level"] = charExhaustion
+		if poisonedDisadvantage {
+			response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (poisoned, exhaustion level %d)", charName, charExhaustion)
+		} else {
+			response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (exhaustion level %d)", charName, charExhaustion)
+		}
 	}
 	json.NewEncoder(w).Encode(response)
 }
