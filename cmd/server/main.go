@@ -1536,51 +1536,6 @@ func getSaveDisadvantage(charID int, ability string) bool {
 }
 
 // ============================================
-// DAMAGE RESISTANCE/IMMUNITY (v0.8.26)
-// ============================================
-
-// DamageModResult holds the result of damage modification from resistances/immunities
-type DamageModResult struct {
-	FinalDamage  int
-	Resistances  []string // Types of resistance applied
-	Immunities   []string // Types of immunity applied
-	WasHalved    bool     // True if any resistance halved damage
-	WasNegated   bool     // True if damage was negated by immunity
-}
-
-// applyDamageResistance checks for damage resistance/immunity conditions
-// Currently handles:
-// - Petrified: resistance (half damage) to ALL damage types
-// Returns modified damage and info about applied modifiers
-func applyDamageResistance(charID int, damage int, damageType string) DamageModResult {
-	result := DamageModResult{
-		FinalDamage: damage,
-		Resistances: []string{},
-		Immunities:  []string{},
-	}
-	
-	if damage <= 0 {
-		return result
-	}
-	
-	conditions := getCharConditions(charID)
-	
-	for _, c := range conditions {
-		cLower := strings.ToLower(c)
-		
-		// Petrified: resistance to ALL damage (5e PHB p291)
-		if cLower == "petrified" {
-			result.FinalDamage = damage / 2 // Integer division rounds down
-			result.Resistances = append(result.Resistances, "all (petrified)")
-			result.WasHalved = true
-			break // Resistance doesn't stack
-		}
-	}
-	
-	return result
-}
-
-// ============================================
 // CHARMED CONDITION EFFECTS (v0.8.22)
 // ============================================
 
@@ -13403,7 +13358,17 @@ func handleDamage(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	damage := req.Damage
 	result := map[string]interface{}{
-		"damage_dealt": damage,
+		"original_damage": damage,
+	}
+	
+	// Apply damage resistance from conditions (v0.8.26)
+	dmgMod := applyDamageResistance(charID, damage, req.DamageType)
+	if dmgMod.WasHalved {
+		damage = dmgMod.FinalDamage
+		result["resistances_applied"] = dmgMod.Resistances
+		result["damage_dealt"] = damage
+	} else {
+		result["damage_dealt"] = damage
 	}
 	
 	// Apply to temp HP first
