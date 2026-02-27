@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.30"
+const version = "0.8.31-debug"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -15890,6 +15890,10 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	if partyBoxes.Len() > 0 {
 		partyBoxesHTML = `<div class="party-boxes-row">` + partyBoxes.String() + `</div>`
 	}
+	
+	// DEBUG: Log template arguments
+	log.Printf("DEBUG campaign/%d: name=%q statusBadge=%q dmLink=%q levelReq=%q playerCount=%d maxPlayers=%d",
+		campaignID, name, statusBadge[:min(50, len(statusBadge))], dmLink[:min(50, len(dmLink))], levelReq, playerCount, maxPlayers)
 	
 	content := fmt.Sprintf(`
 <style>
