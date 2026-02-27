@@ -1,6 +1,9 @@
--e 
+-e
 # Secrets
 .env
 *.pem
 *.key
 core
+
+# Railway
+.railway

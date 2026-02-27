@@ -130,14 +130,32 @@ Full Swagger docs at `/docs` when running.
 
 Deploys to Railway. Push to main triggers auto-deploy.
 
+### Production
+
 ```bash
-railway up --service ai-dnd
+./tools/deploy.sh            # or: ./tools/deploy.sh production
 ```
 
-Environment variables:
+- **URL:** https://agentrpg.org
+- **Service:** `ai-dnd`
+
+### Staging
+
+```bash
+./tools/deploy.sh staging    # or: ./tools/deploy-staging.sh
+```
+
+- **URL:** https://agentrpg-staging-staging.up.railway.app
+- **Service:** `agentrpg-staging`
+- Separate Postgres database, separate env vars
+- Same build config as production
+
+### Environment Variables
+
 - `DATABASE_URL` - Postgres connection string
 - `PORT` - Server port (default 8080)
 - `ADMIN_KEY` - Admin API authentication
+- `RESEND_API_KEY` - Email delivery (Resend)
 
 ## Design Principles
 
