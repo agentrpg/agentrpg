@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.34
+// @version 0.8.35
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.34"
+const version = "0.8.35"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -374,6 +374,7 @@ func main() {
 	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
 	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
+	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -14213,6 +14214,303 @@ func handleGMCounterspell(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
 		VALUES ($1, $2, $3, $4, $5)
 	`, lobbyID, req.CasterID, "counterspell", actionDesc, actionResult)
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMDispelMagic godoc
+// @Summary Cast Dispel Magic to end ongoing spell effects
+// @Description Dispel Magic (3rd level abjuration): Choose one creature, object, or magical effect within range. Any spell of 3rd level or lower on the target ends. For higher level spells, make an ability check (DC 10 + spell level). Auto-succeeds if slot level >= target spell level.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{caster_id=integer,target_id=integer,target_spell_level=integer,slot_level=integer,effect_name=string} true "Dispel Magic details: target_id is the character/monster affected, target_spell_level required (or auto-detected from concentration), slot_level defaults to 3, effect_name optional"
+// @Success 200 {object} map[string]interface{} "Dispel Magic result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/dispel-magic [post]
+func handleGMDispelMagic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CasterID         int    `json:"caster_id"`
+		TargetID         int    `json:"target_id"`
+		TargetSpellLevel int    `json:"target_spell_level"`
+		SlotLevel        int    `json:"slot_level"`
+		EffectName       string `json:"effect_name"` // Optional: name of effect to dispel
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.CasterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "caster_id required",
+		})
+		return
+	}
+	
+	if req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_id required (creature or object with spell effect)",
+		})
+		return
+	}
+	
+	// Default to 3rd level slot (minimum for Dispel Magic)
+	if req.SlotLevel == 0 {
+		req.SlotLevel = 3
+	}
+	if req.SlotLevel < 3 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "Dispel Magic requires at least a 3rd level spell slot",
+		})
+		return
+	}
+	if req.SlotLevel > 9 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "Maximum spell slot level is 9",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the caster's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CasterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Caster character %d not found", req.CasterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get caster info
+	var casterName, class string
+	var level, intl, wis, cha int
+	err = db.QueryRow(`
+		SELECT name, class, level, intl, wis, cha FROM characters WHERE id = $1
+	`, req.CasterID).Scan(&casterName, &class, &level, &intl, &wis, &cha)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "caster_not_found"})
+		return
+	}
+	
+	// Get target info and check for concentration
+	var targetName string
+	var concentratingOn sql.NullString
+	err = db.QueryRow(`
+		SELECT name, COALESCE(concentrating_on, '') FROM characters WHERE id = $1
+	`, req.TargetID).Scan(&targetName, &concentratingOn)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "target_not_found",
+			"message": fmt.Sprintf("Target character %d not found", req.TargetID),
+		})
+		return
+	}
+	
+	// If no target_spell_level provided, try to detect from concentration
+	// For now, if concentrating, assume the spell level is at least 1
+	// GM should provide target_spell_level for accuracy
+	if req.TargetSpellLevel == 0 {
+		if concentratingOn.String != "" {
+			// Default to level 1 for unknown concentration spells
+			// GM should specify target_spell_level for higher level effects
+			req.TargetSpellLevel = 1
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_request",
+				"message": "target_spell_level required (target has no concentration to auto-detect)",
+			})
+			return
+		}
+	}
+	
+	if req.TargetSpellLevel < 1 || req.TargetSpellLevel > 9 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_spell_level must be between 1 and 9",
+		})
+		return
+	}
+	
+	// Check if caster has the spell slot
+	slots := getSpellSlots(class, level)
+	totalSlots, hasSlot := slots[req.SlotLevel]
+	if !hasSlot || totalSlots == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_spell_slots",
+			"message": fmt.Sprintf("%s doesn't have level %d spell slots!", casterName, req.SlotLevel),
+		})
+		return
+	}
+	
+	// Get used slots
+	var usedJSON []byte
+	db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", req.CasterID).Scan(&usedJSON)
+	var used map[string]int
+	json.Unmarshal(usedJSON, &used)
+	
+	usedKey := fmt.Sprintf("%d", req.SlotLevel)
+	usedSlots := used[usedKey]
+	if usedSlots >= totalSlots {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_spell_slots",
+			"message": fmt.Sprintf("%s has no level %d spell slots remaining!", casterName, req.SlotLevel),
+		})
+		return
+	}
+	
+	// Get spellcasting ability modifier
+	classKey := strings.ToLower(class)
+	spellMod := 0
+	if c, ok := srdClasses[classKey]; ok {
+		switch c.Spellcasting {
+		case "INT":
+			spellMod = modifier(intl)
+		case "WIS":
+			spellMod = modifier(wis)
+		case "CHA":
+			spellMod = modifier(cha)
+		}
+	}
+	
+	// Use the spell slot
+	used[usedKey] = usedSlots + 1
+	updatedJSON, _ := json.Marshal(used)
+	db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, req.CasterID)
+	
+	// Determine success
+	success := false
+	roll := 0
+	totalCheck := 0
+	dc := 10 + req.TargetSpellLevel
+	autoSuccess := req.SlotLevel >= req.TargetSpellLevel
+	
+	if autoSuccess {
+		success = true
+	} else {
+		// Roll d20 + spellcasting modifier vs DC
+		roll = rollDie(20)
+		totalCheck = roll + spellMod
+		success = totalCheck >= dc
+	}
+	
+	// What effect are we dispelling?
+	effectDispelled := ""
+	if req.EffectName != "" {
+		effectDispelled = req.EffectName
+	} else if concentratingOn.String != "" {
+		effectDispelled = concentratingOn.String
+	} else {
+		effectDispelled = fmt.Sprintf("level %d spell effect", req.TargetSpellLevel)
+	}
+	
+	// If successful, end the spell effect
+	if success {
+		// Clear concentration if that's what we're dispelling
+		if concentratingOn.String != "" && (req.EffectName == "" || strings.EqualFold(req.EffectName, concentratingOn.String)) {
+			db.Exec("UPDATE characters SET concentrating_on = NULL WHERE id = $1", req.TargetID)
+		}
+	}
+	
+	// Build response
+	response := map[string]interface{}{
+		"success":            true, // API call succeeded
+		"dispel_success":     success,
+		"caster":             casterName,
+		"caster_id":          req.CasterID,
+		"target":             targetName,
+		"target_id":          req.TargetID,
+		"slot_level_used":    req.SlotLevel,
+		"target_spell_level": req.TargetSpellLevel,
+		"effect_targeted":    effectDispelled,
+		"spell_slot_consumed": true,
+		"slots_remaining":    totalSlots - used[usedKey],
+	}
+	
+	var actionResult string
+	if autoSuccess {
+		response["auto_success"] = true
+		response["message"] = fmt.Sprintf("✨ %s casts Dispel Magic at level %d on %s! The %s (level %d) is automatically dispelled!",
+			casterName, req.SlotLevel, targetName, effectDispelled, req.TargetSpellLevel)
+		actionResult = fmt.Sprintf("Dispel Magic (level %d) vs %s (level %d): AUTO SUCCESS - effect ended",
+			req.SlotLevel, effectDispelled, req.TargetSpellLevel)
+		response["effect_ended"] = true
+	} else {
+		response["ability_check_required"] = true
+		response["dc"] = dc
+		response["roll"] = roll
+		response["spellcasting_modifier"] = spellMod
+		response["total_check"] = totalCheck
+		
+		if success {
+			response["message"] = fmt.Sprintf("✨ %s casts Dispel Magic at level %d on %s! Ability check: %d + %d = %d vs DC %d - SUCCESS! The %s is dispelled!",
+				casterName, req.SlotLevel, targetName, roll, spellMod, totalCheck, dc, effectDispelled)
+			actionResult = fmt.Sprintf("Dispel Magic (level %d) vs %s (level %d): %d + %d = %d vs DC %d - SUCCESS!",
+				req.SlotLevel, effectDispelled, req.TargetSpellLevel, roll, spellMod, totalCheck, dc)
+			response["effect_ended"] = true
+		} else {
+			response["message"] = fmt.Sprintf("💫 %s casts Dispel Magic at level %d on %s! Ability check: %d + %d = %d vs DC %d - FAILED! The %s persists!",
+				casterName, req.SlotLevel, targetName, roll, spellMod, totalCheck, dc, effectDispelled)
+			actionResult = fmt.Sprintf("Dispel Magic (level %d) vs %s (level %d): %d + %d = %d vs DC %d - FAILED!",
+				req.SlotLevel, effectDispelled, req.TargetSpellLevel, roll, spellMod, totalCheck, dc)
+			response["effect_ended"] = false
+		}
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("%s casts Dispel Magic on %s targeting %s (level %d)", casterName, targetName, effectDispelled, req.TargetSpellLevel)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CasterID, "dispel_magic", actionDesc, actionResult)
 	
 	json.NewEncoder(w).Encode(response)
 }

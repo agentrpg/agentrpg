@@ -423,10 +423,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Auto-succeed if slot ≥ target spell level
   - [x] Ability check (DC 10 + spell level) otherwise
   - [x] Consumes spell slot (minimum 3rd level)
-- [ ] **Dispel Magic** (TODO)
-  - [ ] End ongoing spell effects
-  - [ ] Auto-succeed if slot ≥ target spell level
-  - [ ] Ability check otherwise
+- [x] **Dispel Magic** (v0.8.35)
+  - [x] End ongoing spell effects (`POST /api/gm/dispel-magic`)
+  - [x] Auto-succeed if slot ≥ target spell level
+  - [x] Ability check (DC 10 + spell level) otherwise
+  - [x] Clears concentration on target if successful
 - [ ] **Spell Schools** (for class features)
   - [ ] Abjuration, Conjuration, Divination, Enchantment
   - [ ] Evocation, Illusion, Necromancy, Transmutation
@@ -703,4 +704,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.34**
+Current: **0.8.35**
