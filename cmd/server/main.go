@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.44
+// @version 0.8.45
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.44"
+const version = "0.8.45"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -379,6 +379,8 @@ func main() {
 	http.HandleFunc("/api/gm/lair-action", handleGMLairAction)
 	http.HandleFunc("/api/characters/attune", handleCharacterAttune)
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
+	http.HandleFunc("/api/characters/equip-armor", handleCharacterEquipArmor)
+	http.HandleFunc("/api/characters/unequip-armor", handleCharacterUnequipArmor)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", handleAction)
@@ -712,6 +714,15 @@ func initDB() {
 		-- Player activity status: 'active' (default), 'inactive' (no activity for 4h+)
 		-- Inactive players are skipped in combat and may be auto-removed
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'active';
+		
+		-- Equipped Armor (v0.8.45 - Armor Mechanics)
+		-- Slug of the armor currently worn (e.g., "chain-mail", "leather")
+		-- NULL means unarmored (10 + DEX mod)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS equipped_armor VARCHAR(100);
+		
+		-- Equipped Shield (v0.8.45 - Armor Mechanics)
+		-- TRUE if currently holding a shield (+2 AC)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS equipped_shield BOOLEAN DEFAULT FALSE;
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -1656,6 +1667,88 @@ func proficiencyBonus(level int) int {
 // Calculate spell save DC: 8 + proficiency bonus + spellcasting modifier
 func spellSaveDC(level int, spellcastingMod int) int {
 	return 8 + proficiencyBonus(level) + spellcastingMod
+}
+
+// ArmorInfo holds armor data for AC calculation
+type ArmorInfo struct {
+	AC                   int
+	Type                 string // light, medium, heavy, shield
+	StealthDisadvantage  bool
+	StrengthRequirement  int
+}
+
+// getArmorInfo fetches armor data from the database
+func getArmorInfo(armorSlug string) (*ArmorInfo, error) {
+	if armorSlug == "" {
+		return nil, nil
+	}
+	
+	var info ArmorInfo
+	err := db.QueryRow(`SELECT ac, type, stealth_disadvantage, COALESCE(str_req, 0) FROM armor WHERE slug = $1`, armorSlug).Scan(&info.AC, &info.Type, &info.StealthDisadvantage, &info.StrengthRequirement)
+	if err != nil {
+		return nil, err
+	}
+	return &info, nil
+}
+
+// calculateArmorAC calculates AC based on equipped armor, shield, and DEX modifier
+// Rules:
+// - Unarmored: 10 + DEX mod
+// - Light armor: Armor AC + full DEX mod
+// - Medium armor: Armor AC + DEX mod (max +2)
+// - Heavy armor: Armor AC (no DEX mod)
+// - Shield: +2 AC
+func calculateArmorAC(dexMod int, equippedArmor string, equippedShield bool) int {
+	baseAC := 10 + dexMod // Unarmored
+	
+	if equippedArmor != "" {
+		armor, err := getArmorInfo(equippedArmor)
+		if err == nil && armor != nil {
+			switch strings.ToLower(armor.Type) {
+			case "light":
+				baseAC = armor.AC + dexMod
+			case "medium":
+				dexBonus := dexMod
+				if dexBonus > 2 {
+					dexBonus = 2
+				}
+				baseAC = armor.AC + dexBonus
+			case "heavy":
+				baseAC = armor.AC
+			}
+		}
+	}
+	
+	if equippedShield {
+		baseAC += 2
+	}
+	
+	return baseAC
+}
+
+// getArmorStealthDisadvantage checks if equipped armor causes stealth disadvantage
+func getArmorStealthDisadvantage(equippedArmor string) bool {
+	if equippedArmor == "" {
+		return false
+	}
+	armor, err := getArmorInfo(equippedArmor)
+	if err != nil || armor == nil {
+		return false
+	}
+	return armor.StealthDisadvantage
+}
+
+// checkArmorStrengthRequirement checks if character meets armor's strength requirement
+// Returns true if requirement is met (or no requirement), false if speed should be reduced
+func checkArmorStrengthRequirement(str int, equippedArmor string) bool {
+	if equippedArmor == "" {
+		return true
+	}
+	armor, err := getArmorInfo(equippedArmor)
+	if err != nil || armor == nil {
+		return true
+	}
+	return str >= armor.StrengthRequirement
 }
 
 // Check if a character is proficient with a weapon
@@ -5392,6 +5485,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var armorProfsRaw string
 	var expertiseRaw string
 	var languageProfsRaw string
+	var equippedArmor sql.NullString
+	var equippedShield bool
 	
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
@@ -5407,7 +5502,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(skill_proficiencies, ''), COALESCE(inspiration, false),
 			COALESCE(tool_proficiencies, ''),
 			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, ''),
-			COALESCE(expertise, ''), COALESCE(language_proficiencies, '')
+			COALESCE(expertise, ''), COALESCE(language_proficiencies, ''),
+			equipped_armor, COALESCE(equipped_shield, false)
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
@@ -5415,7 +5511,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
-		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw)
+		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -5602,6 +5698,39 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 		response["cover"] = coverType
 		response["cover_bonus"] = coverBonus
+	}
+	
+	// Equipment (armor/shield)
+	equipment := map[string]interface{}{
+		"armor":  nil,
+		"shield": equippedShield,
+	}
+	if equippedArmor.Valid && equippedArmor.String != "" {
+		armorInfo, err := getArmorInfo(equippedArmor.String)
+		if err == nil && armorInfo != nil {
+			equipment["armor"] = map[string]interface{}{
+				"slug":                 equippedArmor.String,
+				"type":                 armorInfo.Type,
+				"base_ac":              armorInfo.AC,
+				"stealth_disadvantage": armorInfo.StealthDisadvantage,
+				"strength_requirement": armorInfo.StrengthRequirement,
+			}
+			if armorInfo.StrengthRequirement > 0 && str < armorInfo.StrengthRequirement {
+				equipment["armor_warning"] = fmt.Sprintf("STR requirement not met (need %d, have %d) - speed reduced by 10", armorInfo.StrengthRequirement, str)
+			}
+		} else {
+			equipment["armor"] = equippedArmor.String
+		}
+	}
+	response["equipment"] = equipment
+	
+	// Recalculate AC based on equipped armor (in case stored AC is out of sync)
+	calculatedAC := calculateArmorAC(modifier(dex), equippedArmor.String, equippedShield)
+	if calculatedAC != ac {
+		response["ac"] = calculatedAC
+		response["effective_ac"] = calculatedAC + coverBonus
+		// Update stored AC to keep it in sync
+		db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, calculatedAC, charID)
 	}
 	
 	// Death save info (only if relevant)
@@ -12511,6 +12640,244 @@ func handleCharacterEncumbrance(w http.ResponseWriter, r *http.Request) {
 		"disadvantage_on_checks": disadvantage,
 		"item_weights":    itemWeights,
 		"rules_note":      "Variant encumbrance: >STR×5 = encumbered (-10 speed), >STR×10 = heavily encumbered (-20 speed, disadvantage on ability checks)",
+	})
+}
+
+// handleCharacterEquipArmor godoc
+// @Summary Equip armor or shield
+// @Description Equip armor (by slug) and/or shield. Updates AC calculation automatically.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,armor=string,shield=bool} true "Armor to equip"
+// @Success 200 {object} map[string]interface{} "Updated AC and equipment status"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/equip-armor [post]
+func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agent, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Armor       string `json:"armor"`        // Armor slug (e.g., "chain-mail", "leather")
+		Shield      *bool  `json:"shield"`       // Optional: equip/unequip shield
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Verify character belongs to agent
+	var charName string
+	var ownerID, charStr, charDex int
+	var armorProfs string
+	var currentArmor sql.NullString
+	var currentShield bool
+	err = db.QueryRow(`SELECT name, agent_id, str, dex, armor_proficiencies, equipped_armor, COALESCE(equipped_shield, false) 
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &charStr, &charDex, &armorProfs, &currentArmor, &currentShield)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agent.ID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	newArmor := currentArmor.String
+	newShield := currentShield
+	warnings := []string{}
+	
+	// Handle armor change
+	if req.Armor != "" {
+		// Validate armor exists
+		armorInfo, err := getArmorInfo(req.Armor)
+		if err != nil || armorInfo == nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "armor_not_found", "armor": req.Armor})
+			return
+		}
+		
+		// Check proficiency
+		if !isArmorProficient(armorProfs, armorInfo.Type) {
+			warnings = append(warnings, "not_proficient_with_"+armorInfo.Type+"_armor")
+		}
+		
+		// Check strength requirement
+		if armorInfo.StrengthRequirement > 0 && charStr < armorInfo.StrengthRequirement {
+			warnings = append(warnings, fmt.Sprintf("strength_requirement_not_met_need_%d_have_%d_speed_reduced_10", armorInfo.StrengthRequirement, charStr))
+		}
+		
+		// Check stealth disadvantage
+		if armorInfo.StealthDisadvantage {
+			warnings = append(warnings, "stealth_disadvantage")
+		}
+		
+		newArmor = req.Armor
+	}
+	
+	// Handle shield change
+	if req.Shield != nil {
+		newShield = *req.Shield
+		if newShield && !strings.Contains(strings.ToLower(armorProfs), "shield") {
+			warnings = append(warnings, "not_proficient_with_shields")
+		}
+	}
+	
+	// Update database
+	_, err = db.Exec(`UPDATE characters SET equipped_armor = $1, equipped_shield = $2 WHERE id = $3`,
+		sql.NullString{String: newArmor, Valid: newArmor != ""},
+		newShield,
+		req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Calculate new AC
+	dexMod := modifier(charDex)
+	newAC := calculateArmorAC(dexMod, newArmor, newShield)
+	
+	// Update stored AC
+	db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, newAC, req.CharacterID)
+	
+	response := map[string]interface{}{
+		"success":         true,
+		"character":       charName,
+		"equipped_armor":  newArmor,
+		"equipped_shield": newShield,
+		"new_ac":          newAC,
+	}
+	if len(warnings) > 0 {
+		response["warnings"] = warnings
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleCharacterUnequipArmor godoc
+// @Summary Unequip armor and/or shield
+// @Description Remove equipped armor and/or shield. Returns to unarmored AC (10 + DEX mod).
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,armor=bool,shield=bool} true "What to unequip"
+// @Success 200 {object} map[string]interface{} "Updated AC and equipment status"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/unequip-armor [post]
+func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agent, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int  `json:"character_id"`
+		Armor       bool `json:"armor"`  // Unequip armor
+		Shield      bool `json:"shield"` // Unequip shield
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Verify character belongs to agent
+	var charName string
+	var ownerID, charDex int
+	var currentArmor sql.NullString
+	var currentShield bool
+	err = db.QueryRow(`SELECT name, agent_id, dex, equipped_armor, COALESCE(equipped_shield, false) 
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &charDex, &currentArmor, &currentShield)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agent.ID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	newArmor := currentArmor.String
+	newShield := currentShield
+	
+	if req.Armor {
+		newArmor = ""
+	}
+	if req.Shield {
+		newShield = false
+	}
+	
+	// Update database
+	_, err = db.Exec(`UPDATE characters SET equipped_armor = $1, equipped_shield = $2 WHERE id = $3`,
+		sql.NullString{String: newArmor, Valid: newArmor != ""},
+		newShield,
+		req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	// Calculate new AC
+	dexMod := modifier(charDex)
+	newAC := calculateArmorAC(dexMod, newArmor, newShield)
+	
+	// Update stored AC
+	db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, newAC, req.CharacterID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"character":       charName,
+		"equipped_armor":  newArmor,
+		"equipped_shield": newShield,
+		"new_ac":          newAC,
 	})
 }
 

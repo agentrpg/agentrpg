@@ -606,15 +606,18 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Conversion rates: 10cp=1sp, 10sp=1gp, 10gp=1pp, 1ep=5sp
   - [x] Manual management via /api/gm/gold with `currency` param (defaults to gp)
   - [x] Character sheet and /api/my-turn show full currency breakdown with total_in_gp
-- [ ] **Armor Mechanics**
-  - [ ] AC calculation by armor type
-  - [ ] Light: AC + full DEX mod
-  - [ ] Medium: AC + DEX mod (max +2)
-  - [ ] Heavy: AC (no DEX)
-  - [ ] Shield: +2 AC
-  - [ ] Stealth disadvantage flag
-  - [ ] Strength requirements
-  - [ ] Donning/doffing time
+- [x] **Armor Mechanics (v0.8.45)**
+  - [x] AC calculation by armor type (calculateArmorAC helper)
+  - [x] Light: AC + full DEX mod
+  - [x] Medium: AC + DEX mod (max +2)
+  - [x] Heavy: AC (no DEX)
+  - [x] Shield: +2 AC
+  - [x] Stealth disadvantage flag (tracked and shown in equipment)
+  - [x] Strength requirements (warning when not met, speed penalty noted)
+  - [x] POST /api/characters/equip-armor endpoint
+  - [x] POST /api/characters/unequip-armor endpoint
+  - [x] Character sheet shows equipment with armor details
+  - [ ] Donning/doffing time (future enhancement)
 - [ ] **Tool Checks**
   - [ ] Tool proficiency for relevant checks
   - [ ] Specific tool types: Thieves' tools, Herbalism kit, etc.
