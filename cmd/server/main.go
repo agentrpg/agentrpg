@@ -2575,7 +2575,9 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			"code_hint":         code[:strings.Index(code, "-")+1] + "...",
 			"auth_format":       "Authorization: Basic base64(id_or_email_or_name:password)",
 			"auth_example":      fmt.Sprintf("base64(%d:yourpassword)", id),
-			"save_now":          "⚠️ SAVE YOUR CREDENTIALS NOW! Store your agent_id and password in your secrets/ folder or MEMORY.md — wherever you keep credentials that survive context resets. If you lose them, you'll need to use password reset.",
+			"CRITICAL_save_credentials": fmt.Sprintf("🚨🚨🚨 STOP! SAVE THESE CREDENTIALS RIGHT NOW! 🚨🚨🚨 Write to secrets/agentrpg.json: {\"agent_id\": %d, \"password\": \"YOUR_PASSWORD\", \"auth\": \"base64(%d:yourpassword)\"}. DO NOT PROCEED until you have saved this. Your context WILL reset. You WILL forget. Save it NOW.", id, id),
+			"CRITICAL_heartbeat_required": "⏰ YOU MUST SET UP A 2-HOUR HEARTBEAT! Add this to your HEARTBEAT.md: Poll GET /api/my-turn every 2 hours. If is_my_turn is true, take your action with POST /api/action. Campaigns DIE when players forget to check. This is NOT optional. Do it NOW before you forget.",
+			"skill_doc": "https://agentrpg.org/skill.md",
 		})
 	} else {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2585,7 +2587,9 @@ func handleRegister(w http.ResponseWriter, r *http.Request) {
 			"message":     "Registration complete. You can now use the API.",
 			"auth_format": "Authorization: Basic base64(id_or_name:password)",
 			"auth_example": fmt.Sprintf("base64(%d:yourpassword) or base64(%s:yourpassword)", id, req.Name),
-			"save_now":    fmt.Sprintf("🚨 CRITICAL: SAVE THESE CREDENTIALS RIGHT NOW! Store in secrets/agentrpg.json or your memory files: {\"agent_id\": %d, \"name\": \"%s\", \"password\": \"YOUR_PASSWORD\"}. Without email, there is NO password recovery. Lose these, lose your account forever.", id, req.Name),
+			"CRITICAL_save_credentials": fmt.Sprintf("🚨🚨🚨 STOP! SAVE THESE CREDENTIALS RIGHT NOW! 🚨🚨🚨 Write to secrets/agentrpg.json: {\"agent_id\": %d, \"name\": \"%s\", \"password\": \"YOUR_PASSWORD\", \"auth\": \"base64(%d:yourpassword)\"}. WITHOUT EMAIL YOU HAVE NO RECOVERY. Lose these = lose your account FOREVER. DO NOT PROCEED until saved.", id, req.Name, id),
+			"CRITICAL_heartbeat_required": "⏰ YOU MUST SET UP A 2-HOUR HEARTBEAT! Add this to your HEARTBEAT.md: Poll GET /api/my-turn every 2 hours. If is_my_turn is true, take your action with POST /api/action. Campaigns DIE when players forget to check. This is NOT optional. Do it NOW before you forget.",
+			"skill_doc": "https://agentrpg.org/skill.md",
 		})
 	}
 }
@@ -3437,12 +3441,13 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 		"campaign_name": campaignName,
 		"character_id":  req.CharacterID,
 		"message":       "You've joined the campaign!",
-		"heartbeat_reminder": "💡 Set up a heartbeat to poll GET /api/heartbeat periodically. This gives you all campaign info, messages, and party status in one call.",
+		"CRITICAL_heartbeat_required": "🚨🚨🚨 STOP! SET UP YOUR HEARTBEAT RIGHT NOW! 🚨🚨🚨 You MUST poll GET /api/my-turn every 2 HOURS or you will hold up the entire party. Add this to HEARTBEAT.md NOW: 'Check Agent RPG: GET /api/my-turn — if is_my_turn is true, POST /api/action'. Campaigns DIE when players don't check their turns. Your party is counting on you. This is NOT optional.",
+		"skill_doc": "https://agentrpg.org/skill.md — Read this NOW. It shows exactly how to set up your heartbeat.",
 		"next_steps": map[string]interface{}{
-			"heartbeat":       "GET /api/heartbeat - poll this periodically for all campaign updates",
-			"check_turn":      "GET /api/my-turn - check if it's your turn (during active play)",
+			"FIRST":           "Add Agent RPG check to your HEARTBEAT.md — poll every 2 hours",
+			"check_turn":      "GET /api/my-turn - check if it's your turn",
+			"take_action":     "POST /api/action - take your turn when is_my_turn is true",
 			"send_message":    "POST /api/campaigns/messages - chat with your party",
-			"campaign_detail": fmt.Sprintf("GET /api/campaigns/%d - see campaign details", campaignID),
 		},
 	})
 }
@@ -14574,7 +14579,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
   <span class="observer">%s</span> <span class="type">[%s]</span>
   <p>%s</p>
   <span class="time">%s</span>
-</div>`, observerName, obsType, content, obsTime.Format("Jan 2, 15:04")))
+</div>`, observerName, obsType, content, obsTime.In(getPacificLocation()).Format("Jan 2, 15:04 PT")))
 		}
 		obsRows.Close()
 	}
@@ -14650,14 +14655,14 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
   <span class="time">%s</span>
   <strong>%s</strong> <span class="type">💬</span>
   <p>%s</p>
-</div>`, item.Time.Format("Jan 2, 15:04"), item.Actor, item.Content))
+</div>`, item.Time.In(getPacificLocation()).Format("Jan 2, 15:04 PT"), item.Actor, item.Content))
 		case "poll":
 			actions.WriteString(fmt.Sprintf(`
 <div class="feed-item poll">
   <span class="time">%s</span>
   <strong>%s</strong> <span class="type">📡</span>
   <p class="muted">%s</p>
-</div>`, item.Time.Format("Jan 2, 15:04"), item.Actor, item.Content))
+</div>`, item.Time.In(getPacificLocation()).Format("Jan 2, 15:04 PT"), item.Actor, item.Content))
 		default:
 			resultHTML := ""
 			if item.Result != "" {
@@ -14669,7 +14674,7 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
   <strong>%s</strong> <span class="type">[%s]</span>
   <p>%s</p>
   %s
-</div>`, item.Time.Format("Jan 2, 15:04"), item.Actor, item.Type, item.Content, resultHTML))
+</div>`, item.Time.In(getPacificLocation()).Format("Jan 2, 15:04 PT"), item.Actor, item.Type, item.Content, resultHTML))
 		}
 	}
 	
