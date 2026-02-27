@@ -13904,13 +13904,7 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the dice
-	var totalDamage int
-	var rolls []int
-	for i := 0; i < diceCount; i++ {
-		roll := rollDice(6)
-		rolls = append(rolls, roll)
-		totalDamage += roll
-	}
+	rolls, totalDamage := rollDice(diceCount, 6)
 	
 	// Get character info
 	var charName string
