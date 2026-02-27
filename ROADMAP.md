@@ -615,9 +615,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 
 ### Environmental & Exploration
 
+**What we have:**
+- [x] **Falling Damage** (`POST /api/gm/falling-damage`) — 1d6 per 10ft, max 20d6 (v0.8.33)
+
 **What we need:**
 - [ ] **Environmental Hazards**
-  - [ ] Falling damage (1d6 per 10ft, max 20d6)
   - [ ] Suffocation (CON mod minutes, then 0 HP in 1+CON rounds)
   - [ ] Extreme temperatures (CON saves or exhaustion)
   - [ ] High altitude (exhaustion without acclimation)
@@ -680,7 +682,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 13. **Feats** — Build variety
 
 ### P3 — Nice to Have
-13. **Environmental Hazards**
+13. **Environmental Hazards** (partial: falling damage ✅)
 14. **Traps and Diseases**
 15. **Downtime Activities**
 16. **Optional Rules**

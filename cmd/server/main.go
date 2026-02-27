@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.31
+// @version 0.8.33
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.32"
+const version = "0.8.33"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -372,6 +372,7 @@ func main() {
 	http.HandleFunc("/api/action", handleAction)
 	http.HandleFunc("/api/trigger-readied", handleTriggerReadied)
 	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
+	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -13818,6 +13819,178 @@ func handleGMTriggerReadied(w http.ResponseWriter, r *http.Request) {
 		"reaction_consumed": true,
 		"message":           fmt.Sprintf("%s's readied action triggered! '%s' → %s", charName, readied["trigger"], result),
 	})
+}
+
+// handleGMFallingDamage godoc
+// @Summary Apply falling damage to a character
+// @Description Deal falling damage: 1d6 per 10 feet fallen (max 20d6 at 200ft). Damage type is bludgeoning.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,distance_feet=integer,reason=string} true "Falling details"
+// @Success 200 {object} map[string]interface{} "Damage applied"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/falling-damage [post]
+func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID  int    `json:"character_id"`
+		DistanceFeet int    `json:"distance_feet"`
+		Reason       string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 || req.DistanceFeet <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id and positive distance_feet required",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Calculate damage: 1d6 per 10 feet, max 20d6 (200 feet)
+	diceCount := req.DistanceFeet / 10
+	if diceCount < 1 {
+		diceCount = 1 // Minimum 1d6 if any fall at all
+	}
+	if diceCount > 20 {
+		diceCount = 20 // Maximum 20d6 at 200+ feet
+	}
+	
+	// Roll the dice
+	var totalDamage int
+	var rolls []int
+	for i := 0; i < diceCount; i++ {
+		roll := rollDice(6)
+		rolls = append(rolls, roll)
+		totalDamage += roll
+	}
+	
+	// Get character info
+	var charName string
+	var currentHP, maxHP int
+	err = db.QueryRow("SELECT name, hp, max_hp FROM characters WHERE id = $1", req.CharacterID).Scan(&charName, &currentHP, &maxHP)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Apply damage resistance if character has bludgeoning resistance (e.g., petrified)
+	damageResult := applyDamageResistance(req.CharacterID, totalDamage, "bludgeoning")
+	finalDamage := damageResult.FinalDamage
+	
+	// Apply the damage
+	newHP := currentHP - finalDamage
+	if newHP < 0 {
+		newHP = 0
+	}
+	
+	_, err = db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "failed_to_update_hp"})
+		return
+	}
+	
+	// Determine consequence
+	consequence := ""
+	if newHP == 0 {
+		consequence = "💀 Character is unconscious and must make death saving throws!"
+	} else if newHP <= maxHP/4 {
+		consequence = "⚠️ Character is badly hurt!"
+	}
+	
+	// Build reason string
+	reason := req.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("fell %d feet", req.DistanceFeet)
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Falling damage: %s %s", charName, reason)
+	actionResult := fmt.Sprintf("%dd6 = %v → %d bludgeoning damage", diceCount, rolls, totalDamage)
+	if damageResult.WasHalved {
+		actionResult += " (halved due to resistance)"
+	}
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "falling_damage", actionDesc, actionResult)
+	
+	response := map[string]interface{}{
+		"success":        true,
+		"character":      charName,
+		"character_id":   req.CharacterID,
+		"distance_feet":  req.DistanceFeet,
+		"dice_rolled":    fmt.Sprintf("%dd6", diceCount),
+		"individual_rolls": rolls,
+		"raw_damage":     totalDamage,
+		"damage_type":    "bludgeoning",
+		"final_damage":   finalDamage,
+		"previous_hp":    currentHP,
+		"current_hp":     newHP,
+		"max_hp":         maxHP,
+		"message":        fmt.Sprintf("%s %s and takes %d bludgeoning damage (%dd6=%v)", charName, reason, finalDamage, diceCount, rolls),
+	}
+	
+	if damageResult.WasHalved {
+		response["resistance_applied"] = true
+		response["resistances"] = damageResult.Resistances
+	}
+	
+	if consequence != "" {
+		response["consequence"] = consequence
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleObserve godoc
