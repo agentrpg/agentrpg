@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.42
+// @version 0.8.43
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.42"
+const version = "0.8.43"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -390,6 +390,7 @@ func main() {
 	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
+	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -13338,7 +13339,8 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 
 // Check if character has a condition that grants advantage/disadvantage
 // isRanged indicates if this is a ranged attack (affects prone handling)
-func getAttackModifiers(charID int, targetConditions []string, isRanged bool) (bool, bool) {
+// targetID is the target being attacked (for flanking checks, 0 if unknown)
+func getAttackModifiers(charID int, targetConditions []string, isRanged bool, targetID ...int) (bool, bool) {
 	hasAdvantage := false
 	hasDisadvantage := false
 	
@@ -13350,11 +13352,27 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool) (b
 	
 	// Attacker conditions
 	for _, cond := range conditions {
-		switch strings.ToLower(cond) {
+		condLower := strings.ToLower(cond)
+		switch condLower {
 		case "invisible":
 			hasAdvantage = true
 		case "blinded", "frightened", "poisoned", "prone", "restrained":
 			hasDisadvantage = true
+		}
+		
+		// Flanking check (v0.8.43): "flanking:X" grants advantage on MELEE attacks against target X
+		if strings.HasPrefix(condLower, "flanking:") && !isRanged {
+			// If we have a target ID, check if it matches
+			if len(targetID) > 0 && targetID[0] > 0 {
+				flankTargetStr := strings.TrimPrefix(condLower, "flanking:")
+				flankTarget, _ := strconv.Atoi(flankTargetStr)
+				if flankTarget == targetID[0] {
+					hasAdvantage = true
+				}
+			} else {
+				// No target specified, grant advantage (GM called flanking, assume it applies)
+				hasAdvantage = true
+			}
 		}
 	}
 	
@@ -15893,6 +15911,165 @@ func handleGMDispelMagic(w http.ResponseWriter, r *http.Request) {
 	`, lobbyID, req.CasterID, "dispel_magic", actionDesc, actionResult)
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMFlanking godoc
+// @Summary Grant flanking advantage (optional rule)
+// @Description Flanking (optional rule from DMG): When you and an ally are on opposite sides of an enemy, you both have advantage on melee attacks against that enemy. The GM calls this when positioning allows flanking. Adds a "flanking:TARGET_ID" condition to the character that grants advantage on melee attacks against that specific target. Condition clears at end of the character's next turn.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,target_id=integer,ally_id=integer} true "Flanking setup: character_id (attacker getting advantage), target_id (enemy being flanked), ally_id (optional: ally providing flank)"
+// @Success 200 {object} map[string]interface{} "Flanking granted"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/flanking [post]
+func handleGMFlanking(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int `json:"character_id"` // Character gaining flanking advantage
+		TargetID    int `json:"target_id"`    // Enemy being flanked
+		AllyID      int `json:"ally_id"`      // Optional: ally providing the flank
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 || req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id and target_id required",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	var characterName string
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id, c.name FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID, &characterName)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get target name (could be character or monster in combat)
+	var targetName string
+	err = db.QueryRow("SELECT name FROM characters WHERE id = $1 AND lobby_id = $2", req.TargetID, lobbyID).Scan(&targetName)
+	if err != nil {
+		// Check if it's a monster in turn order
+		var turnOrderJSON string
+		db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+		
+		type CombatEntry struct {
+			Name string `json:"name"`
+			ID   int    `json:"id"`
+		}
+		var entries []CombatEntry
+		json.Unmarshal([]byte(turnOrderJSON), &entries)
+		
+		for _, e := range entries {
+			if e.ID == req.TargetID {
+				targetName = e.Name
+				break
+			}
+		}
+		
+		if targetName == "" {
+			targetName = fmt.Sprintf("target %d", req.TargetID)
+		}
+	}
+	
+	// Get ally name if provided
+	allyName := ""
+	if req.AllyID > 0 {
+		db.QueryRow("SELECT name FROM characters WHERE id = $1", req.AllyID).Scan(&allyName)
+	}
+	
+	// Add flanking condition to character
+	// Format: "flanking:TARGET_ID" - grants advantage against that specific target
+	flankingCondition := fmt.Sprintf("flanking:%d", req.TargetID)
+	
+	var conditionsJSON []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", req.CharacterID).Scan(&conditionsJSON)
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Remove any existing flanking conditions (can only flank one target at a time)
+	newConditions := []string{}
+	for _, c := range conditions {
+		if !strings.HasPrefix(c, "flanking:") {
+			newConditions = append(newConditions, c)
+		}
+	}
+	newConditions = append(newConditions, flankingCondition)
+	
+	updatedJSON, _ := json.Marshal(newConditions)
+	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, req.CharacterID)
+	
+	// Build message
+	message := fmt.Sprintf("⚔️ %s has flanking advantage against %s!", characterName, targetName)
+	if allyName != "" {
+		message = fmt.Sprintf("⚔️ %s and %s are flanking %s! %s has advantage on melee attacks.", characterName, allyName, targetName, characterName)
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Flanking: %s flanks %s", characterName, targetName)
+	if allyName != "" {
+		actionDesc = fmt.Sprintf("Flanking: %s and %s flank %s", characterName, allyName, targetName)
+	}
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "flanking", actionDesc, "Advantage granted on melee attacks")
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":          true,
+		"character":        characterName,
+		"character_id":     req.CharacterID,
+		"target":           targetName,
+		"target_id":        req.TargetID,
+		"ally":             allyName,
+		"ally_id":          req.AllyID,
+		"condition_added":  flankingCondition,
+		"message":          message,
+		"rules_note":       "Flanking (DMG optional rule): When you and an ally are on opposite sides of an enemy, you both have advantage on melee attacks. Condition clears when target changes or at end of character's next turn.",
+	})
 }
 
 // handleObserve godoc

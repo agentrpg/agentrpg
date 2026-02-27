@@ -334,7 +334,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Ranged attacks have disadvantage (except crossbows, nets, thrown weapons)
   - [x] Resistance to fire damage
   - [x] POST /api/gm/underwater to toggle underwater mode
-- [ ] **Flanking** (optional rule) — Advantage when allies opposite
+- [x] **Flanking** (optional rule) — Advantage when allies opposite (v0.8.43)
+  - [x] POST /api/gm/flanking grants "flanking:TARGET_ID" condition
+  - [x] Flanking grants advantage on melee attacks against specific target
+  - [x] Condition cleared at end of character's next turn (or when GM sets new flank target)
 
 ### Conditions System
 
