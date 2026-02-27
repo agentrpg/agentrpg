@@ -15835,11 +15835,6 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		statusBadge = `<span class="badge active">🎮 Active</span>`
 	}
 	
-	partyHTML := "<p class='muted'>No adventurers have joined yet.</p>"
-	if party.Len() > 0 {
-		partyHTML = `<div class="party-grid">` + party.String() + `</div>`
-	}
-	
 	obsHTML := "<p class='muted'>No observations recorded.</p>"
 	if observations.Len() > 0 {
 		obsHTML = observations.String()
