@@ -1793,6 +1793,55 @@ func getCharConditions(charID int) []string {
 	return conditions
 }
 
+// removeCondition removes a specific condition from a character (v0.8.41)
+// Used for standing up from prone, breaking grapple, etc.
+func removeCondition(charID int, condition string) bool {
+	condition = strings.ToLower(condition)
+	conditions := getCharConditions(charID)
+	
+	newConditions := []string{}
+	removed := false
+	for _, c := range conditions {
+		if strings.ToLower(c) == condition {
+			removed = true
+		} else {
+			newConditions = append(newConditions, c)
+		}
+	}
+	
+	if removed {
+		updated, _ := json.Marshal(newConditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+	}
+	return removed
+}
+
+// conditionListHas checks if a condition list contains a specific condition (v0.8.41)
+// Helper for checking conditions without database query when list is already available
+func conditionListHas(conditions []string, condition string) bool {
+	condition = strings.ToLower(condition)
+	for _, c := range conditions {
+		if strings.ToLower(c) == condition {
+			return true
+		}
+	}
+	return false
+}
+
+// buildMovementInfo returns movement info with prone status (v0.8.41)
+// Shows crawling penalty and stand action when prone
+func buildMovementInfo(race string, movementRemaining int, conditions []string) string {
+	isProne := conditionListHas(conditions, "prone")
+	baseSpeed := getMovementSpeed(race)
+	
+	if isProne {
+		standCost := baseSpeed / 2
+		effectiveMovement := movementRemaining / 2 // How far you can actually crawl
+		return fmt.Sprintf("You have %dft of movement remaining. ⚠️ PRONE: Crawling costs 2ft per 1ft moved (effective: %dft). Use 'stand' action to stand up (costs %dft movement).", movementRemaining, effectiveMovement, standCost)
+	}
+	return fmt.Sprintf("You have %dft of movement remaining.", movementRemaining)
+}
+
 // isIncapacitated checks if character cannot take actions or reactions
 // Per 5e: paralyzed, stunned, unconscious, petrified, and incapacitated all prevent actions
 func isIncapacitated(charID int) bool {
@@ -5724,6 +5773,14 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	
 	// Add class-specific actions
 	classKey := strings.ToLower(class)
+	
+	// Check if prone - add stand action (v0.8.41)
+	if hasCondition(charID, "prone") {
+		standCost := getMovementSpeed(race) / 2
+		actions = append([]map[string]interface{}{
+			{"name": "Stand", "description": fmt.Sprintf("Stand up from prone (costs %dft movement). While prone, attacks against you from 5ft have advantage, and your attacks have disadvantage.", standCost)},
+		}, actions...)
+	}
 	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
 		actions = append(actions, map[string]interface{}{
 			"name": "Cast", "description": fmt.Sprintf("Cast a spell using %s as your spellcasting ability.", c.Spellcasting),
@@ -5987,7 +6044,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"your_options": map[string]interface{}{
 			"actions":       actions,
 			"bonus_actions": buildBonusActions(classKey, actionUsed, bonusActionUsed),
-			"movement":      fmt.Sprintf("You have %dft of movement remaining.", movementRemaining),
+			"movement":      buildMovementInfo(race, movementRemaining, conditions),
 			"reaction":      reactionStatus,
 			"action_economy": map[string]interface{}{
 				"action":            !actionUsed,
@@ -6000,6 +6057,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				"movement_speed_ft": getMovementSpeed(race),
 				"bonus_action_spell_cast": bonusActionSpellCast,
 				"cantrips_only_warning": cantripsOnlyWarning,
+				"is_prone": conditionListHas(conditions, "prone"),
 			},
 		},
 		"tactical_suggestions": suggestions,
@@ -12945,8 +13003,8 @@ func getActionResourceType(actionType string) string {
 	// Reactions (consume reaction - used on others' turns too)
 	case "opportunity_attack", "counterspell", "shield":
 		return "reaction"
-	// Movement (consumes movement speed)
-	case "move":
+	// Movement (consumes movement speed) - includes stand (costs half movement)
+	case "move", "stand":
 		return "movement"
 	// Free actions (no resource cost)
 	case "drop", "speak", "interact", "other":
@@ -12964,11 +13022,12 @@ func checkActionEconomy(charID int, actionType string, movementCost int) (bool, 
 	
 	var actionUsed, bonusActionUsed, reactionUsed bool
 	var movementRemaining int
+	var race string
 	err := db.QueryRow(`
 		SELECT COALESCE(action_used, false), COALESCE(bonus_action_used, false), 
-		       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30)
+		       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30), COALESCE(race, 'human')
 		FROM characters WHERE id = $1
-	`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining)
+	`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining, &race)
 	
 	if err != nil {
 		return false, resourceType, "Failed to check action economy"
@@ -12988,8 +13047,56 @@ func checkActionEconomy(charID int, actionType string, movementCost int) (bool, 
 			return false, resourceType, "You have already used your reaction this round."
 		}
 	case "movement":
-		if movementCost > movementRemaining {
-			return false, resourceType, fmt.Sprintf("Not enough movement. You have %dft remaining, need %dft.", movementRemaining, movementCost)
+		actionType = strings.ToLower(actionType)
+		
+		// Standing up from prone costs half your movement speed (5e PHB p190-191)
+		if actionType == "stand" {
+			// Check if actually prone
+			conditions := getCharConditions(charID)
+			isProne := false
+			for _, c := range conditions {
+				if strings.ToLower(c) == "prone" {
+					isProne = true
+					break
+				}
+			}
+			if !isProne {
+				return false, resourceType, "You are not prone. No need to stand up."
+			}
+			
+			// Standing costs half movement speed
+			baseSpeed := getMovementSpeed(race)
+			standCost := baseSpeed / 2
+			if standCost > movementRemaining {
+				return false, resourceType, fmt.Sprintf("Standing up costs half your speed (%dft). You only have %dft remaining.", standCost, movementRemaining)
+			}
+		} else if actionType == "move" {
+			// Prone movement: crawling costs 2ft per 1ft moved (5e PHB p190-191)
+			conditions := getCharConditions(charID)
+			isProne := false
+			for _, c := range conditions {
+				if strings.ToLower(c) == "prone" {
+					isProne = true
+					break
+				}
+			}
+			
+			effectiveCost := movementCost
+			if isProne {
+				effectiveCost = movementCost * 2 // Crawling costs double
+			}
+			
+			if effectiveCost > movementRemaining {
+				if isProne {
+					return false, resourceType, fmt.Sprintf("Not enough movement. Crawling while prone costs 2ft per 1ft. You need %dft (2x%dft) but only have %dft remaining. Consider using 'stand' action first (costs %dft).", effectiveCost, movementCost, movementRemaining, getMovementSpeed(race)/2)
+				}
+				return false, resourceType, fmt.Sprintf("Not enough movement. You have %dft remaining, need %dft.", movementRemaining, movementCost)
+			}
+		} else {
+			// Generic movement check
+			if movementCost > movementRemaining {
+				return false, resourceType, fmt.Sprintf("Not enough movement. You have %dft remaining, need %dft.", movementRemaining, movementCost)
+			}
 		}
 	case "free":
 		// Free actions always succeed
@@ -13133,10 +13240,35 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		inCombat = false
 	}
 	
+	// Calculate effective movement cost (prone mechanics - 5e PHB p190-191)
+	effectiveMovementCost := req.MovementCost
+	isStanding := strings.ToLower(req.Action) == "stand"
+	isMovingWhileProne := false
+	
+	if strings.ToLower(req.Action) == "move" || isStanding {
+		conditions := getCharConditions(charID)
+		isProne := false
+		for _, c := range conditions {
+			if strings.ToLower(c) == "prone" {
+				isProne = true
+				break
+			}
+		}
+		
+		if isStanding {
+			// Standing up costs half your movement speed
+			effectiveMovementCost = getMovementSpeed(race) / 2
+		} else if isProne && req.MovementCost > 0 {
+			// Crawling while prone: 1ft costs 2ft of movement
+			effectiveMovementCost = req.MovementCost * 2
+			isMovingWhileProne = true
+		}
+	}
+	
 	// Check action economy (only in combat)
 	resourceUsed := ""
 	if inCombat {
-		canAct, resourceType, errMsg := checkActionEconomy(charID, req.Action, req.MovementCost)
+		canAct, resourceType, errMsg := checkActionEconomy(charID, req.Action, effectiveMovementCost)
 		if !canAct {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":       false,
@@ -13154,7 +13286,13 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	
 	// Consume the resource (only in combat)
 	if inCombat && resourceUsed != "" && resourceUsed != "free" {
-		consumeActionResource(charID, resourceUsed, req.MovementCost)
+		consumeActionResource(charID, resourceUsed, effectiveMovementCost)
+	}
+	
+	// Handle prone condition removal when standing up (v0.8.41)
+	if isStanding {
+		removeCondition(charID, "prone")
+		result = "You stand up from prone."
 	}
 	
 	db.Exec(`

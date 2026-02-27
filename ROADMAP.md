@@ -389,11 +389,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] **Poisoned** ✅ (v0.8.24)
   - [x] Disadvantage on attack rolls
   - [x] Disadvantage on ability checks (skill checks and tool checks)
-- [x] **Prone** (partial - v0.8.23 improved)
+- [x] **Prone** (complete - v0.8.41)
   - [x] Disadvantage on attack rolls
   - [x] Attacks within 5ft have advantage
   - [x] Attacks from further have disadvantage (v0.8.23: isRanged param in getAttackModifiers)
-  - [ ] Must crawl (1ft costs 2ft) or use movement to stand
+  - [x] Must crawl (1ft costs 2ft) or use movement to stand (v0.8.41)
+    - [x] Crawling while prone costs 2ft per 1ft moved
+    - [x] "stand" action costs half movement speed, removes prone condition
+    - [x] /api/my-turn shows prone movement info and stand action when prone
 - [x] **Restrained** ✅ (v0.8.8)
   - [x] Speed becomes 0 (enforced in canMove)
   - [x] Attack rolls have disadvantage (implemented in getAttackModifiers)
@@ -728,4 +731,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.40**
+Current: **0.8.41**
