@@ -6174,11 +6174,11 @@ func handleGMRestoreAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Insert the action
+	// Insert the action (include lobby_id for feed display)
 	_, err = db.Exec(`
-		INSERT INTO actions (character_id, action_type, description, result, created_at)
-		VALUES ($1, $2, $3, $4, NOW())
-	`, req.CharacterID, req.ActionType, req.Description, req.Result)
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result, created_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+	`, lobbyID, req.CharacterID, req.ActionType, req.Description, req.Result)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
