@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.43
+// @version 0.8.44
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.43"
+const version = "0.8.44"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -391,6 +391,7 @@ func main() {
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
+	http.HandleFunc("/api/gm/apply-poison", handleGMApplyPoison)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -16069,6 +16070,486 @@ func handleGMFlanking(w http.ResponseWriter, r *http.Request) {
 		"condition_added":  flankingCondition,
 		"message":          message,
 		"rules_note":       "Flanking (DMG optional rule): When you and an ally are on opposite sides of an enemy, you both have advantage on melee attacks. Condition clears when target changes or at end of character's next turn.",
+	})
+}
+
+// Poison represents a D&D poison with its effects
+type Poison struct {
+	Name        string `json:"name"`
+	Type        string `json:"type"`        // contact, ingested, inhaled, injury
+	DC          int    `json:"dc"`          // CON save DC
+	Damage      string `json:"damage"`      // dice expression (e.g., "3d6")
+	DamageType  string `json:"damage_type"` // usually "poison"
+	Condition   string `json:"condition"`   // condition applied on failure
+	Duration    string `json:"duration"`    // duration of condition
+	Description string `json:"description"`
+}
+
+// Built-in poisons from DMG
+var builtinPoisons = map[string]Poison{
+	"basic_poison": {
+		Name:        "Basic Poison",
+		Type:        "injury",
+		DC:          10,
+		Damage:      "1d4",
+		DamageType:  "poison",
+		Description: "Simple poison applied to weapons. DC 10 CON save or take 1d4 poison damage.",
+	},
+	"serpent_venom": {
+		Name:        "Serpent Venom",
+		Type:        "injury",
+		DC:          11,
+		Damage:      "3d6",
+		DamageType:  "poison",
+		Description: "Harvested from a dead or incapacitated giant poisonous snake. DC 11 CON save or take 3d6 poison damage.",
+	},
+	"assassins_blood": {
+		Name:        "Assassin's Blood",
+		Type:        "ingested",
+		DC:          10,
+		Damage:      "1d12",
+		DamageType:  "poison",
+		Condition:   "poisoned",
+		Duration:    "24 hours",
+		Description: "A creature subjected to this poison must make a DC 10 CON save. On failure, takes 1d12 poison damage and is poisoned for 24 hours.",
+	},
+	"drow_poison": {
+		Name:        "Drow Poison",
+		Type:        "injury",
+		DC:          13,
+		Condition:   "poisoned",
+		Duration:    "1 hour",
+		Description: "This poison is typically made only by the drow. DC 13 CON save or be poisoned for 1 hour. If you fail by 5 or more, you are also unconscious while poisoned.",
+	},
+	"burnt_othur_fumes": {
+		Name:        "Burnt Othur Fumes",
+		Type:        "inhaled",
+		DC:          13,
+		Damage:      "3d6",
+		DamageType:  "poison",
+		Description: "A creature must succeed on a DC 13 CON save or take 3d6 poison damage, and must repeat the save at the start of each turn. On three successes, the poison ends.",
+	},
+	"purple_worm_poison": {
+		Name:        "Purple Worm Poison",
+		Type:        "injury",
+		DC:          19,
+		Damage:      "12d6",
+		DamageType:  "poison",
+		Description: "This poison must be harvested from a dead or incapacitated purple worm. DC 19 CON save or take 12d6 poison damage. On success, take half damage.",
+	},
+	"carrion_crawler_mucus": {
+		Name:        "Carrion Crawler Mucus",
+		Type:        "contact",
+		DC:          13,
+		Condition:   "paralyzed",
+		Duration:    "1 minute",
+		Description: "Must be harvested from a dead carrion crawler. DC 13 CON save or be paralyzed for 1 minute. Target can repeat the save at the end of each turn.",
+	},
+	"oil_of_taggit": {
+		Name:        "Oil of Taggit",
+		Type:        "contact",
+		DC:          13,
+		Condition:   "unconscious",
+		Duration:    "24 hours",
+		Description: "A creature subjected to this poison must succeed on a DC 13 CON save or become unconscious for 24 hours. The creature wakes up if it takes damage.",
+	},
+	"wyvern_poison": {
+		Name:        "Wyvern Poison",
+		Type:        "injury",
+		DC:          15,
+		Damage:      "7d6",
+		DamageType:  "poison",
+		Description: "Must be harvested from a dead or incapacitated wyvern. DC 15 CON save or take 7d6 poison damage. On success, take half damage.",
+	},
+	"midnight_tears": {
+		Name:        "Midnight Tears",
+		Type:        "ingested",
+		DC:          17,
+		Damage:      "9d6",
+		DamageType:  "poison",
+		Description: "A creature that ingests this poison suffers no effect until midnight. DC 17 CON save at midnight or take 9d6 poison damage.",
+	},
+	"pale_tincture": {
+		Name:        "Pale Tincture",
+		Type:        "ingested",
+		DC:          16,
+		Damage:      "1d6",
+		DamageType:  "poison",
+		Condition:   "poisoned",
+		Duration:    "until cured",
+		Description: "DC 16 CON save or take 1d6 poison damage and become poisoned. Repeat save every 24 hours, taking 1d6 on failure, ending on success.",
+	},
+}
+
+// handleGMApplyPoison godoc
+// @Summary Apply poison to a character
+// @Description Apply poison to a character using built-in poisons or custom poison parameters. The target makes a CON save. On failure, takes damage and/or gains a condition based on the poison type. Supports contact, ingested, inhaled, and injury poisons per DMG rules.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,poison_name=string,custom_dc=integer,custom_damage=string,custom_condition=string,custom_duration=string,reason=string} true "Poison application: character_id (required), poison_name (optional, use built-in), or custom_* params"
+// @Success 200 {object} map[string]interface{} "Poison applied"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/apply-poison [post]
+func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	// List available poisons if GET with ?list=true
+	if r.Method == "GET" && r.URL.Query().Get("list") == "true" {
+		poisonList := []map[string]interface{}{}
+		for key, p := range builtinPoisons {
+			poisonList = append(poisonList, map[string]interface{}{
+				"key":         key,
+				"name":        p.Name,
+				"type":        p.Type,
+				"dc":          p.DC,
+				"damage":      p.Damage,
+				"condition":   p.Condition,
+				"duration":    p.Duration,
+				"description": p.Description,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"poisons": poisonList,
+		})
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID     int    `json:"character_id"`
+		PoisonName      string `json:"poison_name"`      // Built-in poison key
+		CustomDC        int    `json:"custom_dc"`        // Custom poison DC
+		CustomDamage    string `json:"custom_damage"`    // Custom damage dice (e.g., "2d6")
+		CustomCondition string `json:"custom_condition"` // Custom condition to apply
+		CustomDuration  string `json:"custom_duration"`  // Custom duration
+		CustomType      string `json:"custom_type"`      // contact, ingested, inhaled, injury
+		Reason          string `json:"reason"`           // Flavor text for the log
+		HalfOnSuccess   bool   `json:"half_on_success"`  // Take half damage on save?
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+			"available_poisons": func() []string {
+				keys := []string{}
+				for k := range builtinPoisons {
+					keys = append(keys, k)
+				}
+				sort.Strings(keys)
+				return keys
+			}(),
+		})
+		return
+	}
+	
+	// Determine poison to use
+	var poison Poison
+	var poisonSource string
+	
+	if req.PoisonName != "" {
+		if p, ok := builtinPoisons[req.PoisonName]; ok {
+			poison = p
+			poisonSource = "builtin"
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			keys := []string{}
+			for k := range builtinPoisons {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":             "unknown_poison",
+				"message":           fmt.Sprintf("Unknown poison: %s", req.PoisonName),
+				"available_poisons": keys,
+			})
+			return
+		}
+	} else if req.CustomDC > 0 {
+		// Custom poison
+		poison = Poison{
+			Name:       "Custom Poison",
+			Type:       req.CustomType,
+			DC:         req.CustomDC,
+			Damage:     req.CustomDamage,
+			DamageType: "poison",
+			Condition:  req.CustomCondition,
+			Duration:   req.CustomDuration,
+		}
+		if poison.Type == "" {
+			poison.Type = "injury"
+		}
+		poisonSource = "custom"
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		keys := []string{}
+		for k := range builtinPoisons {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":             "no_poison_specified",
+			"message":           "Specify poison_name (built-in) or custom_dc (custom poison)",
+			"available_poisons": keys,
+		})
+		return
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info for the save
+	var charName string
+	var con, currentHP, maxHP int
+	var conditionsStr string
+	err = db.QueryRow(`
+		SELECT name, con, hp, max_hp, COALESCE(conditions, '') 
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &con, &currentHP, &maxHP, &conditionsStr)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	conMod := modifier(con)
+	
+	// Check if character is immune to poison (could be race, condition, or item)
+	// For now, check if they have "immunity:poison" in conditions
+	condList := strings.Split(conditionsStr, ",")
+	for _, c := range condList {
+		c = strings.TrimSpace(strings.ToLower(c))
+		if c == "immunity:poison" || c == "immune:poison" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      true,
+				"immune":       true,
+				"character":    charName,
+				"character_id": req.CharacterID,
+				"poison":       poison.Name,
+				"message":      fmt.Sprintf("🛡️ %s is immune to poison! The %s has no effect.", charName, poison.Name),
+			})
+			return
+		}
+	}
+	
+	// Roll the CON save
+	saveRoll := rollDie(20)
+	saveTotal := saveRoll + conMod
+	
+	// Check for advantage/disadvantage on saves (some conditions affect this)
+	saveAdvantage := false
+	saveDisadvantage := false
+	for _, c := range condList {
+		c = strings.TrimSpace(strings.ToLower(c))
+		if strings.HasPrefix(c, "exhaustion:") {
+			level, _ := strconv.Atoi(strings.TrimPrefix(c, "exhaustion:"))
+			if level >= 3 {
+				saveDisadvantage = true
+			}
+		}
+	}
+	
+	// Re-roll if advantage/disadvantage
+	if saveAdvantage && !saveDisadvantage {
+		roll2 := rollDie(20)
+		if roll2 > saveRoll {
+			saveRoll = roll2
+		}
+		saveTotal = saveRoll + conMod
+	} else if saveDisadvantage && !saveAdvantage {
+		roll2 := rollDie(20)
+		if roll2 < saveRoll {
+			saveRoll = roll2
+		}
+		saveTotal = saveRoll + conMod
+	}
+	
+	saved := saveTotal >= poison.DC
+	
+	// Calculate damage if any
+	damageTaken := 0
+	damageRolls := []int{}
+	if poison.Damage != "" {
+		// Parse damage dice (e.g., "3d6")
+		re := regexp.MustCompile(`(\d+)d(\d+)`)
+		matches := re.FindStringSubmatch(poison.Damage)
+		if len(matches) == 3 {
+			numDice, _ := strconv.Atoi(matches[1])
+			dieSize, _ := strconv.Atoi(matches[2])
+			for i := 0; i < numDice; i++ {
+				roll := rollDie(dieSize)
+				damageRolls = append(damageRolls, roll)
+				damageTaken += roll
+			}
+		}
+	}
+	
+	// Apply effects based on save result
+	resultDetails := map[string]interface{}{}
+	newHP := currentHP
+	conditionApplied := ""
+	
+	if !saved {
+		// Failed save - full damage and condition
+		if damageTaken > 0 {
+			newHP = currentHP - damageTaken
+			if newHP < 0 {
+				newHP = 0
+			}
+			db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, req.CharacterID)
+			resultDetails["damage_taken"] = damageTaken
+			resultDetails["damage_rolls"] = damageRolls
+			resultDetails["previous_hp"] = currentHP
+			resultDetails["current_hp"] = newHP
+		}
+		
+		// Apply condition if specified
+		if poison.Condition != "" {
+			conditionApplied = poison.Condition
+			if poison.Duration != "" {
+				conditionApplied = fmt.Sprintf("%s (%s)", poison.Condition, poison.Duration)
+			}
+			
+			// Check for drow poison special: fail by 5+ = also unconscious
+			if poison.Name == "Drow Poison" && (poison.DC-saveTotal) >= 5 {
+				conditionApplied = "poisoned, unconscious (1 hour)"
+			}
+			
+			// Add to conditions
+			newConditions := []string{}
+			for _, c := range condList {
+				c = strings.TrimSpace(c)
+				if c != "" {
+					newConditions = append(newConditions, c)
+				}
+			}
+			newConditions = append(newConditions, conditionApplied)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", strings.Join(newConditions, ", "), req.CharacterID)
+			resultDetails["condition_applied"] = conditionApplied
+		}
+	} else {
+		// Successful save
+		if req.HalfOnSuccess && damageTaken > 0 {
+			// Half damage on save (like purple worm poison)
+			halfDamage := damageTaken / 2
+			if halfDamage > 0 {
+				newHP = currentHP - halfDamage
+				if newHP < 0 {
+					newHP = 0
+				}
+				db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, req.CharacterID)
+				resultDetails["damage_taken"] = halfDamage
+				resultDetails["full_damage"] = damageTaken
+				resultDetails["half_damage_on_save"] = true
+				resultDetails["previous_hp"] = currentHP
+				resultDetails["current_hp"] = newHP
+			}
+		}
+	}
+	
+	// Build result message
+	var message string
+	if saved {
+		if damageTaken > 0 && req.HalfOnSuccess {
+			message = fmt.Sprintf("🎲 %s resists the %s! CON save %d (roll: %d + %d mod) vs DC %d. Takes %d poison damage (half).",
+				charName, poison.Name, saveTotal, saveRoll, conMod, poison.DC, damageTaken/2)
+		} else {
+			message = fmt.Sprintf("✅ %s resists the %s! CON save %d (roll: %d + %d mod) vs DC %d.",
+				charName, poison.Name, saveTotal, saveRoll, conMod, poison.DC)
+		}
+	} else {
+		if damageTaken > 0 && conditionApplied != "" {
+			message = fmt.Sprintf("☠️ %s succumbs to the %s! CON save %d (roll: %d + %d mod) vs DC %d. Takes %d poison damage and gains %s!",
+				charName, poison.Name, saveTotal, saveRoll, conMod, poison.DC, damageTaken, conditionApplied)
+		} else if damageTaken > 0 {
+			message = fmt.Sprintf("☠️ %s is poisoned by the %s! CON save %d (roll: %d + %d mod) vs DC %d. Takes %d poison damage!",
+				charName, poison.Name, saveTotal, saveRoll, conMod, poison.DC, damageTaken)
+		} else if conditionApplied != "" {
+			message = fmt.Sprintf("☠️ %s fails to resist the %s! CON save %d (roll: %d + %d mod) vs DC %d. Gains %s!",
+				charName, poison.Name, saveTotal, saveRoll, conMod, poison.DC, conditionApplied)
+		} else {
+			message = fmt.Sprintf("☠️ %s is affected by the %s! CON save %d (roll: %d + %d mod) vs DC %d.",
+				charName, poison.Name, saveTotal, saveRoll, conMod, poison.DC)
+		}
+	}
+	
+	// Log the action
+	reason := req.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("exposed to %s (%s)", poison.Name, poison.Type)
+	}
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "poison",
+		fmt.Sprintf("%s %s", charName, reason),
+		message)
+	
+	// Include half_on_success status for relevant poisons
+	halfOnSuccess := req.HalfOnSuccess
+	if poison.Name == "Purple Worm Poison" || poison.Name == "Wyvern Poison" {
+		halfOnSuccess = true // These poisons have half damage on success
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"character":       charName,
+		"character_id":    req.CharacterID,
+		"poison":          poison.Name,
+		"poison_type":     poison.Type,
+		"poison_source":   poisonSource,
+		"dc":              poison.DC,
+		"save_roll":       saveRoll,
+		"save_modifier":   conMod,
+		"save_total":      saveTotal,
+		"saved":           saved,
+		"half_on_success": halfOnSuccess,
+		"result":          resultDetails,
+		"message":         message,
 	})
 }
 

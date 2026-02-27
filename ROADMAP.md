@@ -676,10 +676,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Contraction mechanics
   - [ ] Ongoing effects
   - [ ] Recovery (saves, rest, magic)
-- [ ] **Poisons**
-  - [ ] Contact, ingested, inhaled, injury types
-  - [ ] CON saves
-  - [ ] Damage and/or conditions
+- [x] **Poisons** (v0.8.44)
+  - [x] Contact, ingested, inhaled, injury types
+  - [x] CON saves
+  - [x] Damage and/or conditions
+  - [x] Built-in DMG poisons (11 types: basic_poison, serpent_venom, assassins_blood, drow_poison, etc.)
+  - [x] Custom poison support (custom_dc, custom_damage, custom_condition)
+  - [x] POST /api/gm/apply-poison
 - [ ] **Lighting & Vision**
   - [ ] Bright, dim, darkness
   - [ ] Darkvision, blindsight, truesight
@@ -747,4 +750,4 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.41**
+Current: **0.8.44**
