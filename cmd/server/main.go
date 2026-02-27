@@ -13307,6 +13307,11 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		"result":  result,
 	}
 	
+	// Add prone movement info if crawling (v0.8.41)
+	if isMovingWhileProne {
+		response["crawling_note"] = fmt.Sprintf("Crawling while prone: %dft of movement used for %dft of distance.", effectiveMovementCost, req.MovementCost)
+	}
+	
 	if inCombat {
 		response["resource_consumed"] = resourceUsed
 		
