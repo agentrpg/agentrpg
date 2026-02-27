@@ -3671,6 +3671,9 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 			}
 			handleCampaignItems(w, r, campaignID)
 			return
+		case "story":
+			handleCampaignStory(w, r, campaignID)
+			return
 		case "campaign":
 			// Campaign document management (GM only for writes)
 			if len(parts) > 2 {
@@ -4092,6 +4095,84 @@ func handleCampaignDocument(w http.ResponseWriter, r *http.Request, campaignID i
 // @Summary Add narrative section to campaign document
 // @Description Add a new section (narrative, notes, etc.) to the campaign document. GM only.
 // @Tags Campaigns
+// handleCampaignStory godoc
+// @Summary Replace story_so_far with a compacted summary
+// @Description GM-only endpoint to replace story_so_far in campaign document. Limited to 500 words.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{story=string} true "Story summary (max 500 words)"
+// @Success 200 {object} map[string]interface{} "Story updated"
+// @Failure 400 {object} map[string]interface{} "Over word limit"
+// @Failure 401 {object} map[string]interface{} "Unauthorized or not GM"
+// @Router /campaigns/{id}/story [put]
+func handleCampaignStory(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != "PUT" {
+		http.Error(w, "PUT required", http.StatusMethodNotAllowed)
+		return
+	}
+
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "gm_only", "message": "Only the GM can update story_so_far"})
+		return
+	}
+
+	var req struct {
+		Story string `json:"story"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	if req.Story == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "story_required", "message": "Provide a 'story' field with your summary"})
+		return
+	}
+
+	// Validate 500-word limit
+	words := strings.Fields(req.Story)
+	if len(words) > 500 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":      "too_long",
+			"message":    fmt.Sprintf("story_so_far must be <= 500 words (yours: %d). Compact it further.", len(words)),
+			"word_count": len(words),
+		})
+		return
+	}
+
+	// Get current campaign document
+	var campaignDocRaw []byte
+	db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
+
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+
+	// Replace story_so_far and set updated_at
+	campaignDoc["story_so_far"] = req.Story
+	campaignDoc["story_so_far_updated_at"] = time.Now().UTC().Format(time.RFC3339)
+
+	updatedDoc, _ := json.Marshal(campaignDoc)
+	db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":    true,
+		"word_count": len(words),
+		"updated_at": campaignDoc["story_so_far_updated_at"],
+	})
+}
+
 // @Accept json
 // @Produce json
 // @Param id path int true "Campaign ID"
@@ -4174,6 +4255,7 @@ func handleCampaignSections(w http.ResponseWriter, r *http.Request, campaignID i
 		} else {
 			campaignDoc["story_so_far"] = req.Content
 		}
+		campaignDoc["story_so_far_updated_at"] = time.Now().UTC().Format(time.RFC3339)
 	}
 	
 	// Save updated document
@@ -4851,10 +4933,10 @@ func handleObservationPromote(w http.ResponseWriter, r *http.Request, campaignID
 	if req.Section == "story_so_far" {
 		var campaignDocRaw []byte
 		db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
-		
+
 		var campaignDoc map[string]interface{}
 		json.Unmarshal(campaignDocRaw, &campaignDoc)
-		
+
 		// Append to story_so_far
 		existingStory := ""
 		if s, ok := campaignDoc["story_so_far"].(string); ok {
@@ -4865,7 +4947,8 @@ func handleObservationPromote(w http.ResponseWriter, r *http.Request, campaignID
 		} else {
 			campaignDoc["story_so_far"] = content
 		}
-		
+		campaignDoc["story_so_far_updated_at"] = time.Now().UTC().Format(time.RFC3339)
+
 		updatedDoc, _ := json.Marshal(campaignDoc)
 		db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
 	}
@@ -5526,7 +5609,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var charCopper, charSilver, charElectrum, charPlatinum int
 	var str, dex, con, intl, wis, cha int
 	var charName, class, race, lobbyName, setting, lobbyStatus string
-	var conditionsJSON, slotsUsedJSON []byte
+	var conditionsJSON, slotsUsedJSON, campaignDocRaw []byte
 	var concentratingOn string
 	var deathSuccesses, deathFailures, pendingASI, movementRemaining int
 	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed, bonusActionSpellCast bool
@@ -5540,7 +5623,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.xp, 0), COALESCE(c.gold, 0), COALESCE(c.copper, 0), COALESCE(c.silver, 0),
 			COALESCE(c.electrum, 0), COALESCE(c.platinum, 0), COALESCE(c.pending_asi, 0),
 			COALESCE(c.action_used, false), COALESCE(c.bonus_action_used, false), COALESCE(c.movement_remaining, 30),
-			COALESCE(c.bonus_action_spell_cast, false)
+			COALESCE(c.bonus_action_spell_cast, false),
+			COALESCE(l.campaign_document, '{}')
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -5551,7 +5635,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
 		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &charCopper, &charSilver,
 		&charElectrum, &charPlatinum, &pendingASI,
-		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast)
+		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -5923,6 +6007,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"rules_reminder":       rulesReminder,
 		"recent_events":        recentEvents,
 		"gm_says":              latestNarration,
+		"story_so_far":         parseStorySoFar(campaignDocRaw),
 		"party_status":         partyStatus,
 		"how_to_act": map[string]interface{}{
 			"endpoint": "POST /api/action",
@@ -5981,6 +6066,18 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// parseStorySoFar extracts story_so_far string from campaign document JSON
+func parseStorySoFar(campaignDocRaw []byte) string {
+	var doc map[string]interface{}
+	if err := json.Unmarshal(campaignDocRaw, &doc); err != nil {
+		return ""
+	}
+	if s, ok := doc["story_so_far"].(string); ok {
+		return s
+	}
+	return ""
 }
 
 // buildBonusActions returns available bonus actions based on class and current state
@@ -6563,11 +6660,32 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		gmTasks = append(gmTasks, fmt.Sprintf("⚠️ %d drift flag(s) detected! Review player observations for potential out-of-character or disruptive behavior.", len(driftAlerts)))
 	}
 	
-	// Check if campaign document needs updating
+	// Check story_so_far freshness — this is the primary long-term memory for stateless players
 	var campaignDoc map[string]interface{}
 	json.Unmarshal(campaignDocRaw, &campaignDoc)
+
+	// Query latest player action time
+	var latestPlayerAction sql.NullTime
+	db.QueryRow(`SELECT MAX(created_at) FROM actions WHERE lobby_id = $1 AND character_id IS NOT NULL`, campaignID).Scan(&latestPlayerAction)
+
 	if _, hasStory := campaignDoc["story_so_far"]; !hasStory {
-		gmTasks = append(gmTasks, "Consider adding a 'story_so_far' section to the campaign document")
+		gmTasks = append(gmTasks, fmt.Sprintf("🚨 URGENT: You MUST create a story_so_far summary. Players are STATELESS — they only know what you tell them. PUT /api/campaigns/%d/story with a <=500 word summary of everything that has happened. This is the MOST important thing you can do right now.", campaignID))
+	} else {
+		// Check if story is stale (updated_at < latest player action)
+		storyStale := false
+		if updatedAtStr, ok := campaignDoc["story_so_far_updated_at"].(string); ok {
+			updatedAt, err := time.Parse(time.RFC3339, updatedAtStr)
+			if err == nil && latestPlayerAction.Valid && latestPlayerAction.Time.After(updatedAt) {
+				storyStale = true
+			}
+		} else if latestPlayerAction.Valid {
+			// No updated_at recorded but players have acted — treat as stale
+			storyStale = true
+		}
+
+		if storyStale {
+			gmTasks = append(gmTasks, fmt.Sprintf("🚨 URGENT: Players have acted since your last story_so_far update. Update it NOW via PUT /api/campaigns/%d/story (<=500 words). This is how stateless players know what happened. Read the current story_so_far, incorporate recent events, and compact it.", campaignID))
+		}
 	}
 	
 	// Count observations that could be promoted
@@ -17533,19 +17651,21 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	
 	// Get party members with turn tracking
 	type PartyMember struct {
-		CharID    int
-		CharName  string
-		Class     string
-		Race      string
-		Level     int
-		HP        int
-		MaxHP     int
-		AgentID   int
-		AgentName string
+		CharID     int
+		CharName   string
+		Class      string
+		Race       string
+		Level      int
+		HP         int
+		MaxHP      int
+		AgentID    int
+		AgentName  string
+		LastActive sql.NullTime
 	}
 	var partyMembers []PartyMember
 	partyRows, _ := db.Query(`
-		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, a.id, a.name
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, a.id, a.name,
+			GREATEST(c.last_active, a.last_seen)
 		FROM characters c
 		JOIN agents a ON c.agent_id = a.id
 		WHERE c.lobby_id = $1
@@ -17554,30 +17674,66 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	if partyRows != nil {
 		for partyRows.Next() {
 			var pm PartyMember
-			partyRows.Scan(&pm.CharID, &pm.CharName, &pm.Class, &pm.Race, &pm.Level, &pm.HP, &pm.MaxHP, &pm.AgentID, &pm.AgentName)
+			partyRows.Scan(&pm.CharID, &pm.CharName, &pm.Class, &pm.Race, &pm.Level, &pm.HP, &pm.MaxHP, &pm.AgentID, &pm.AgentName, &pm.LastActive)
 			playerCount++
 			partyMembers = append(partyMembers, pm)
 		}
 		partyRows.Close()
 	}
+
+	// Sort party members by most recent activity (most recent first)
+	sort.Slice(partyMembers, func(i, j int) bool {
+		ti := time.Time{}
+		tj := time.Time{}
+		if partyMembers[i].LastActive.Valid {
+			ti = partyMembers[i].LastActive.Time
+		}
+		if partyMembers[j].LastActive.Valid {
+			tj = partyMembers[j].LastActive.Time
+		}
+		return ti.After(tj)
+	})
 	
+	// Helper to format time-ago for tooltips
+	formatTimeAgo := func(t time.Time) string {
+		dur := time.Since(t)
+		minutes := int(dur.Minutes())
+		hours := int(dur.Hours())
+		days := hours / 24
+		if days >= 2 {
+			return fmt.Sprintf("%d+ days ago", days)
+		}
+		if days >= 1 {
+			return "1+ days ago"
+		}
+		if hours >= 1 {
+			return fmt.Sprintf("~%d hours ago", hours)
+		}
+		if minutes >= 1 {
+			return fmt.Sprintf("~%d minutes ago", minutes)
+		}
+		return "just now"
+	}
+
 	// Build party boxes with turn highlighting
 	var partyBoxes strings.Builder
-	// GM box first
-	gmHighlight := ""
-	if !combatActive {
-		// Exploration mode - GM is not highlighted (players are)
-		gmHighlight = ""
-	}
+
+	// GM box first (always blue border)
 	if dmName.Valid && dmID.Valid {
+		gmTooltip := ""
+		var gmLastSeen sql.NullTime
+		_ = db.QueryRow(`SELECT last_seen FROM agents WHERE id = $1`, dmID.Int64).Scan(&gmLastSeen)
+		if gmLastSeen.Valid {
+			gmTooltip = fmt.Sprintf(` title="Active %s"`, formatTimeAgo(gmLastSeen.Time))
+		}
 		partyBoxes.WriteString(fmt.Sprintf(`
-<div class="party-box gm-box%s">
+<div class="party-box gm-box"%s>
   <div class="box-label">GM</div>
   <h4><a href="/profile/%d">%s</a></h4>
-</div>`, gmHighlight, dmID.Int64, dmName.String))
+</div>`, gmTooltip, dmID.Int64, dmName.String))
 	}
-	
-	// Player boxes
+
+	// Player boxes (sorted by most recent activity)
 	for _, pm := range partyMembers {
 		hpStatus := "healthy"
 		if pm.HP < pm.MaxHP/2 {
@@ -17586,27 +17742,40 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 		if pm.HP < pm.MaxHP/4 {
 			hpStatus = "critical"
 		}
-		
+
 		// Determine if this player's turn
 		isCurrentTurn := combatActive && pm.CharName == currentTurnName
 		isOpenEnded := !combatActive // Exploration mode = all players can act
-		
+
+		// Activity-based styling: inactive (>5h) gets grey border
+		isInactive := true
+		activityTooltip := ""
+		if pm.LastActive.Valid {
+			hoursSince := time.Since(pm.LastActive.Time).Hours()
+			isInactive = hoursSince > 5
+			activityTooltip = fmt.Sprintf(` title="Active %s"`, formatTimeAgo(pm.LastActive.Time))
+		} else {
+			activityTooltip = ` title="No activity recorded"`
+		}
+
 		highlightClass := ""
 		turnLabel := ""
 		if isCurrentTurn {
 			highlightClass = " current-turn"
 			turnLabel = `<div class="turn-label">Current Turn</div>`
+		} else if isInactive {
+			highlightClass = " inactive"
 		} else if isOpenEnded {
 			highlightClass = " can-act"
 		}
-		
+
 		partyBoxes.WriteString(fmt.Sprintf(`
-<div class="party-box%s">
+<div class="party-box%s"%s>
   %s
   <h4><a href="/character/%d">%s</a></h4>
   <p class="class-info">%s %s</p>
   <p class="%s">HP: %d/%d</p>
-</div>`, highlightClass, turnLabel, pm.CharID, pm.CharName, pm.Race, pm.Class, hpStatus, pm.HP, pm.MaxHP))
+</div>`, highlightClass, activityTooltip, turnLabel, pm.CharID, pm.CharName, pm.Race, pm.Class, hpStatus, pm.HP, pm.MaxHP))
 	}
 	
 	// Legacy party grid for left column (keep for now)
@@ -17788,17 +17957,18 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 [data-theme="dark"] .badge.recruiting,[data-theme="catppuccin-mocha"] .badge.recruiting,[data-theme="tokyonight"] .badge.recruiting,[data-theme="solarized-dark"] .badge.recruiting{background:#2a4a2a;color:#8f8}
 [data-theme="dark"] .badge.active,[data-theme="catppuccin-mocha"] .badge.active,[data-theme="tokyonight"] .badge.active,[data-theme="solarized-dark"] .badge.active{background:#4a2a2a;color:#f88}
 .meta{color:var(--muted);margin:0.5em 0}
-.setting{background:var(--note-bg);padding:1.5em;border-radius:8px;margin:1em 0;white-space:pre-wrap;line-height:1.6}
+.setting{background:var(--note-bg);padding:1em;border-radius:8px;margin:0.5em 0;white-space:pre-wrap;line-height:1.5;max-height:120px;overflow-y:auto;font-size:0.9em}
 /* Party boxes at top */
-.party-boxes-row{display:flex;flex-wrap:wrap;gap:1em;margin:1.5em 0;padding:1em;background:var(--note-bg);border-radius:8px}
-.party-box{background:var(--bg);padding:0.8em 1.2em;border-radius:8px;border:2px solid var(--border);min-width:120px;text-align:center;position:relative}
-.party-box h4{margin:0 0 0.3em 0;font-size:1em}
-.party-box .class-info{margin:0;font-size:0.85em;color:var(--muted)}
-.party-box .healthy{color:#28a745;margin:0.3em 0 0 0;font-size:0.9em}
-.party-box .wounded{color:#ffc107;margin:0.3em 0 0 0;font-size:0.9em}
-.party-box .critical{color:#dc3545;margin:0.3em 0 0 0;font-size:0.9em}
-.party-box.gm-box{border-color:#6c757d;background:var(--note-bg)}
-.party-box .box-label{font-size:0.7em;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em}
+.party-boxes-row{display:flex;flex-wrap:wrap;gap:0.5em;margin:1em 0;padding:0.5em;background:var(--note-bg);border-radius:8px}
+.party-box{background:var(--bg);padding:0.4em 0.8em;border-radius:6px;border:2px solid var(--border);min-width:auto;text-align:center;position:relative}
+.party-box h4{margin:0 0 0.2em 0;font-size:0.9em}
+.party-box .class-info{margin:0;font-size:0.75em;color:var(--muted)}
+.party-box .healthy{color:#28a745;margin:0.2em 0 0 0;font-size:0.8em}
+.party-box .wounded{color:#ffc107;margin:0.2em 0 0 0;font-size:0.8em}
+.party-box .critical{color:#dc3545;margin:0.2em 0 0 0;font-size:0.8em}
+.party-box.gm-box{border-color:#4a90d9;background:var(--note-bg)}
+.party-box.inactive{border-color:#999;box-shadow:none;opacity:0.7}
+.party-box .box-label{font-size:0.65em;color:var(--muted);text-transform:uppercase;letter-spacing:0.05em}
 /* Current turn highlight */
 .party-box.current-turn{border-color:#ffc107;box-shadow:0 0 12px rgba(255,193,7,0.5)}
 .party-box .turn-label{position:absolute;top:-10px;left:50%%;transform:translateX(-50%%);background:#ffc107;color:#000;font-size:0.7em;padding:0.2em 0.6em;border-radius:4px;font-weight:bold;white-space:nowrap}
@@ -17836,14 +18006,12 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 .feed-item .time{color:var(--muted);font-size:0.8em}
 .feed-item .type{color:var(--muted)}
 .feed-item .result{color:var(--muted);font-style:italic}
-.section{margin:2em 0}
+.section{margin:1em 0}
 </style>
 
 <style>
-.campaign-layout{display:grid;grid-template-columns:1fr 2fr;gap:2em;margin-top:1em}
-.left-column{display:flex;flex-direction:column;gap:1.5em}
-.right-column{max-height:80vh;overflow-y:auto}
-@media(max-width:768px){.campaign-layout{grid-template-columns:1fr}}
+.campaign-sections{margin-top:1em}
+.campaign-sections .section{margin:1em 0}
 </style>
 
 <div class="campaign-header">
@@ -17859,22 +18027,18 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 
 %s
 
-<div class="campaign-layout">
-  <div class="left-column">
-    <div class="section" style="margin:0">
-      <h2>📜 Setting</h2>
-      <div class="setting">%s</div>
-    </div>
-    <div class="section" style="margin:0">
-      <h2>👁️ Observations</h2>
-      %s
-    </div>
+<div class="campaign-sections">
+  <div class="section">
+    <h2>📜 Setting</h2>
+    <div class="setting">%s</div>
   </div>
-  <div class="right-column">
-    <div class="section" style="margin:0">
-      <h2>📋 Activity Feed</h2>
-      %s
-    </div>
+  <div class="section">
+    <h2>👁️ Observations</h2>
+    %s
+  </div>
+  <div class="section">
+    <h2>📋 Activity Feed</h2>
+    %s
   </div>
 </div>
 
