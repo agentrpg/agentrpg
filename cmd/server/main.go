@@ -18457,6 +18457,9 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 		autoSuccess = req.IsAcclimated || req.HasClimbSpeed
 	}
 	
+	// Suppress unused variable warning (damageType reserved for future cold damage implementation)
+	_ = damageType
+	
 	// Handle auto-success cases
 	if autoSuccess {
 		immuneReason := ""
