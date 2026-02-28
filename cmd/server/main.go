@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.45
+// @version 0.8.46
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.45"
+const version = "0.8.46"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -394,6 +394,7 @@ func main() {
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
 	http.HandleFunc("/api/gm/apply-poison", handleGMApplyPoison)
+	http.HandleFunc("/api/gm/apply-disease", handleGMApplyDisease)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -16548,6 +16549,91 @@ var builtinPoisons = map[string]Poison{
 	},
 }
 
+// Disease represents a D&D disease with its effects (v0.8.46)
+type Disease struct {
+	Name        string `json:"name"`
+	DC          int    `json:"dc"`          // CON save DC
+	Condition   string `json:"condition"`   // Condition applied on failure
+	Exhaustion  int    `json:"exhaustion"`  // Exhaustion level gained on failure
+	Effect      string `json:"effect"`      // Description of ongoing effects
+	Recovery    string `json:"recovery"`    // How to recover
+	Incubation  string `json:"incubation"`  // Time before symptoms appear
+	Description string `json:"description"`
+}
+
+// Built-in diseases from DMG and adventures (v0.8.46)
+var builtinDiseases = map[string]Disease{
+	"cackle_fever": {
+		Name:        "Cackle Fever",
+		DC:          13,
+		Exhaustion:  1,
+		Effect:      "Bouts of uncontrollable laughter. Any stressful event (combat, damage, frightening situation) triggers a DC 13 CON save or become incapacitated with laughing for 1 minute.",
+		Recovery:    "After each long rest, DC 13 CON save. Two successes in a row = cured. Each failure = 1 more exhaustion level (max 6).",
+		Incubation:  "1d4 hours",
+		Description: "A disease spread through infected humanoids. Symptoms include high fever and disorientation, followed by frequent bouts of violent laughter.",
+	},
+	"sewer_plague": {
+		Name:        "Sewer Plague",
+		DC:          11,
+		Exhaustion:  1,
+		Effect:      "Fatigue and cramps. Regain only half HP from spending Hit Dice. Regain no HP from long rest.",
+		Recovery:    "After each long rest, DC 11 CON save. Three successes = cured. Each failure = 1 more exhaustion level. At exhaustion 6, death.",
+		Incubation:  "1d4 days",
+		Description: "A disease spread through otyugh bites, filthy water, or infected vermin. Painful cramps and lethargy set in.",
+	},
+	"sight_rot": {
+		Name:        "Sight Rot",
+		DC:          15,
+		Condition:   "blinded",
+		Effect:      "Vision becomes increasingly blurry. -1 penalty to attack rolls and ability checks relying on sight per day, up to -5. At -5, creature is blinded until cured.",
+		Recovery:    "Magic that cures disease (lesser restoration, heal) removes the disease. Truesight ointment (made with eyebright, DC 15 Herbalism kit) slows progression to -1 per week.",
+		Incubation:  "1 day",
+		Description: "A disease contracted from swamp, marsh, or muck. Eyes cloud over and vision fades progressively.",
+	},
+	"bluerot": {
+		Name:        "Bluerot",
+		DC:          12,
+		Condition:   "poisoned",
+		Effect:      "Blue skin discoloration spreads. Disadvantage on Charisma checks and vulnerability to radiant damage while diseased.",
+		Recovery:    "After each long rest, DC 12 CON save. One success = no longer poisoned (but still diseased). Three successes = cured. Each failure resets success count.",
+		Incubation:  "1 day",
+		Description: "An undead-transmitted disease. Blue splotches appear on the skin, and the creature exudes the stench of decay.",
+	},
+	"mindfire": {
+		Name:        "Mindfire",
+		DC:          12,
+		Effect:      "Feverish delirium. Disadvantage on Intelligence checks and Intelligence saving throws. Creature behaves as if under confusion spell during combat.",
+		Recovery:    "After each long rest, DC 12 CON save. Two successes in a row = cured. Each failure = creature takes 1d10 psychic damage.",
+		Incubation:  "2d6 hours",
+		Description: "A disease that affects the mind, causing fever, hallucinations, and mental confusion. Common in deep caverns.",
+	},
+	"filth_fever": {
+		Name:        "Filth Fever",
+		DC:          11,
+		Exhaustion:  1,
+		Effect:      "High fever and chills. Disadvantage on Strength checks and Strength saving throws.",
+		Recovery:    "After each long rest, DC 11 CON save. Two successes = cured. Each failure = 1 more exhaustion level.",
+		Incubation:  "1d4 days",
+		Description: "A bacterial infection common in filthy conditions. Symptoms include high fever, sweating, and muscle weakness.",
+	},
+	"shakes": {
+		Name:        "The Shakes",
+		DC:          13,
+		Effect:      "Uncontrollable trembling. Disadvantage on Dexterity checks, Dexterity saving throws, and attack rolls using Dexterity.",
+		Recovery:    "After each long rest, DC 13 CON save. Two successes = cured. Each failure = tremors worsen, disadvantage extends to all rolls for 24 hours.",
+		Incubation:  "1d4 days",
+		Description: "A degenerative disease affecting the nervous system. Hands and limbs shake uncontrollably.",
+	},
+	"red_ache": {
+		Name:        "Red Ache",
+		DC:          13,
+		Effect:      "Joint pain and skin rash. -1d6 to Strength score until cured (minimum 1).",
+		Recovery:    "After each long rest, DC 13 CON save. Two successes = cured and Strength restored. Each failure = lose 1 more Strength.",
+		Incubation:  "1d3 days",
+		Description: "A disease causing painful inflammation in joints and a distinctive red rash. Strength is progressively sapped.",
+	},
+}
+
 // handleGMApplyPoison godoc
 // @Summary Apply poison to a character
 // @Description Apply poison to a character using built-in poisons or custom poison parameters. The target makes a CON save. On failure, takes damage and/or gains a condition based on the poison type. Supports contact, ingested, inhaled, and injury poisons per DMG rules.
@@ -16918,6 +17004,372 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 		"result":          resultDetails,
 		"message":         message,
 	})
+}
+
+// handleGMApplyDisease godoc
+// @Summary Apply disease to a character (v0.8.46)
+// @Description Apply a disease to a character using built-in diseases or custom disease parameters. The target makes a CON save. On failure, contracts the disease and suffers its effects (conditions, exhaustion, ability penalties). Diseases require recovery saves over multiple long rests.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,disease_name=string,custom_dc=integer,custom_condition=string,custom_exhaustion=integer,custom_effect=string,reason=string} true "Disease application: character_id (required), disease_name (optional, use built-in), or custom_* params"
+// @Success 200 {object} map[string]interface{} "Disease applied"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/apply-disease [post]
+func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	// List available diseases if GET with ?list=true
+	if r.Method == "GET" && r.URL.Query().Get("list") == "true" {
+		diseaseList := []map[string]interface{}{}
+		for key, d := range builtinDiseases {
+			diseaseList = append(diseaseList, map[string]interface{}{
+				"key":         key,
+				"name":        d.Name,
+				"dc":          d.DC,
+				"condition":   d.Condition,
+				"exhaustion":  d.Exhaustion,
+				"effect":      d.Effect,
+				"recovery":    d.Recovery,
+				"incubation":  d.Incubation,
+				"description": d.Description,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"diseases": diseaseList,
+		})
+		return
+	}
+
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		CharacterID      int    `json:"character_id"`
+		DiseaseName      string `json:"disease_name"`      // Built-in disease key
+		CustomDC         int    `json:"custom_dc"`         // Custom disease DC
+		CustomCondition  string `json:"custom_condition"`  // Custom condition to apply
+		CustomExhaustion int    `json:"custom_exhaustion"` // Custom exhaustion level
+		CustomEffect     string `json:"custom_effect"`     // Custom effect description
+		CustomRecovery   string `json:"custom_recovery"`   // Custom recovery rules
+		Reason           string `json:"reason"`            // Flavor text for the log
+		SkipSave         bool   `json:"skip_save"`         // Skip the initial save (auto-infect)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		keys := []string{}
+		for k := range builtinDiseases {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":              "invalid_request",
+			"message":            "character_id required",
+			"available_diseases": keys,
+		})
+		return
+	}
+
+	// Determine disease to use
+	var disease Disease
+	var diseaseSource string
+
+	if req.DiseaseName != "" {
+		if d, ok := builtinDiseases[req.DiseaseName]; ok {
+			disease = d
+			diseaseSource = "builtin"
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			keys := []string{}
+			for k := range builtinDiseases {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":              "unknown_disease",
+				"message":            fmt.Sprintf("Unknown disease: %s", req.DiseaseName),
+				"available_diseases": keys,
+			})
+			return
+		}
+	} else if req.CustomDC > 0 {
+		// Custom disease
+		disease = Disease{
+			Name:       "Custom Disease",
+			DC:         req.CustomDC,
+			Condition:  req.CustomCondition,
+			Exhaustion: req.CustomExhaustion,
+			Effect:     req.CustomEffect,
+			Recovery:   req.CustomRecovery,
+		}
+		diseaseSource = "custom"
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		keys := []string{}
+		for k := range builtinDiseases {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":              "no_disease_specified",
+			"message":            "Specify disease_name (built-in) or custom_dc (custom disease)",
+			"available_diseases": keys,
+		})
+		return
+	}
+
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+
+	// Get character info for the save
+	var charName string
+	var con, currentHP, maxHP, exhaustionLevel int
+	var conditionsStr string
+	err = db.QueryRow(`
+		SELECT name, con, hp, max_hp, COALESCE(conditions, ''), COALESCE(exhaustion_level, 0)
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &con, &currentHP, &maxHP, &conditionsStr, &exhaustionLevel)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+
+	conMod := modifier(con)
+
+	// Check if character is already diseased with this disease
+	condList := strings.Split(conditionsStr, ",")
+	diseaseKey := strings.ToLower(strings.ReplaceAll(disease.Name, " ", "_"))
+	diseaseCondition := fmt.Sprintf("disease:%s", diseaseKey)
+	
+	for _, c := range condList {
+		c = strings.TrimSpace(strings.ToLower(c))
+		if c == diseaseCondition {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":       true,
+				"already_sick":  true,
+				"character":     charName,
+				"character_id":  req.CharacterID,
+				"disease":       disease.Name,
+				"message":       fmt.Sprintf("🦠 %s is already afflicted with %s!", charName, disease.Name),
+			})
+			return
+		}
+		// Check for disease immunity (e.g., paladins at high level)
+		if c == "immunity:disease" || c == "immune:disease" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      true,
+				"immune":       true,
+				"character":    charName,
+				"character_id": req.CharacterID,
+				"disease":      disease.Name,
+				"message":      fmt.Sprintf("🛡️ %s is immune to disease! The %s has no effect.", charName, disease.Name),
+			})
+			return
+		}
+	}
+
+	// Roll the CON save (unless skipped)
+	saved := false
+	saveRoll := 0
+	saveTotal := 0
+	
+	if !req.SkipSave {
+		saveRoll = rollDie(20)
+		saveTotal = saveRoll + conMod
+
+		// Check for advantage/disadvantage on saves
+		saveDisadvantage := false
+		for _, c := range condList {
+			c = strings.TrimSpace(strings.ToLower(c))
+			if strings.HasPrefix(c, "exhaustion:") {
+				level, _ := strconv.Atoi(strings.TrimPrefix(c, "exhaustion:"))
+				if level >= 3 {
+					saveDisadvantage = true
+				}
+			}
+		}
+
+		if saveDisadvantage {
+			roll2 := rollDie(20)
+			if roll2 < saveRoll {
+				saveRoll = roll2
+			}
+			saveTotal = saveRoll + conMod
+		}
+
+		saved = saveTotal >= disease.DC
+	}
+
+	// Apply effects if infected
+	resultDetails := map[string]interface{}{}
+	conditionApplied := ""
+	newExhaustion := exhaustionLevel
+
+	if !saved {
+		// Add disease tracking condition
+		newConditions := []string{}
+		for _, c := range condList {
+			c = strings.TrimSpace(c)
+			if c != "" {
+				newConditions = append(newConditions, c)
+			}
+		}
+		newConditions = append(newConditions, diseaseCondition)
+		resultDetails["disease_contracted"] = disease.Name
+		resultDetails["disease_condition"] = diseaseCondition
+
+		// Apply condition if specified
+		if disease.Condition != "" {
+			conditionApplied = disease.Condition
+			newConditions = append(newConditions, conditionApplied)
+			resultDetails["condition_applied"] = conditionApplied
+		}
+
+		// Apply exhaustion if specified
+		if disease.Exhaustion > 0 {
+			newExhaustion = exhaustionLevel + disease.Exhaustion
+			if newExhaustion > 6 {
+				newExhaustion = 6
+			}
+			resultDetails["exhaustion_gained"] = disease.Exhaustion
+			resultDetails["exhaustion_level"] = newExhaustion
+			
+			// Update or add exhaustion condition
+			updatedConditions := []string{}
+			foundExhaustion := false
+			for _, c := range newConditions {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c)), "exhaustion:") {
+					// Update existing exhaustion
+					updatedConditions = append(updatedConditions, fmt.Sprintf("exhaustion:%d", newExhaustion))
+					foundExhaustion = true
+				} else {
+					updatedConditions = append(updatedConditions, c)
+				}
+			}
+			if !foundExhaustion {
+				updatedConditions = append(updatedConditions, fmt.Sprintf("exhaustion:%d", newExhaustion))
+			}
+			newConditions = updatedConditions
+		}
+
+		// Save conditions to database
+		db.Exec("UPDATE characters SET conditions = $1, exhaustion_level = $2 WHERE id = $3",
+			strings.Join(newConditions, ", "), newExhaustion, req.CharacterID)
+
+		resultDetails["effects"] = disease.Effect
+		resultDetails["recovery"] = disease.Recovery
+		if disease.Incubation != "" {
+			resultDetails["incubation"] = disease.Incubation
+		}
+	}
+
+	// Build result message
+	var message string
+	if req.SkipSave {
+		// Auto-infected (e.g., from a curse or guaranteed infection)
+		message = fmt.Sprintf("🦠 %s has contracted %s! %s", charName, disease.Name, disease.Effect)
+		if disease.Exhaustion > 0 {
+			message += fmt.Sprintf(" Gains %d exhaustion level(s).", disease.Exhaustion)
+		}
+		if conditionApplied != "" {
+			message += fmt.Sprintf(" Gains %s condition.", conditionApplied)
+		}
+	} else if saved {
+		message = fmt.Sprintf("✅ %s resists the %s! CON save %d (roll: %d + %d mod) vs DC %d.",
+			charName, disease.Name, saveTotal, saveRoll, conMod, disease.DC)
+	} else {
+		message = fmt.Sprintf("🦠 %s contracts %s! CON save %d (roll: %d + %d mod) vs DC %d. %s",
+			charName, disease.Name, saveTotal, saveRoll, conMod, disease.DC, disease.Effect)
+		if disease.Exhaustion > 0 {
+			message += fmt.Sprintf(" Gains %d exhaustion level(s) (now at %d).", disease.Exhaustion, newExhaustion)
+		}
+		if conditionApplied != "" {
+			message += fmt.Sprintf(" Gains %s condition.", conditionApplied)
+		}
+	}
+
+	// Log the action
+	reason := req.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("exposed to %s", disease.Name)
+	}
+
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "disease",
+		fmt.Sprintf("%s %s", charName, reason),
+		message)
+
+	// Build response
+	response := map[string]interface{}{
+		"success":        true,
+		"character":      charName,
+		"character_id":   req.CharacterID,
+		"disease":        disease.Name,
+		"disease_source": diseaseSource,
+		"dc":             disease.DC,
+		"contracted":     !saved,
+		"result":         resultDetails,
+		"message":        message,
+	}
+	
+	if !req.SkipSave {
+		response["save_roll"] = saveRoll
+		response["save_modifier"] = conMod
+		response["save_total"] = saveTotal
+		response["saved"] = saved
+	} else {
+		response["save_skipped"] = true
+	}
+	
+	// Include recovery info for contracted diseases
+	if !saved && disease.Recovery != "" {
+		response["recovery_rules"] = disease.Recovery
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleObserve godoc

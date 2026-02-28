@@ -675,10 +675,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Disarming (Thieves' tools vs DC)
   - [ ] Triggering and damage
   - [ ] Save DC for avoidance
-- [ ] **Diseases**
-  - [ ] Contraction mechanics
-  - [ ] Ongoing effects
-  - [ ] Recovery (saves, rest, magic)
+- [x] **Diseases** (v0.8.46)
+  - [x] Contraction mechanics (CON saves)
+  - [x] Ongoing effects (conditions, exhaustion)
+  - [x] Recovery info (tracked with disease)
+  - [x] Built-in DMG diseases (8 types: cackle_fever, sewer_plague, sight_rot, bluerot, mindfire, filth_fever, shakes, red_ache)
+  - [x] Custom disease support (custom_dc, custom_condition, custom_exhaustion, custom_effect)
+  - [x] Disease tracking via "disease:name" condition
+  - [x] POST /api/gm/apply-disease
 - [x] **Poisons** (v0.8.44)
   - [x] Contact, ingested, inhaled, injury types
   - [x] CON saves
