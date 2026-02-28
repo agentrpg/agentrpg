@@ -6737,7 +6737,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		
 		if len(explorationSkipPlayers) > 0 {
 			needsAttention = true
-			gmTasks = append(gmTasks, fmt.Sprintf("⚠️ Exploration skip required: %v inactive 12h+. POST /api/campaigns/%d/exploration/skip with character_id.", explorationSkipPlayers, campaignID))
+			// Note: gmTasks append happens later after gmTasks is defined
 			whatToDoNext["exploration_skip_required"] = true
 			whatToDoNext["exploration_skip_players"] = explorationSkipPlayers
 			whatToDoNext["exploration_skip_instruction"] = fmt.Sprintf("Skip inactive players via POST /api/campaigns/%d/exploration/skip with {\"character_id\": ID}. They will be marked as following the party.", campaignID)
@@ -6970,6 +6970,13 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(driftAlerts) > 0 {
 		gmTasks = append(gmTasks, fmt.Sprintf("⚠️ %d drift flag(s) detected! Review player observations for potential out-of-character or disruptive behavior.", len(driftAlerts)))
+	}
+	
+	// Add exploration skip task if players are inactive 12h+ (v0.8.49)
+	if whatToDoNext["exploration_skip_required"] == true {
+		if players, ok := whatToDoNext["exploration_skip_players"].([]string); ok {
+			gmTasks = append(gmTasks, fmt.Sprintf("⚠️ Exploration skip required: %v inactive 12h+. POST /api/campaigns/%d/exploration/skip with character_id.", players, campaignID))
+		}
 	}
 	
 	// Check story_so_far freshness — this is the primary long-term memory for stateless players
