@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.46"
+const version = "0.8.47"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -6520,23 +6520,31 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	// Get party status
+	// Get party status with last action time per character
 	rows, _ := db.Query(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
-			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, '')
+			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, ''),
+			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type NOT IN ('poll', 'joined')) as last_action_at
 		FROM characters c
 		WHERE c.lobby_id = $1
 	`, campaignID)
 	defer rows.Close()
 	
 	partyStatus := []map[string]interface{}{}
+	playerActivity := []map[string]interface{}{}
 	var waitingFor *string
+	
+	// Track who needs auto-advance
+	mustAdvance := false
+	var mustAdvanceReason string
+	var mustAdvancePlayers []string
 	
 	for rows.Next() {
 		var id, level, hp, maxHP, ac int
 		var name, class, race, concentrating string
 		var conditionsJSON []byte
-		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating)
+		var lastActionAt sql.NullTime
+		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &lastActionAt)
 		
 		var conditions []string
 		json.Unmarshal(conditionsJSON, &conditions)
@@ -6565,6 +6573,39 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			charInfo["concentrating_on"] = concentrating
 		}
 		partyStatus = append(partyStatus, charInfo)
+		
+		// Track player activity for auto-advance logic
+		activityInfo := map[string]interface{}{
+			"name": name,
+			"id":   id,
+		}
+		if lastActionAt.Valid {
+			inactiveHours := time.Since(lastActionAt.Time).Hours()
+			activityInfo["last_action_at"] = lastActionAt.Time.Format(time.RFC3339)
+			activityInfo["inactive_hours"] = int(inactiveHours)
+			
+			if inactiveHours >= 4 {
+				activityInfo["inactive_status"] = "overdue"
+			}
+			if inactiveHours >= 12 {
+				activityInfo["inactive_status"] = "stale"
+			}
+			if inactiveHours >= 24 {
+				activityInfo["inactive_status"] = "abandoned"
+				mustAdvancePlayers = append(mustAdvancePlayers, name)
+			}
+		} else {
+			activityInfo["last_action_at"] = nil
+			activityInfo["inactive_hours"] = -1
+			activityInfo["inactive_status"] = "never_acted"
+		}
+		playerActivity = append(playerActivity, activityInfo)
+	}
+	
+	// Set must_advance if any player exceeds 24h threshold
+	if len(mustAdvancePlayers) > 0 {
+		mustAdvance = true
+		mustAdvanceReason = fmt.Sprintf("MUST ADVANCE: %v inactive 24h+. Story cannot wait. Skip or default their actions and move forward.", mustAdvancePlayers)
 	}
 	
 	// Determine what GM needs to do
@@ -6898,8 +6939,17 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			"status":  campaignStatus,
 			"setting": campaignSetting.String,
 		},
-		"party_status":  partyStatus,
+		"party_status":    partyStatus,
+		"player_activity": playerActivity,
 		"what_to_do_next": whatToDoNext,
+	}
+	
+	// Add must_advance flag (v0.8.47 - autonomous GM)
+	if mustAdvance {
+		response["must_advance"] = true
+		response["must_advance_reason"] = mustAdvanceReason
+		needsAttention = true
+		gmTasks = append(gmTasks, "🚨 "+mustAdvanceReason)
 	}
 	
 	if waitingFor != nil {
