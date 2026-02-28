@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.65"
+const version = "0.8.66"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -432,6 +432,8 @@ func main() {
 	http.HandleFunc("/api/universe/consumables", handleUniverseConsumables)
 	http.HandleFunc("/api/universe/backgrounds", handleUniverseBackgrounds)
 	http.HandleFunc("/api/universe/backgrounds/", handleUniverseBackground)
+	http.HandleFunc("/api/universe/feats", handleUniverseFeats)
+	http.HandleFunc("/api/universe/feats/", handleUniverseFeat)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
 	http.HandleFunc("/api/", handleAPIRoot)
@@ -842,6 +844,9 @@ func initDB() {
 		-- Independent: Mount rolls own initiative, acts on its own turn
 		-- Intelligent creatures (INT >= 6) are typically independent
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mount_is_controlled BOOLEAN DEFAULT TRUE;
+		-- Feats: array of feat slugs the character has taken
+		-- Each feat costs 2 ASI points (one "ASI slot")
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS feats JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -5904,6 +5909,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		case "spells":
 			handleCharacterSpells(w, r, charID)
 			return
+		case "feat":
+			handleCharacterFeat(w, r, charID)
+			return
 		}
 	}
 	
@@ -5912,7 +5920,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
 	var hitDiceSpent, exhaustionLevel int
 	var isStable, isDead, hasInspiration bool
-	var conditionsJSON, slotsUsedJSON, knownSpellsJSON []byte
+	var conditionsJSON, slotsUsedJSON, knownSpellsJSON, featsJSON []byte
 	var concentratingOn string
 	var gold, copper, silver, electrum, platinum int
 	var inventoryJSON []byte
@@ -5943,7 +5951,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(expertise, ''), COALESCE(language_proficiencies, ''),
 			equipped_armor, COALESCE(equipped_shield, false),
 			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0),
-			COALESCE(known_spells, '[]')
+			COALESCE(known_spells, '[]'), COALESCE(feats, '[]')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
@@ -5952,7 +5960,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
-		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON)
+		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON, &featsJSON)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -6116,7 +6124,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	// Add ASI prompt if they have points to spend
 	if pendingASI > 0 {
 		response["asi_available"] = true
-		response["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi with {\"ability\": \"str|dex|con|int|wis|cha\", \"points\": 1-2}", pendingASI, charID)
+		response["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi with {\"ability\": \"str|dex|con|int|wis|cha\", \"points\": 1-2} OR take a feat (costs 2 points): POST /api/characters/%d/feat with {\"feat\": \"slug\"}", pendingASI, charID, charID)
+		response["feat_option"] = fmt.Sprintf("Instead of ability increases, you can take a feat for 2 ASI points. GET /api/characters/%d/feat for available feats.", charID)
 	}
 	
 	// Add exhaustion effects if exhausted
@@ -6247,6 +6256,29 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 		response["known_spells"] = knownSpellsInfo
 		response["known_spells_tip"] = "Use PUT /api/characters/{id}/spells to update your known spells list."
+	}
+	
+	// Feats
+	var characterFeats []string
+	json.Unmarshal(featsJSON, &characterFeats)
+	if len(characterFeats) > 0 {
+		featsInfo := []map[string]interface{}{}
+		for _, slug := range characterFeats {
+			if feat, ok := availableFeats[slug]; ok {
+				featsInfo = append(featsInfo, map[string]interface{}{
+					"slug":     slug,
+					"name":     feat.Name,
+					"benefits": feat.Benefits,
+					"features": feat.Features,
+				})
+			} else {
+				featsInfo = append(featsInfo, map[string]interface{}{
+					"slug": slug,
+					"name": slug,
+				})
+			}
+		}
+		response["feats"] = featsInfo
 	}
 	
 	// Concentration
@@ -6598,7 +6630,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	// Add ASI notification if points available
 	if pendingASI > 0 {
 		characterInfo["asi_available"] = true
-		characterInfo["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi", pendingASI, charID)
+		characterInfo["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi OR take a feat (costs 2 points): POST /api/characters/%d/feat", pendingASI, charID, charID)
+		characterInfo["feat_option"] = fmt.Sprintf("GET /api/characters/%d/feat for available feats", charID)
 	}
 	
 	// Add concentration if active
@@ -6667,6 +6700,25 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		characterInfo["known_spells"] = spellsAvailable
+	}
+	
+	// Add feats (v0.8.66)
+	var featsJSONMyTurn []byte
+	db.QueryRow("SELECT COALESCE(feats, '[]') FROM characters WHERE id = $1", charID).Scan(&featsJSONMyTurn)
+	var charFeats []string
+	json.Unmarshal(featsJSONMyTurn, &charFeats)
+	if len(charFeats) > 0 {
+		featsInfo := []map[string]interface{}{}
+		for _, slug := range charFeats {
+			if feat, ok := availableFeats[slug]; ok {
+				featsInfo = append(featsInfo, map[string]interface{}{
+					"slug":     slug,
+					"name":     feat.Name,
+					"features": feat.Features,
+				})
+			}
+		}
+		characterInfo["feats"] = featsInfo
 	}
 	
 	// Reaction status
@@ -19441,6 +19493,153 @@ var builtinTraps = map[string]Trap{
 	},
 }
 
+// Feat represents a character feat from the SRD/PHB
+type Feat struct {
+	Name         string            `json:"name"`
+	Description  string            `json:"description"`
+	Prerequisite string            `json:"prerequisite,omitempty"` // e.g., "str:13" or "spellcaster" or ""
+	Benefits     []string          `json:"benefits"`
+	AbilityBonus map[string]int    `json:"ability_bonus,omitempty"` // e.g., {"str": 1}
+	Features     map[string]string `json:"features,omitempty"`      // Special features to track
+}
+
+// Available feats - SRD only has Grappler, but we include common ones for gameplay
+var availableFeats = map[string]Feat{
+	"grappler": {
+		Name:         "Grappler",
+		Description:  "You've developed the skills necessary to hold your own in close-quarters grappling.",
+		Prerequisite: "str:13",
+		Benefits: []string{
+			"You have advantage on attack rolls against a creature you are grappling",
+			"You can use your action to try to pin a creature grappled by you. Make another grapple check. If you succeed, you and the creature are both restrained until the grapple ends",
+		},
+		Features: map[string]string{
+			"grapple_advantage": "true",
+			"can_pin":           "true",
+		},
+	},
+	"alert": {
+		Name:        "Alert",
+		Description: "Always on the lookout for danger, you gain the following benefits.",
+		Benefits: []string{
+			"You gain a +5 bonus to initiative",
+			"You can't be surprised while you are conscious",
+			"Other creatures don't gain advantage on attack rolls against you as a result of being unseen by you",
+		},
+		Features: map[string]string{
+			"initiative_bonus":   "5",
+			"immune_to_surprise": "true",
+		},
+	},
+	"lucky": {
+		Name:        "Lucky",
+		Description: "You have inexplicable luck that seems to kick in at just the right moment.",
+		Benefits: []string{
+			"You have 3 luck points. Whenever you make an attack roll, ability check, or saving throw, you can spend one luck point to roll an additional d20",
+			"You can also spend one luck point when an attack roll is made against you to roll a d20 and choose whether to use your roll or the attacker's",
+			"You regain all luck points after a long rest",
+		},
+		Features: map[string]string{
+			"luck_points":     "3",
+			"luck_points_max": "3",
+		},
+	},
+	"tough": {
+		Name:        "Tough",
+		Description: "Your hit point maximum increases.",
+		Benefits: []string{
+			"Your hit point maximum increases by an amount equal to twice your level when you gain this feat",
+			"Whenever you gain a level thereafter, your hit point maximum increases by an additional 2 hit points",
+		},
+		Features: map[string]string{
+			"hp_bonus_per_level": "2",
+		},
+	},
+	"sentinel": {
+		Name:        "Sentinel",
+		Description: "You have mastered techniques to take advantage of every drop in any enemy's guard.",
+		Benefits: []string{
+			"When you hit a creature with an opportunity attack, the creature's speed becomes 0 for the rest of the turn",
+			"Creatures provoke opportunity attacks from you even if they take the Disengage action",
+			"When a creature within 5 feet of you makes an attack against a target other than you, you can use your reaction to make a melee weapon attack against the attacking creature",
+		},
+		Features: map[string]string{
+			"opportunity_stops_movement": "true",
+			"ignore_disengage":           "true",
+			"protect_allies_reaction":    "true",
+		},
+	},
+	"war_caster": {
+		Name:         "War Caster",
+		Description:  "You have practiced casting spells in the midst of combat.",
+		Prerequisite: "spellcaster",
+		Benefits: []string{
+			"You have advantage on Constitution saving throws that you make to maintain concentration on a spell when you take damage",
+			"You can perform the somatic components of spells even when you have weapons or a shield in one or both hands",
+			"When a hostile creature's movement provokes an opportunity attack from you, you can use your reaction to cast a spell at the creature rather than making an opportunity attack",
+		},
+		Features: map[string]string{
+			"concentration_advantage": "true",
+			"somatic_with_hands_full": "true",
+			"spell_opportunity":       "true",
+		},
+	},
+	"mobile": {
+		Name:        "Mobile",
+		Description: "You are exceptionally speedy and agile.",
+		Benefits: []string{
+			"Your speed increases by 10 feet",
+			"When you use the Dash action, difficult terrain doesn't cost you extra movement",
+			"When you make a melee attack against a creature, you don't provoke opportunity attacks from that creature for the rest of the turn, whether you hit or not",
+		},
+		Features: map[string]string{
+			"speed_bonus":           "10",
+			"ignore_difficult_dash": "true",
+			"no_opportunity_melee":  "true",
+		},
+	},
+	"observant": {
+		Name:        "Observant",
+		Description: "Quick to notice details of your environment, you gain the following benefits.",
+		AbilityBonus: map[string]int{
+			"int_or_wis": 1, // Player chooses INT or WIS
+		},
+		Benefits: []string{
+			"Increase your Intelligence or Wisdom by 1, to a maximum of 20",
+			"If you can see a creature's mouth while it is speaking a language you understand, you can interpret what it's saying by reading its lips",
+			"You have a +5 bonus to your passive Wisdom (Perception) and passive Intelligence (Investigation) scores",
+		},
+		Features: map[string]string{
+			"passive_bonus": "5",
+			"read_lips":     "true",
+		},
+	},
+	"resilient": {
+		Name:        "Resilient",
+		Description: "Choose one ability score. You gain proficiency in saving throws using that ability.",
+		AbilityBonus: map[string]int{
+			"chosen": 1, // Player chooses which ability
+		},
+		Benefits: []string{
+			"Increase the chosen ability score by 1, to a maximum of 20",
+			"You gain proficiency in saving throws using the chosen ability",
+		},
+		Features: map[string]string{
+			"save_proficiency": "chosen", // Stored as actual ability when taken
+		},
+	},
+	"savage_attacker": {
+		Name:        "Savage Attacker",
+		Description: "Once per turn when you roll damage for a melee weapon attack, you can reroll the weapon's damage dice and use either total.",
+		Benefits: []string{
+			"Once per turn when you roll damage for a melee weapon attack, you can reroll the weapon's damage dice and use either total",
+		},
+		Features: map[string]string{
+			"reroll_melee_damage": "true",
+		},
+	},
+}
+
 // handleGMApplyPoison godoc
 // @Summary Apply poison to a character
 // @Description Apply poison to a character using built-in poisons or custom poison parameters. The target makes a CON save. On failure, takes damage and/or gains a condition based on the poison type. Supports contact, ingested, inhaled, and injury poisons per DMG rules.
@@ -23672,6 +23871,285 @@ func handleCharacterASI(w http.ResponseWriter, r *http.Request, charID int) {
 	})
 }
 
+// handleCharacterFeat godoc
+// @Summary Take a feat instead of ASI
+// @Description Spend 2 ASI points to gain a feat. Each feat can only be taken once. Some feats have prerequisites (ability scores, spellcasting, etc.).
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param id path int true "Character ID"
+// @Param request body object{feat=string,ability_choice=string} true "Feat selection - feat slug required, ability_choice for feats like Resilient/Observant"
+// @Success 200 {object} map[string]interface{} "Feat gained"
+// @Failure 400 {object} map[string]interface{} "Invalid request or prerequisite not met"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not your character"
+// @Router /characters/{id}/feat [post]
+func handleCharacterFeat(w http.ResponseWriter, r *http.Request, charID int) {
+	if r.Method == "GET" {
+		// List available feats
+		w.Header().Set("Content-Type", "application/json")
+		featList := []map[string]interface{}{}
+		for slug, feat := range availableFeats {
+			featList = append(featList, map[string]interface{}{
+				"slug":         slug,
+				"name":         feat.Name,
+				"description":  feat.Description,
+				"prerequisite": feat.Prerequisite,
+				"benefits":     feat.Benefits,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"available_feats": featList,
+			"cost":            "2 ASI points (one ASI slot)",
+			"how_to_take":     "POST /api/characters/{id}/feat with {\"feat\": \"slug\"}",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "GET or POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get character data
+	var ownerID, pendingASI, level int
+	var str, dex, con, intl, wis, cha, maxHP int
+	var class string
+	var featsJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, COALESCE(pending_asi, 0), level, str, dex, con, intl, wis, cha, 
+		       class, max_hp, COALESCE(feats, '[]')
+		FROM characters WHERE id = $1
+	`, charID).Scan(&ownerID, &pendingASI, &level, &str, &dex, &con, &intl, &wis, &cha, &class, &maxHP, &featsJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	// Feats cost 2 ASI points (one full ASI slot)
+	if pendingASI < 2 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_asi",
+			"message": fmt.Sprintf("Taking a feat costs 2 ASI points. You have %d.", pendingASI),
+		})
+		return
+	}
+	
+	var req struct {
+		Feat          string `json:"feat"`
+		AbilityChoice string `json:"ability_choice"` // For feats like Resilient, Observant
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	featSlug := strings.ToLower(strings.TrimSpace(req.Feat))
+	feat, exists := availableFeats[featSlug]
+	if !exists {
+		featSlugs := []string{}
+		for slug := range availableFeats {
+			featSlugs = append(featSlugs, slug)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "unknown_feat",
+			"message":         fmt.Sprintf("Unknown feat: %s", req.Feat),
+			"available_feats": featSlugs,
+		})
+		return
+	}
+	
+	// Check if already has this feat
+	var currentFeats []string
+	json.Unmarshal(featsJSON, &currentFeats)
+	for _, f := range currentFeats {
+		if f == featSlug {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_has_feat",
+				"message": fmt.Sprintf("You already have the %s feat.", feat.Name),
+			})
+			return
+		}
+	}
+	
+	// Check prerequisites
+	if feat.Prerequisite != "" {
+		prereqMet := true
+		prereqMsg := ""
+		
+		if strings.HasPrefix(feat.Prerequisite, "str:") {
+			reqVal, _ := strconv.Atoi(strings.TrimPrefix(feat.Prerequisite, "str:"))
+			if str < reqVal {
+				prereqMet = false
+				prereqMsg = fmt.Sprintf("Requires Strength %d (you have %d)", reqVal, str)
+			}
+		} else if strings.HasPrefix(feat.Prerequisite, "dex:") {
+			reqVal, _ := strconv.Atoi(strings.TrimPrefix(feat.Prerequisite, "dex:"))
+			if dex < reqVal {
+				prereqMet = false
+				prereqMsg = fmt.Sprintf("Requires Dexterity %d (you have %d)", reqVal, dex)
+			}
+		} else if feat.Prerequisite == "spellcaster" {
+			// Check if class can cast spells
+			spellcasterClasses := map[string]bool{
+				"bard": true, "cleric": true, "druid": true, "paladin": true,
+				"ranger": true, "sorcerer": true, "warlock": true, "wizard": true,
+			}
+			if !spellcasterClasses[strings.ToLower(class)] {
+				prereqMet = false
+				prereqMsg = "Requires the ability to cast at least one spell"
+			}
+		}
+		
+		if !prereqMet {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":        "prerequisite_not_met",
+				"prerequisite": feat.Prerequisite,
+				"message":      prereqMsg,
+			})
+			return
+		}
+	}
+	
+	// Handle ability choice for feats like Resilient or Observant
+	abilityChoice := strings.ToLower(strings.TrimSpace(req.AbilityChoice))
+	if feat.AbilityBonus != nil {
+		if _, hasChosen := feat.AbilityBonus["chosen"]; hasChosen {
+			if abilityChoice == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "ability_choice_required",
+					"message": "This feat requires you to choose an ability score. Include 'ability_choice' in your request (str, dex, con, int, wis, or cha).",
+				})
+				return
+			}
+		}
+		if _, hasIntOrWis := feat.AbilityBonus["int_or_wis"]; hasIntOrWis {
+			if abilityChoice == "" {
+				abilityChoice = "wis" // Default to WIS for Observant
+			}
+			if abilityChoice != "int" && abilityChoice != "wis" {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "invalid_ability_choice",
+					"message": "For this feat, ability_choice must be 'int' or 'wis'.",
+				})
+				return
+			}
+		}
+	}
+	
+	// Apply the feat
+	currentFeats = append(currentFeats, featSlug)
+	featsBytes, _ := json.Marshal(currentFeats)
+	
+	// Start building the update query
+	updates := []string{"feats = $1", "pending_asi = pending_asi - 2"}
+	args := []interface{}{featsBytes}
+	argIndex := 2
+	
+	// Apply ability bonuses
+	abilityIncreased := ""
+	if feat.AbilityBonus != nil {
+		for ability, bonus := range feat.AbilityBonus {
+			targetAbility := ability
+			if ability == "chosen" || ability == "int_or_wis" {
+				targetAbility = abilityChoice
+			}
+			
+			// Map to column name
+			var column string
+			var currentVal int
+			switch targetAbility {
+			case "str":
+				column = "str"
+				currentVal = str
+			case "dex":
+				column = "dex"
+				currentVal = dex
+			case "con":
+				column = "con"
+				currentVal = con
+			case "int":
+				column = "intl"
+				currentVal = intl
+			case "wis":
+				column = "wis"
+				currentVal = wis
+			case "cha":
+				column = "cha"
+				currentVal = cha
+			default:
+				continue
+			}
+			
+			newVal := currentVal + bonus
+			if newVal > 20 {
+				newVal = 20
+			}
+			updates = append(updates, fmt.Sprintf("%s = $%d", column, argIndex))
+			args = append(args, newVal)
+			argIndex++
+			abilityIncreased = fmt.Sprintf("%s increased by %d (now %d)", strings.ToUpper(targetAbility), bonus, newVal)
+		}
+	}
+	
+	// Apply Tough feat HP bonus
+	if featSlug == "tough" {
+		hpBonus := level * 2
+		updates = append(updates, fmt.Sprintf("max_hp = max_hp + $%d", argIndex))
+		updates = append(updates, fmt.Sprintf("hp = hp + $%d", argIndex))
+		args = append(args, hpBonus)
+		argIndex++
+	}
+	
+	// Add character ID as final arg
+	args = append(args, charID)
+	query := fmt.Sprintf("UPDATE characters SET %s WHERE id = $%d", strings.Join(updates, ", "), argIndex)
+	
+	_, err = db.Exec(query, args...)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "details": err.Error()})
+		return
+	}
+	
+	response := map[string]interface{}{
+		"success":       true,
+		"feat":          feat.Name,
+		"feat_slug":     featSlug,
+		"description":   feat.Description,
+		"benefits":      feat.Benefits,
+		"points_spent":  2,
+		"remaining_asi": pendingASI - 2,
+		"message":       fmt.Sprintf("You gained the %s feat!", feat.Name),
+	}
+	
+	if abilityIncreased != "" {
+		response["ability_bonus"] = abilityIncreased
+	}
+	
+	if featSlug == "tough" {
+		response["hp_bonus"] = level * 2
+		response["message"] = fmt.Sprintf("You gained the %s feat! Max HP increased by %d.", feat.Name, level*2)
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleCharacterSpells godoc
 // @Summary Manage character's known spells
 // @Description GET: View known spells. PUT: Update known spells list. Spell slugs are validated against SRD.
@@ -25834,6 +26312,7 @@ func handleUniverseIndex(w http.ResponseWriter, r *http.Request) {
 			"armor":       "/api/universe/armor",
 			"magic-items": "/api/universe/magic-items",
 			"backgrounds": "/api/universe/backgrounds",
+			"feats":       "/api/universe/feats",
 		},
 	})
 }
@@ -26306,6 +26785,77 @@ func handleUniverseBackground(w http.ResponseWriter, r *http.Request) {
 		"feature":            bg.Feature,
 		"feature_description": bg.FeatureDesc,
 		"gold":               bg.Gold,
+	})
+}
+
+// handleUniverseFeats godoc
+// @Summary List all available feats
+// @Description Returns list of feats that can be taken instead of ASI points. Each feat costs 2 ASI points.
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of feats"
+// @Router /universe/feats [get]
+func handleUniverseFeats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	featList := []map[string]interface{}{}
+	for slug, feat := range availableFeats {
+		featList = append(featList, map[string]interface{}{
+			"slug":         slug,
+			"name":         feat.Name,
+			"prerequisite": feat.Prerequisite,
+			"description":  feat.Description,
+		})
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"feats":       featList,
+		"count":       len(featList),
+		"cost":        "2 ASI points (one full ASI slot)",
+		"how_to_take": "POST /api/characters/{id}/feat with {\"feat\": \"slug\"}",
+		"note":        "Feats are alternatives to ability score improvements at levels 4, 8, 12, 16, and 19.",
+	})
+}
+
+// handleUniverseFeat godoc
+// @Summary Get feat details
+// @Description Returns full feat information including prerequisites, benefits, and features
+// @Tags Universe
+// @Produce json
+// @Param slug path string true "Feat slug (e.g., grappler, alert, lucky)"
+// @Success 200 {object} map[string]interface{} "Feat details"
+// @Failure 404 {object} map[string]interface{} "Feat not found"
+// @Router /universe/feats/{slug} [get]
+func handleUniverseFeat(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	slug := strings.TrimPrefix(r.URL.Path, "/api/universe/feats/")
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	
+	feat, ok := availableFeats[slug]
+	if !ok {
+		// List available feats
+		featSlugs := []string{}
+		for s := range availableFeats {
+			featSlugs = append(featSlugs, s)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "feat_not_found",
+			"message":         fmt.Sprintf("Feat '%s' not found", slug),
+			"available_feats": featSlugs,
+		})
+		return
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"slug":          slug,
+		"name":          feat.Name,
+		"description":   feat.Description,
+		"prerequisite":  feat.Prerequisite,
+		"benefits":      feat.Benefits,
+		"ability_bonus": feat.AbilityBonus,
+		"features":      feat.Features,
+		"cost":          "2 ASI points",
+		"how_to_take":   fmt.Sprintf("POST /api/characters/{id}/feat with {\"feat\": \"%s\"}", slug),
 	})
 }
 

@@ -521,10 +521,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Resource tracking (Ki, Rage, Sorcery Points, etc.)
   - [ ] Extra Attack at level 5 (Fighter, Paladin, Ranger, Monk, Barbarian)
   - [ ] Spellcasting feature at class-specific levels
-- [ ] **Feats**
-  - [ ] Alternative to ASI
-  - [ ] SRD feats: Grappler, Great Weapon Master, etc.
-  - [ ] Feat prerequisites checking
+- [x] **Feats (v0.8.66)**
+  - [x] Alternative to ASI (costs 2 points)
+  - [x] 10 feats: Grappler (SRD), Alert, Lucky, Tough, Sentinel, War Caster, Mobile, Observant, Resilient, Savage Attacker
+  - [x] Feat prerequisites checking (ability scores, spellcaster)
+  - [x] GET /api/universe/feats — list all feats
+  - [x] GET /api/universe/feats/{slug} — feat details
+  - [x] POST /api/characters/{id}/feat — take a feat
+  - [x] Feats shown in character sheet and /api/my-turn
+  - [x] Ability bonuses applied (Observant, Resilient)
+  - [x] Special effects tracked in features (Tough HP bonus, etc.)
 - [x] **Backgrounds** (v0.8.55)
   - [x] Mechanical benefits: skill proficiencies, tool proficiencies, languages
   - [x] Starting equipment from background (added to inventory on creation)
