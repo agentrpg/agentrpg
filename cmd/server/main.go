@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.58
+// @version 0.8.59
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.58"
+const version = "0.8.59"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -795,6 +795,12 @@ func initDB() {
 		ALTER TABLE api_logs ADD COLUMN IF NOT EXISTS response_body JSONB;
 		-- Query parameters for GET requests
 		ALTER TABLE api_logs ADD COLUMN IF NOT EXISTS query_params TEXT;
+		
+		-- Training Progress (v0.8.59 - Downtime Activities)
+		-- Tracks progress toward learning new proficiencies via training
+		-- JSONB map: {"tool_name": days_spent, "language_name": days_spent}
+		-- PHB: 250 days and 250 gp to learn a new tool or language
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS training_progress JSONB DEFAULT '{}';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -6067,6 +6073,33 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	// Concentration
 	if concentratingOn != "" {
 		response["concentrating_on"] = concentratingOn
+	}
+	
+	// Training Progress (v0.8.59 - Downtime Activities)
+	// Shows any ongoing training toward new proficiencies
+	var trainingProgressRaw string
+	db.QueryRow(`SELECT COALESCE(training_progress, '{}') FROM characters WHERE id = $1`, charID).Scan(&trainingProgressRaw)
+	if trainingProgressRaw != "" && trainingProgressRaw != "{}" {
+		var trainingProgress map[string]int
+		if json.Unmarshal([]byte(trainingProgressRaw), &trainingProgress) == nil && len(trainingProgress) > 0 {
+			trainingList := []map[string]interface{}{}
+			const totalDaysNeeded = 250
+			for key, days := range trainingProgress {
+				parts := strings.SplitN(key, ":", 2)
+				if len(parts) == 2 {
+					trainingList = append(trainingList, map[string]interface{}{
+						"type":        parts[0],
+						"name":        parts[1],
+						"days":        days,
+						"total_days":  totalDaysNeeded,
+						"remaining":   totalDaysNeeded - days,
+						"percent":     float64(days) / float64(totalDaysNeeded) * 100,
+					})
+				}
+			}
+			response["training_in_progress"] = trainingList
+			response["training_tip"] = "Use POST /api/characters/downtime with activity='train' to continue training."
+		}
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -13333,12 +13366,12 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 
 // handleCharacterDowntime godoc
 // @Summary Perform downtime activities
-// @Description Spend downtime days on activities like working for gold, training, crafting, etc. (PHB Chapter 8: Downtime Activities)
+// @Description Spend downtime days on activities like working for gold, training to learn new proficiencies, crafting, etc. (PHB Chapter 8: Downtime Activities). Training takes 250 days at 1 gp/day to learn a new tool or language.
 // @Tags Characters
 // @Accept json
 // @Produce json
 // @Security BasicAuth
-// @Param request body object{character_id=int,activity=string,days=int,skill=string} true "Downtime activity"
+// @Param request body object{character_id=int,activity=string,days=int,skill=string,proficiency=string,prof_type=string} true "Downtime activity. activity: work|recuperate|train. For train: proficiency is the tool/language name, prof_type is 'tool' or 'language'."
 // @Success 200 {object} map[string]interface{} "Activity result"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 400 {object} map[string]interface{} "Bad request"
@@ -13361,11 +13394,12 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 	
 	var req struct {
 		CharacterID int    `json:"character_id"`
-		Activity    string `json:"activity"` // work, recuperate, train, craft, research
-		Days        int    `json:"days"`     // number of downtime days (1-30)
-		Skill       string `json:"skill"`    // skill or tool to use (optional for work)
+		Activity    string `json:"activity"`    // work, recuperate, train, craft, research
+		Days        int    `json:"days"`        // number of downtime days (1-30)
+		Skill       string `json:"skill"`       // skill or tool to use (optional for work)
+		Proficiency string `json:"proficiency"` // for training: tool or language name
+		ProfType    string `json:"prof_type"`   // for training: "tool" or "language"
 		// Future fields for other activities:
-		// Proficiency string `json:"proficiency"` // for training
 		// Item        string `json:"item"`        // for crafting
 		// Topic       string `json:"topic"`       // for research
 	}
@@ -13395,17 +13429,20 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 	// Verify character belongs to agent
 	var charName string
 	var ownerID, level, charCha, charDex, charWis int
-	var skillProfsStr, toolProfsStr, expSkillsStr string
+	var skillProfsStr, toolProfsStr, expSkillsStr, langProfsStr, trainingProgressStr string
 	var currentGold int
 	err = db.QueryRow(`
 		SELECT name, agent_id, level, cha, dex, wis, 
 		       COALESCE(skill_proficiencies, ''), 
 		       COALESCE(tool_proficiencies, ''),
 		       COALESCE(expertise, ''),
-		       COALESCE(gold, 0)
+		       COALESCE(gold, 0),
+		       COALESCE(language_proficiencies, ''),
+		       COALESCE(training_progress, '{}')
 		FROM characters WHERE id = $1`, req.CharacterID).Scan(
 		&charName, &ownerID, &level, &charCha, &charDex, &charWis,
-		&skillProfsStr, &toolProfsStr, &expSkillsStr, &currentGold)
+		&skillProfsStr, &toolProfsStr, &expSkillsStr, &currentGold,
+		&langProfsStr, &trainingProgressStr)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -13419,7 +13456,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Parse proficiencies
-	var skillProfs, toolProfs, expSkills []string
+	var skillProfs, toolProfs, expSkills, langProfs []string
 	if skillProfsStr != "" {
 		json.Unmarshal([]byte(skillProfsStr), &skillProfs)
 	}
@@ -13428,6 +13465,15 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 	}
 	if expSkillsStr != "" {
 		json.Unmarshal([]byte(expSkillsStr), &expSkills)
+	}
+	if langProfsStr != "" {
+		json.Unmarshal([]byte(langProfsStr), &langProfs)
+	}
+	
+	// Parse training progress
+	trainingProgress := make(map[string]int)
+	if trainingProgressStr != "" && trainingProgressStr != "{}" {
+		json.Unmarshal([]byte(trainingProgressStr), &trainingProgress)
 	}
 	
 	switch strings.ToLower(req.Activity) {
@@ -13628,11 +13674,190 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		
 		json.NewEncoder(w).Encode(response)
 		
+	case "train":
+		// PHB: Training to gain a new tool proficiency or language
+		// Takes 250 days total at 1 gp per day
+		// Progress is tracked and can be spread across multiple downtime periods
+		
+		if req.Proficiency == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "proficiency_required",
+				"message": "Specify a proficiency to train (tool or language name)",
+				"example": map[string]interface{}{
+					"tool":     "Specify prof_type='tool' and proficiency='thieves' tools' or 'smith's tools'",
+					"language": "Specify prof_type='language' and proficiency='Elvish' or 'Dwarvish'",
+				},
+			})
+			return
+		}
+		
+		profType := strings.ToLower(req.ProfType)
+		if profType == "" {
+			// Try to auto-detect based on common tool/language names
+			profLower := strings.ToLower(req.Proficiency)
+			if strings.Contains(profLower, "tools") || strings.Contains(profLower, "kit") || 
+			   strings.Contains(profLower, "supplies") || strings.Contains(profLower, "instrument") {
+				profType = "tool"
+			} else {
+				profType = "language" // Default to language
+			}
+		}
+		
+		if profType != "tool" && profType != "language" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_prof_type",
+				"message": "prof_type must be 'tool' or 'language'",
+			})
+			return
+		}
+		
+		// Normalize the proficiency name
+		profName := strings.TrimSpace(req.Proficiency)
+		profKey := fmt.Sprintf("%s:%s", profType, strings.ToLower(profName))
+		
+		// Check if already have this proficiency
+		alreadyHas := false
+		if profType == "tool" {
+			for _, t := range toolProfs {
+				if strings.EqualFold(t, profName) {
+					alreadyHas = true
+					break
+				}
+			}
+		} else {
+			for _, l := range langProfs {
+				if strings.EqualFold(l, profName) {
+					alreadyHas = true
+					break
+				}
+			}
+		}
+		
+		if alreadyHas {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_proficient",
+				"message": fmt.Sprintf("%s already knows %s", charName, profName),
+			})
+			return
+		}
+		
+		// Check gold (1 gp per day of training)
+		goldNeeded := req.Days
+		if currentGold < goldNeeded {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":     "insufficient_gold",
+				"message":   fmt.Sprintf("Training costs 1 gp per day. You need %d gp but only have %d gp.", goldNeeded, currentGold),
+				"gold_have": currentGold,
+				"gold_need": goldNeeded,
+			})
+			return
+		}
+		
+		// Get current progress and add days
+		currentProgress := trainingProgress[profKey]
+		newProgress := currentProgress + req.Days
+		
+		const totalDaysNeeded = 250
+		
+		// Deduct gold
+		newGold := currentGold - goldNeeded
+		db.Exec(`UPDATE characters SET gold = $1 WHERE id = $2`, newGold, req.CharacterID)
+		
+		response := map[string]interface{}{
+			"success":      true,
+			"activity":     "train",
+			"character":    charName,
+			"proficiency":  profName,
+			"prof_type":    profType,
+			"days_trained": req.Days,
+			"gold_spent":   goldNeeded,
+			"new_gold":     newGold,
+		}
+		
+		if newProgress >= totalDaysNeeded {
+			// Training complete! Add the proficiency
+			if profType == "tool" {
+				toolProfs = append(toolProfs, profName)
+				toolProfsJSON, _ := json.Marshal(toolProfs)
+				db.Exec(`UPDATE characters SET tool_proficiencies = $1 WHERE id = $2`, string(toolProfsJSON), req.CharacterID)
+			} else {
+				langProfs = append(langProfs, profName)
+				langProfsJSON, _ := json.Marshal(langProfs)
+				db.Exec(`UPDATE characters SET language_proficiencies = $1 WHERE id = $2`, string(langProfsJSON), req.CharacterID)
+			}
+			
+			// Clear this training progress
+			delete(trainingProgress, profKey)
+			trainingJSON, _ := json.Marshal(trainingProgress)
+			db.Exec(`UPDATE characters SET training_progress = $1 WHERE id = $2`, string(trainingJSON), req.CharacterID)
+			
+			// Record the completion
+			db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) 
+				SELECT lobby_id, $1, 'downtime', $2, $3 FROM characters WHERE id = $1`,
+				req.CharacterID,
+				fmt.Sprintf("Training completed: %s (%s)", profName, profType),
+				fmt.Sprintf("Learned %s after %d total days", profName, newProgress))
+			
+			response["complete"] = true
+			response["total_days"] = newProgress
+			response["proficiency_gained"] = profName
+			response["message"] = fmt.Sprintf("%s has completed training and learned %s! Total time: %d days.", charName, profName, newProgress)
+			if profType == "tool" {
+				response["tool_proficiencies"] = toolProfs
+			} else {
+				response["language_proficiencies"] = langProfs
+			}
+		} else {
+			// Still training
+			trainingProgress[profKey] = newProgress
+			trainingJSON, _ := json.Marshal(trainingProgress)
+			db.Exec(`UPDATE characters SET training_progress = $1 WHERE id = $2`, string(trainingJSON), req.CharacterID)
+			
+			daysRemaining := totalDaysNeeded - newProgress
+			goldRemaining := daysRemaining // 1 gp per day
+			
+			// Record partial training
+			db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) 
+				SELECT lobby_id, $1, 'downtime', $2, $3 FROM characters WHERE id = $1`,
+				req.CharacterID,
+				fmt.Sprintf("Training: %s (%s) - %d days", profName, profType, req.Days),
+				fmt.Sprintf("Progress: %d/%d days (%.0f%%)", newProgress, totalDaysNeeded, float64(newProgress)/float64(totalDaysNeeded)*100))
+			
+			response["complete"] = false
+			response["progress_days"] = newProgress
+			response["days_remaining"] = daysRemaining
+			response["gold_remaining"] = goldRemaining
+			response["percent_complete"] = float64(newProgress) / float64(totalDaysNeeded) * 100
+			response["message"] = fmt.Sprintf("%s trained %s for %d days. Progress: %d/%d days (%.0f%%). %d days and %d gp remaining.", 
+				charName, profName, req.Days, newProgress, totalDaysNeeded, 
+				float64(newProgress)/float64(totalDaysNeeded)*100, daysRemaining, goldRemaining)
+		}
+		
+		// Include current training progress in response
+		if len(trainingProgress) > 0 {
+			allTraining := []map[string]interface{}{}
+			for key, days := range trainingProgress {
+				parts := strings.SplitN(key, ":", 2)
+				if len(parts) == 2 {
+					allTraining = append(allTraining, map[string]interface{}{
+						"type":       parts[0],
+						"name":       parts[1],
+						"days":       days,
+						"remaining":  totalDaysNeeded - days,
+						"percent":    float64(days) / float64(totalDaysNeeded) * 100,
+					})
+				}
+			}
+			response["all_training"] = allTraining
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		
 	default:
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "unknown_activity",
-			"message": fmt.Sprintf("Unknown activity: %s. Supported: work, recuperate", req.Activity),
-			"available": []string{"work", "recuperate"},
+			"message": fmt.Sprintf("Unknown activity: %s. Supported: work, recuperate, train", req.Activity),
+			"available": []string{"work", "recuperate", "train"},
 		})
 	}
 }

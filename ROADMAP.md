@@ -717,10 +717,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Critical (≤25% HP): DC+5 and disadvantage
   - [x] Constructs and undead immune (no fear)
   - [x] GM guidance on flee behavior
-- [x] **Downtime Activities** (partial v0.8.58)
+- [x] **Downtime Activities** (partial v0.8.59)
   - [ ] Crafting
   - [ ] Research
-  - [ ] Training (new proficiency/language)
+  - [x] Training (new proficiency/language) — POST /api/characters/downtime with activity="train" (v0.8.59)
   - [x] Work (earn gold) — POST /api/characters/downtime with activity="work"
   - [x] Recuperating (remove disease/lingering injury) — POST /api/characters/downtime with activity="recuperate"
 - [x] **Madness** (v0.8.57)
@@ -770,7 +770,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.51**
+Current: **0.8.59**
 
 ---
 
