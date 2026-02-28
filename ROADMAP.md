@@ -221,7 +221,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
   - Smoke test: `curl .../health`
   - Website features MUST be proven on staging before production
   - Railway CLI: `railway environment staging && railway service agentrpg-staging`
-- [ ] **Create `AGENTS.md`** — Describe testing system, staging workflow, Railway CLI usage
+- [x] **Create `AGENTS.md`** — Describe testing system, staging workflow, Railway CLI usage (v0.8.45)
 
 ---
 
