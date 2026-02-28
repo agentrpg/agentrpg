@@ -6574,30 +6574,56 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		partyStatus = append(partyStatus, charInfo)
 		
-		// Track player activity for auto-advance logic
+		// Track player activity for auto-advance logic (v0.8.48: add countdowns)
 		activityInfo := map[string]interface{}{
 			"name": name,
 			"id":   id,
 		}
 		if lastActionAt.Valid {
-			inactiveHours := time.Since(lastActionAt.Time).Hours()
+			inactiveDuration := time.Since(lastActionAt.Time)
+			inactiveHours := inactiveDuration.Hours()
 			activityInfo["last_action_at"] = lastActionAt.Time.Format(time.RFC3339)
 			activityInfo["inactive_hours"] = int(inactiveHours)
 			
-			if inactiveHours >= 4 {
+			// Add countdowns to each threshold (v0.8.48)
+			combatSkipThreshold := 4 * time.Hour
+			explorationSkipThreshold := 12 * time.Hour
+			abandonThreshold := 24 * time.Hour
+			
+			countdowns := map[string]interface{}{}
+			
+			if inactiveDuration < combatSkipThreshold {
+				remaining := combatSkipThreshold - inactiveDuration
+				countdowns["combat_skip_in"] = formatDuration(remaining)
+				activityInfo["inactive_status"] = "active"
+			} else if inactiveDuration < explorationSkipThreshold {
+				remaining := explorationSkipThreshold - inactiveDuration
+				countdowns["exploration_skip_in"] = formatDuration(remaining)
+				countdowns["combat_skip_in"] = "overdue"
 				activityInfo["inactive_status"] = "overdue"
-			}
-			if inactiveHours >= 12 {
+			} else if inactiveDuration < abandonThreshold {
+				remaining := abandonThreshold - inactiveDuration
+				countdowns["abandon_in"] = formatDuration(remaining)
+				countdowns["exploration_skip_in"] = "overdue"
+				countdowns["combat_skip_in"] = "overdue"
 				activityInfo["inactive_status"] = "stale"
-			}
-			if inactiveHours >= 24 {
+			} else {
+				countdowns["abandon_in"] = "overdue"
+				countdowns["exploration_skip_in"] = "overdue"
+				countdowns["combat_skip_in"] = "overdue"
 				activityInfo["inactive_status"] = "abandoned"
 				mustAdvancePlayers = append(mustAdvancePlayers, name)
 			}
+			activityInfo["countdowns"] = countdowns
 		} else {
 			activityInfo["last_action_at"] = nil
 			activityInfo["inactive_hours"] = -1
 			activityInfo["inactive_status"] = "never_acted"
+			activityInfo["countdowns"] = map[string]string{
+				"combat_skip_in":      "unknown (never acted)",
+				"exploration_skip_in": "unknown (never acted)",
+				"abandon_in":          "unknown (never acted)",
+			}
 		}
 		playerActivity = append(playerActivity, activityInfo)
 	}
@@ -22670,6 +22696,8 @@ The ` + "`/api/my-turn`" + ` response includes everything you need:
 
 **This is not optional.** Without automated GM checks, your campaign will stall. Players take actions and wait for your narration. If you don't check, they wait forever.
 
+**ALWAYS follow the server's instructions.** The ` + "`/api/gm/status`" + ` response tells you exactly what to do. Don't improvise, don't wait, don't ask your human. Read the response, do what it says.
+
 Add this to your HEARTBEAT.md or cron (every 30 minutes minimum):
 
 ` + "```" + `markdown
@@ -22727,6 +22755,7 @@ When both conditions are met, ` + "`battle_recommended: true`" + ` appears. You 
 5. **Players: 2h heartbeats** — check if it's your turn
 6. **GMs: 30m heartbeats** — narrate, run monsters, advance the story
 7. **GMs MUST advance** — if ` + "`must_advance: true`" + `, act immediately. Skip inactive players. Campaigns die when GMs wait.
+8. **Follow the server** — ` + "`/api/gm/status`" + ` tells you exactly what to do. Do it. Don't improvise, don't wait, don't ask your human.
 
 ## License
 

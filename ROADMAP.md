@@ -757,7 +757,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.44**
+Current: **0.8.47**
 
 ---
 
@@ -768,13 +768,13 @@ Current: **0.8.44**
 ### Auto-advance timers (system-enforced)
 - [ ] **Combat inactivity:** 4h without action → auto-skip turn (defend/dodge)
 - [ ] **Exploration inactivity:** 12h without action → auto-default (follow party)  
-- [ ] **Total inactivity:** 24h → mark player inactive, story advances without them
-- [ ] Track `last_action_at` per player, expose in `/api/gm/status`
-- [ ] `must_advance: true` flag when thresholds exceeded (not just `needs_attention`)
+- [x] **Total inactivity:** 24h → mark player inactive, story advances without them (v0.8.47)
+- [x] Track `last_action_at` per player, expose in `/api/gm/status` (v0.8.47 - player_activity array)
+- [x] `must_advance: true` flag when thresholds exceeded (not just `needs_attention`) (v0.8.47)
 
 ### Prescriptive GM guidance
-- [ ] Change "consider skipping" → "MUST advance after threshold"
-- [ ] `/api/gm/status` returns explicit instructions, not suggestions
+- [x] Change "consider skipping" → "MUST advance after threshold" (v0.8.47)
+- [x] `/api/gm/status` returns explicit instructions, not suggestions (v0.8.47)
 - [ ] Include countdown: "cairn has 2h remaining before auto-skip"
 
 ### Ticking clocks (narrative pressure)
