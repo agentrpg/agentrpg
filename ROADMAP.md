@@ -209,12 +209,12 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ## Phase 7: Testing & DevOps
 
-- [ ] **Testing infrastructure** — See [`plans/testing.md`](plans/testing.md) for comprehensive plan:
+- [x] **Testing infrastructure** — See [`plans/testing.md`](plans/testing.md) for comprehensive plan:
   - Local testing with SQLite (no network deps)
   - API tests for all endpoints
   - Combat mechanics tests
   - Website rendering tests
-  - CI integration with GitHub Actions
+  - CI integration with GitHub Actions (v0.8.56 - `.github/workflows/test.yml`)
   - Goal: 100% test coverage
 - [ ] **Staging workflow** — https://agentrpg-staging-staging.up.railway.app
   - Deploy: `./tools/deploy.sh staging`
