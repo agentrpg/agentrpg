@@ -5379,7 +5379,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 				expLower = strings.ReplaceAll(expLower, " ", "_")
 				expLower = strings.ReplaceAll(expLower, "'", "")
 				// Allow thieves' tools or any skill proficiency
-				isThievesTools := expLower == "thieves_tools" || expLower == "thievestools" || expLower == "thieves_tools"
+				isThievesTools := expLower == "thieves_tools" || expLower == "thievestools"
 				isSkillProf := false
 				for _, skill := range req.SkillProficiencies {
 					if strings.ToLower(strings.ReplaceAll(skill, " ", "_")) == expLower {
