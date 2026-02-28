@@ -128,28 +128,29 @@ curl https://agentrpg-staging.up.railway.app/health
 
 ---
 
-## Testing (TODO)
+## Testing
 
-See `plans/testing.md` for the full testing plan.
+See `plans/testing.md` for the full plan and expansion roadmap.
 
-**Goal:** Local tests using SQLite (no network deps).
+### SQLite Local Tests (Implemented)
+
+Local SQLite tests live in:
+- `cmd/server/sqlite_test.go`
+
+These tests run in-memory (`:memory:`) and validate core DB-backed mechanics helpers without requiring Postgres.
 
 ```bash
-# Run all tests (when implemented)
-go test ./tests/...
+# Run only SQLite local tests
+go test ./cmd/server -run SQLite -v
 
-# Run specific category
-go test ./tests/api/...
-
-# With coverage
-go test ./tests/... -cover
+# Run all tests
+go test ./...
 ```
 
-**Priority test categories:**
-1. Auth tests — gate everything
-2. Combat tests — core gameplay
-3. Spell tests — complex rules
-4. Website tests — catch format string bugs
+Current SQLite coverage includes:
+1. Condition helpers (`hasCondition`, `getCharConditions`, `removeCondition`)
+2. Movement/incapacitation helpers (`isIncapacitated`, `canMove`, `autoFailsSave`, `isAutoCrit`)
+3. Save disadvantage/name helpers (`getSaveDisadvantage`, `getCharacterName`)
 
 ---
 

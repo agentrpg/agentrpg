@@ -210,4 +210,4 @@ func (m *MockRoller) Roll(sides int) int {
 ---
 
 *Created: 2026-02-27*
-*Status: Planning*
+*Status: In progress (SQLite baseline implemented in `cmd/server/sqlite_test.go`)*
