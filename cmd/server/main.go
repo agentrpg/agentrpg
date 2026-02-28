@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.60
+// @version 0.8.63
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.62"
+const version = "0.8.63"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -824,6 +824,12 @@ func initDB() {
 		-- JSONB map: {"tool_name": days_spent, "language_name": days_spent}
 		-- PHB: 250 days and 250 gp to learn a new tool or language
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS training_progress JSONB DEFAULT '{}';
+		
+		-- Known Spells (v0.8.63 - Spellcasting)
+		-- JSONB array of spell slugs the character knows/has prepared
+		-- e.g., ["fireball", "shield", "magic-missile"]
+		-- Used to track which spells a character can cast
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS known_spells JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -5459,6 +5465,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			ToolProficiencies  []string `json:"tool_proficiencies"`  // e.g., ["thieves' tools", "herbalism kit"]
 			Expertise          []string `json:"expertise"`           // e.g., ["stealth", "thieves_tools"] - double prof bonus (Rogues level 1, Bards level 3)
 			ExtraLanguages     []string `json:"extra_languages"`     // e.g., ["Dwarvish"] - for Human's extra language or background-granted languages
+			KnownSpells        []string `json:"known_spells"`        // e.g., ["fireball", "magic-missile"] - spell slugs character knows
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		
@@ -5707,11 +5714,33 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			darkvisionRange = race.DarkvisionRange
 		}
 		
+		// Process known spells (v0.8.63)
+		// Validate that spell slugs exist in SRD
+		knownSpellsJSON := []byte("[]")
+		if len(req.KnownSpells) > 0 {
+			validSpells := []string{}
+			for _, spellSlug := range req.KnownSpells {
+				slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
+				// Check if spell exists in SRD
+				if _, ok := srdSpellsMemory[slugLower]; ok {
+					validSpells = append(validSpells, slugLower)
+				} else {
+					// Try with dashes instead of spaces
+					slugDashed := strings.ReplaceAll(slugLower, " ", "-")
+					if _, ok := srdSpellsMemory[slugDashed]; ok {
+						validSpells = append(validSpells, slugDashed)
+					}
+					// Invalid spells are silently ignored for flexibility
+				}
+			}
+			knownSpellsJSON, _ = json.Marshal(validSpells)
+		}
+		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise, language_proficiencies, darkvision_range)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr, languageProfsStr, darkvisionRange).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise, language_proficiencies, darkvision_range, known_spells)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr, languageProfsStr, darkvisionRange, knownSpellsJSON).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -5791,6 +5820,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		case "asi":
 			handleCharacterASI(w, r, charID)
 			return
+		case "spells":
+			handleCharacterSpells(w, r, charID)
+			return
 		}
 	}
 	
@@ -5799,7 +5831,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
 	var hitDiceSpent, exhaustionLevel int
 	var isStable, isDead, hasInspiration bool
-	var conditionsJSON, slotsUsedJSON []byte
+	var conditionsJSON, slotsUsedJSON, knownSpellsJSON []byte
 	var concentratingOn string
 	var gold, copper, silver, electrum, platinum int
 	var inventoryJSON []byte
@@ -5829,7 +5861,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, ''),
 			COALESCE(expertise, ''), COALESCE(language_proficiencies, ''),
 			equipped_armor, COALESCE(equipped_shield, false),
-			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0)
+			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0),
+			COALESCE(known_spells, '[]')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
@@ -5838,7 +5871,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
-		&darkvisionRange, &blindsightRange, &truesightRange)
+		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -6108,6 +6141,31 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["spell_save_dc"] = spellSaveDC(level, spellMod)
 		response["spell_attack_bonus"] = spellMod + proficiencyBonus(level)
 		response["spellcasting_ability"] = spellAbility
+	}
+	
+	// Known spells (v0.8.63)
+	var knownSpells []string
+	json.Unmarshal(knownSpellsJSON, &knownSpells)
+	if len(knownSpells) > 0 {
+		// Enrich with spell names and levels for convenience
+		knownSpellsInfo := []map[string]interface{}{}
+		for _, slug := range knownSpells {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				knownSpellsInfo = append(knownSpellsInfo, map[string]interface{}{
+					"slug":  slug,
+					"name":  spell.Name,
+					"level": spell.Level,
+					"school": spell.School,
+				})
+			} else {
+				knownSpellsInfo = append(knownSpellsInfo, map[string]interface{}{
+					"slug": slug,
+					"name": slug, // fallback
+				})
+			}
+		}
+		response["known_spells"] = knownSpellsInfo
+		response["known_spells_tip"] = "Use PUT /api/characters/{id}/spells to update your known spells list."
 	}
 	
 	// Concentration
@@ -6501,6 +6559,29 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"total":     totalSlots,
 			"remaining": remainingSlots,
 		}
+	}
+	
+	// Add known spells (v0.8.63)
+	var knownSpellsJSON []byte
+	db.QueryRow("SELECT COALESCE(known_spells, '[]') FROM characters WHERE id = $1", charID).Scan(&knownSpellsJSON)
+	var knownSpells []string
+	json.Unmarshal(knownSpellsJSON, &knownSpells)
+	if len(knownSpells) > 0 {
+		// Enrich with spell info for easy reference
+		spellsAvailable := []map[string]interface{}{}
+		for _, slug := range knownSpells {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				spellsAvailable = append(spellsAvailable, map[string]interface{}{
+					"slug":         slug,
+					"name":         spell.Name,
+					"level":        spell.Level,
+					"casting_time": spell.CastingTime,
+					"components":   spell.Components,
+					"is_ritual":    spell.IsRitual,
+				})
+			}
+		}
+		characterInfo["known_spells"] = spellsAvailable
 	}
 	
 	// Reaction status
@@ -23045,6 +23126,204 @@ func handleCharacterASI(w http.ResponseWriter, r *http.Request, charID int) {
 		"remaining_asi": remainingASI,
 		"message":       fmt.Sprintf("Increased %s from %d to %d! %d ASI points remaining.", strings.ToUpper(column), currentVal, newVal, remainingASI),
 	})
+}
+
+// handleCharacterSpells godoc
+// @Summary Manage character's known spells
+// @Description GET: View known spells. PUT: Update known spells list. Spell slugs are validated against SRD.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{spells=[]string} false "Spell slugs to learn (PUT only)"
+// @Success 200 {object} map[string]interface{} "Known spells list"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not your character"
+// @Router /characters/{id}/spells [get]
+// @Router /characters/{id}/spells [put]
+func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Verify ownership
+	var ownerID int
+	var knownSpellsJSON []byte
+	var class string
+	var level int
+	err = db.QueryRow(`
+		SELECT agent_id, COALESCE(known_spells, '[]'), class, level
+		FROM characters WHERE id = $1
+	`, charID).Scan(&ownerID, &knownSpellsJSON, &class, &level)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	var knownSpells []string
+	json.Unmarshal(knownSpellsJSON, &knownSpells)
+	
+	if r.Method == "GET" {
+		// Return current known spells with enriched info
+		spellsInfo := []map[string]interface{}{}
+		for _, slug := range knownSpells {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				spellsInfo = append(spellsInfo, map[string]interface{}{
+					"slug":         slug,
+					"name":         spell.Name,
+					"level":        spell.Level,
+					"school":       spell.School,
+					"casting_time": spell.CastingTime,
+					"components":   spell.Components,
+					"is_ritual":    spell.IsRitual,
+				})
+			} else {
+				spellsInfo = append(spellsInfo, map[string]interface{}{
+					"slug": slug,
+					"name": slug,
+				})
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id": charID,
+			"class":        class,
+			"level":        level,
+			"known_spells": spellsInfo,
+			"count":        len(spellsInfo),
+		})
+		return
+	}
+	
+	if r.Method == "PUT" {
+		var req struct {
+			Spells []string `json:"spells"` // Spell slugs to set
+			Add    []string `json:"add"`    // Spells to add to existing list
+			Remove []string `json:"remove"` // Spells to remove from existing list
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+			return
+		}
+		
+		var newSpells []string
+		
+		if len(req.Spells) > 0 {
+			// Replace entire spell list
+			newSpells = []string{}
+			for _, spellSlug := range req.Spells {
+				slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
+				// Try to find the spell in SRD
+				if _, ok := srdSpellsMemory[slugLower]; ok {
+					newSpells = append(newSpells, slugLower)
+				} else {
+					// Try with dashes
+					slugDashed := strings.ReplaceAll(slugLower, " ", "-")
+					if _, ok := srdSpellsMemory[slugDashed]; ok {
+						newSpells = append(newSpells, slugDashed)
+					} else {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"error":   "unknown_spell",
+							"message": fmt.Sprintf("Spell '%s' not found in SRD. Check /api/universe/spells for valid spell slugs.", spellSlug),
+						})
+						return
+					}
+				}
+			}
+		} else {
+			// Incremental add/remove
+			newSpells = append([]string{}, knownSpells...) // Copy existing
+			
+			// Add new spells
+			for _, spellSlug := range req.Add {
+				slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
+				// Try to find the spell in SRD
+				validSlug := ""
+				if _, ok := srdSpellsMemory[slugLower]; ok {
+					validSlug = slugLower
+				} else {
+					slugDashed := strings.ReplaceAll(slugLower, " ", "-")
+					if _, ok := srdSpellsMemory[slugDashed]; ok {
+						validSlug = slugDashed
+					}
+				}
+				if validSlug == "" {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":   "unknown_spell",
+						"message": fmt.Sprintf("Spell '%s' not found in SRD.", spellSlug),
+					})
+					return
+				}
+				// Check if already known
+				alreadyKnown := false
+				for _, known := range newSpells {
+					if known == validSlug {
+						alreadyKnown = true
+						break
+					}
+				}
+				if !alreadyKnown {
+					newSpells = append(newSpells, validSlug)
+				}
+			}
+			
+			// Remove spells
+			for _, spellSlug := range req.Remove {
+				slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
+				slugDashed := strings.ReplaceAll(slugLower, " ", "-")
+				filtered := []string{}
+				for _, known := range newSpells {
+					if known != slugLower && known != slugDashed {
+						filtered = append(filtered, known)
+					}
+				}
+				newSpells = filtered
+			}
+		}
+		
+		// Save to database
+		newSpellsJSON, _ := json.Marshal(newSpells)
+		_, err = db.Exec(`UPDATE characters SET known_spells = $1 WHERE id = $2`, newSpellsJSON, charID)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+			return
+		}
+		
+		// Return updated spell list
+		spellsInfo := []map[string]interface{}{}
+		for _, slug := range newSpells {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				spellsInfo = append(spellsInfo, map[string]interface{}{
+					"slug":  slug,
+					"name":  spell.Name,
+					"level": spell.Level,
+					"school": spell.School,
+				})
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"known_spells": spellsInfo,
+			"count":        len(spellsInfo),
+			"message":      fmt.Sprintf("Updated known spells. You now know %d spells.", len(spellsInfo)),
+		})
+		return
+	}
+	
+	http.Error(w, "Method not allowed. Use GET or PUT.", http.StatusMethodNotAllowed)
 }
 
 // handleHealth godoc

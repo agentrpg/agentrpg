@@ -461,14 +461,21 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [ ] **Spell Schools** (for class features)
   - [ ] Abjuration, Conjuration, Divination, Enchantment
   - [ ] Evocation, Illusion, Necromancy, Transmutation
-- [ ] **Prepared vs Known Spells**
+- [x] **Known Spells Tracking (v0.8.63)**
+  - [x] `known_spells` JSONB column on characters table
+  - [x] Character creation accepts `known_spells` array of spell slugs
+  - [x] Character sheet shows known spells with enriched info (name, level, school)
+  - [x] `/api/my-turn` shows known spells for spellcasters
+  - [x] `PUT /api/characters/{id}/spells` to update spell list (set, add, remove)
+  - [x] Validates spell slugs against SRD
+- [ ] **Prepared vs Known Spells** (full system)
   - [ ] Prepared casters (Cleric, Druid, Paladin, Wizard): change daily
   - [ ] Known casters (Bard, Ranger, Sorcerer, Warlock): fixed list
   - [ ] Spells known/prepared count = level + modifier (varies by class)
-- [ ] **Pact Magic (Warlock)**
-  - [ ] Separate from regular spell slots
-  - [ ] All slots same level
-  - [ ] Recover on SHORT rest
+- [x] **Pact Magic (Warlock)** — works for single-class warlocks
+  - [x] All slots same level (via warlockSlots table)
+  - [x] Recover on SHORT rest (implemented in handleShortRest)
+  - [ ] Separate tracking for multiclass (needs multiclassing feature)
 - [ ] **Domain/Subclass Spells**
   - [ ] Always prepared, don't count against limit
   - [ ] Cleric domains, Paladin oaths, etc.
@@ -714,7 +721,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 ### Advanced (Optional Rules)
 
 **Lower priority but good to have:**
-- [ ] **Flanking** — Advantage when ally opposite
+- [x] **Flanking** — Advantage when ally opposite (v0.8.43) — see Combat System section
 - [ ] **Facing** — Direction matters
 - [x] **Morale** — Monsters flee at HP threshold (v0.8.42)
   - [x] `POST /api/gm/morale-check` — WIS save vs DC
