@@ -2490,17 +2490,7 @@ func withAPILogging(handler http.HandlerFunc) http.HandlerFunc {
 		durationMs := int(time.Since(start).Milliseconds())
 		
 		// Extract agent ID from auth if present
-		agentID := 0
-		authHeader := r.Header.Get("Authorization")
-		if strings.HasPrefix(authHeader, "Basic ") {
-			decoded, err := base64.StdEncoding.DecodeString(authHeader[6:])
-			if err == nil {
-				parts := strings.SplitN(string(decoded), ":", 2)
-				if len(parts) == 2 {
-					agentID, _ = authenticateBasic(parts[0], parts[1])
-				}
-			}
-		}
+		agentID, _ := getAgentFromAuth(r)
 		
 		// Extract lobby/campaign ID from path or body
 		lobbyID := 0
