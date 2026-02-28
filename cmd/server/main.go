@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.64
+// @version 0.8.65
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.64"
+const version = "0.8.65"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -384,6 +384,8 @@ func main() {
 	http.HandleFunc("/api/characters/equip-armor", handleCharacterEquipArmor)
 	http.HandleFunc("/api/characters/unequip-armor", handleCharacterUnequipArmor)
 	http.HandleFunc("/api/characters/downtime", handleCharacterDowntime)
+	http.HandleFunc("/api/characters/mount", handleCharacterMount)
+	http.HandleFunc("/api/characters/dismount", handleCharacterDismount)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", withAPILogging(handleAction))
@@ -830,6 +832,16 @@ func initDB() {
 		-- e.g., ["fireball", "shield", "magic-missile"]
 		-- Used to track which spells a character can cast
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS known_spells JSONB DEFAULT '[]';
+		
+		-- Mounted Combat (v0.8.65 - Phase 8 Combat System)
+		-- Tracks what creature the character is currently mounted on (slug from monsters table)
+		-- NULL means not mounted
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mounted_on_creature VARCHAR(100);
+		-- Whether the mount is controlled (true) or independent (false)
+		-- Controlled: Mount acts on rider's initiative, rider controls movement
+		-- Independent: Mount rolls own initiative, acts on its own turn
+		-- Intelligent creatures (INT >= 6) are typically independent
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mount_is_controlled BOOLEAN DEFAULT TRUE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -6290,6 +6302,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var concentratingOn string
 	var deathSuccesses, deathFailures, pendingASI, movementRemaining int
 	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed, bonusActionSpellCast bool
+	var mountedOnCreature sql.NullString
+	var mountIsControlled sql.NullBool
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
@@ -6301,7 +6315,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.electrum, 0), COALESCE(c.platinum, 0), COALESCE(c.pending_asi, 0),
 			COALESCE(c.action_used, false), COALESCE(c.bonus_action_used, false), COALESCE(c.movement_remaining, 30),
 			COALESCE(c.bonus_action_spell_cast, false),
-			COALESCE(l.campaign_document, '{}')
+			COALESCE(l.campaign_document, '{}'),
+			c.mounted_on_creature, c.mount_is_controlled
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -6312,7 +6327,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
 		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &charCopper, &charSilver,
 		&charElectrum, &charPlatinum, &pendingASI,
-		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw)
+		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw,
+		&mountedOnCreature, &mountIsControlled)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -6786,6 +6802,65 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"effects":         "Disadvantage on ability checks and attack rolls while the source is visible.",
 			"movement_rules":  "You may move away from the source, move perpendicular, or stay in place.",
 			"action_advice":   "When submitting a move action, if you are moving toward the source, set toward_frightened_source: true (will be blocked).",
+		}
+	}
+	
+	// Add mounted combat info (v0.8.65)
+	if mountedOnCreature.Valid && mountedOnCreature.String != "" {
+		// Get mount details from monsters table
+		var mountName string
+		var mountSpeed, mountHP, mountAC int
+		err := db.QueryRow(`SELECT name, COALESCE(speed, 60), COALESCE(hp, 20), COALESCE(ac, 10) 
+			FROM monsters WHERE slug = $1`, mountedOnCreature.String).Scan(&mountName, &mountSpeed, &mountHP, &mountAC)
+		if err != nil {
+			mountName = mountedOnCreature.String
+			mountSpeed = 60
+			mountHP = 20
+			mountAC = 10
+		}
+		
+		controlType := "controlled"
+		if mountIsControlled.Valid && !mountIsControlled.Bool {
+			controlType = "independent"
+		}
+		
+		mountInfo := map[string]interface{}{
+			"mounted_on":    mountName,
+			"mount_slug":    mountedOnCreature.String,
+			"mount_speed_ft": mountSpeed,
+			"mount_hp":      mountHP,
+			"mount_ac":      mountAC,
+			"control_type":  controlType,
+		}
+		
+		if controlType == "controlled" {
+			mountInfo["rules"] = map[string]interface{}{
+				"movement": fmt.Sprintf("You control the mount's movement (speed %dft). Use mount's speed instead of your own.", mountSpeed),
+				"initiative": "The mount acts on your initiative.",
+				"actions": "The mount can only Dash, Disengage, or Dodge. You use YOUR action to direct it.",
+				"dismount": "Use POST /api/characters/dismount to dismount (costs half your movement).",
+			}
+		} else {
+			mountInfo["rules"] = map[string]interface{}{
+				"movement": "The mount acts independently and may move as it wishes on its turn.",
+				"initiative": "The mount has its own initiative and acts on its own turn.",
+				"actions": "The mount can take any action it is capable of, not just Dash/Disengage/Dodge.",
+				"coordination": "You can only move when the mount uses the Ready action to wait for you.",
+				"dismount": "Use POST /api/characters/dismount to dismount (costs half your movement).",
+			}
+		}
+		
+		response["mounted_combat"] = mountInfo
+		
+		// Update action economy to show mounted status
+		if opts, ok := response["your_options"].(map[string]interface{}); ok {
+			if ae, ok := opts["action_economy"].(map[string]interface{}); ok {
+				ae["is_mounted"] = true
+				ae["mount_speed_ft"] = mountSpeed
+				if controlType == "controlled" {
+					ae["movement_note"] = fmt.Sprintf("Mounted on %s - use mount's speed (%dft)", mountName, mountSpeed)
+				}
+			}
 		}
 	}
 	
@@ -14700,6 +14775,365 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 			"available": []string{"work", "recuperate", "train", "craft", "research"},
 		})
 	}
+}
+
+// handleCharacterMount godoc
+// @Summary Mount a creature
+// @Description Mount a willing creature that is at least one size larger than you. (v0.8.65)
+// @Description Mounting costs half your movement speed. The mount can be controlled or independent.
+// @Description Controlled: Mount acts on rider's initiative, rider directs movement.
+// @Description Independent: Mount rolls its own initiative, acts on its own turn.
+// @Description Intelligent creatures (INT >= 6) are typically independent.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,creature=string,controlled=boolean} true "Mount request"
+// @Success 200 {object} map[string]interface{} "Mount result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/mount [post]
+func handleCharacterMount(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "POST required"})
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Creature    string `json:"creature"`    // slug or name of creature to mount
+		Controlled  *bool  `json:"controlled"`  // nil = auto-determine based on INT
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 || req.Creature == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "character_id and creature required",
+			"hint":  "creature should be a monster slug like 'riding-horse' or 'warhorse'",
+		})
+		return
+	}
+	
+	// Verify character belongs to agent or agent is GM
+	var charName, charRace string
+	var ownerID, lobbyID, movementRemaining int
+	var currentMount sql.NullString
+	err = db.QueryRow(`
+		SELECT c.name, c.agent_id, c.lobby_id, c.race, 
+		       COALESCE(c.movement_remaining, 30), c.mounted_on_creature
+		FROM characters c WHERE c.id = $1`, req.CharacterID).Scan(
+		&charName, &ownerID, &lobbyID, &charRace, &movementRemaining, &currentMount)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Check authorization
+	if ownerID != agentID {
+		var dmID int
+		db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+		if dmID != agentID {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+			return
+		}
+	}
+	
+	// Check if already mounted
+	if currentMount.Valid && currentMount.String != "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "already_mounted",
+			"message": fmt.Sprintf("%s is already mounted on %s. Dismount first.", charName, currentMount.String),
+		})
+		return
+	}
+	
+	// Look up the creature in the monsters table
+	creatureSlug := strings.ToLower(strings.ReplaceAll(req.Creature, " ", "-"))
+	var mountName, mountSize string
+	var mountSpeed, mountInt int
+	err = db.QueryRow(`
+		SELECT name, size, speed, COALESCE(intl, 2) 
+		FROM monsters WHERE slug = $1 OR LOWER(name) = LOWER($2)`,
+		creatureSlug, req.Creature).Scan(&mountName, &mountSize, &mountSpeed, &mountInt)
+	if err != nil {
+		// If not found in monsters, allow custom mount (GM flexibility)
+		mountName = req.Creature
+		mountSize = "Large" // Assume large
+		mountSpeed = 60     // Default mount speed
+		mountInt = 2        // Default low INT
+	}
+	
+	// Get rider's size for comparison
+	riderSize := getRaceSize(charRace)
+	if !isMountLargeEnough(mountSize, riderSize) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "mount_too_small",
+			"message": fmt.Sprintf("A %s creature cannot serve as a mount for a %s rider. Mount must be at least one size larger.", mountSize, riderSize),
+			"mount_size":  mountSize,
+			"rider_size":  riderSize,
+		})
+		return
+	}
+	
+	// Check movement cost (mounting costs half your speed)
+	movementSpeed := getMovementSpeed(charRace)
+	mountCost := movementSpeed / 2
+	if movementRemaining < mountCost {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_movement",
+			"message": fmt.Sprintf("Mounting costs %dft of movement, but %s only has %dft remaining.", mountCost, charName, movementRemaining),
+			"mount_cost_ft":       mountCost,
+			"movement_remaining_ft": movementRemaining,
+		})
+		return
+	}
+	
+	// Determine controlled vs independent
+	// Intelligent creatures (INT >= 6) are typically independent
+	isControlled := true
+	if req.Controlled != nil {
+		isControlled = *req.Controlled
+	} else if mountInt >= 6 {
+		isControlled = false
+	}
+	
+	// Deduct movement and set mount
+	newMovement := movementRemaining - mountCost
+	_, err = db.Exec(`
+		UPDATE characters 
+		SET mounted_on_creature = $1, mount_is_controlled = $2, movement_remaining = $3
+		WHERE id = $4`,
+		creatureSlug, isControlled, newMovement, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "detail": err.Error()})
+		return
+	}
+	
+	controlType := "controlled"
+	if !isControlled {
+		controlType = "independent"
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"character":   charName,
+		"mount":       mountName,
+		"mount_slug":  creatureSlug,
+		"mount_speed_ft": mountSpeed,
+		"control_type":   controlType,
+		"movement_cost_ft": mountCost,
+		"movement_remaining_ft": newMovement,
+		"message": fmt.Sprintf("%s mounts %s (%s mount). Movement speed while mounted: %dft.", charName, mountName, controlType, mountSpeed),
+		"rules": map[string]interface{}{
+			"controlled": "Mount acts on your initiative. You control its movement.",
+			"independent": "Mount rolls its own initiative and acts independently. You can only move when mount Ready's its action.",
+		},
+	})
+	
+	// Log to campaign feed
+	if lobbyID != 0 {
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, 'mount', $3, $4)`,
+			lobbyID, req.CharacterID,
+			fmt.Sprintf("%s mounts %s", charName, mountName),
+			fmt.Sprintf("%s mount, speed %dft", controlType, mountSpeed))
+	}
+}
+
+// handleCharacterDismount godoc
+// @Summary Dismount from a creature
+// @Description Dismount from your current mount. (v0.8.65)
+// @Description Dismounting costs half your movement speed.
+// @Description Forced dismounts (mount dies, knocked prone, thrown off) don't cost movement.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,forced=boolean} true "Dismount request"
+// @Success 200 {object} map[string]interface{} "Dismount result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/dismount [post]
+func handleCharacterDismount(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "POST required"})
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int  `json:"character_id"`
+		Forced      bool `json:"forced"` // true = no movement cost (mount died, knocked off, etc.)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Verify character belongs to agent or agent is GM
+	var charName, charRace string
+	var ownerID, lobbyID, movementRemaining int
+	var currentMount sql.NullString
+	err = db.QueryRow(`
+		SELECT c.name, c.agent_id, c.lobby_id, c.race, 
+		       COALESCE(c.movement_remaining, 30), c.mounted_on_creature
+		FROM characters c WHERE c.id = $1`, req.CharacterID).Scan(
+		&charName, &ownerID, &lobbyID, &charRace, &movementRemaining, &currentMount)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Check authorization
+	if ownerID != agentID {
+		var dmID int
+		db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+		if dmID != agentID {
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+			return
+		}
+	}
+	
+	// Check if currently mounted
+	if !currentMount.Valid || currentMount.String == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_mounted",
+			"message": fmt.Sprintf("%s is not currently mounted on anything.", charName),
+		})
+		return
+	}
+	
+	// Get mount name for message
+	var mountName string
+	db.QueryRow(`SELECT name FROM monsters WHERE slug = $1`, currentMount.String).Scan(&mountName)
+	if mountName == "" {
+		mountName = currentMount.String
+	}
+	
+	// Calculate movement cost (half speed for voluntary dismount, 0 for forced)
+	movementSpeed := getMovementSpeed(charRace)
+	dismountCost := 0
+	if !req.Forced {
+		dismountCost = movementSpeed / 2
+		if movementRemaining < dismountCost {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "insufficient_movement",
+				"message": fmt.Sprintf("Dismounting costs %dft of movement, but %s only has %dft remaining. Use forced:true for emergency dismount.", dismountCost, charName, movementRemaining),
+				"dismount_cost_ft": dismountCost,
+				"movement_remaining_ft": movementRemaining,
+				"hint": "Set forced:true if the dismount is involuntary (mount died, knocked off, etc.)",
+			})
+			return
+		}
+	}
+	
+	// Update database
+	newMovement := movementRemaining - dismountCost
+	_, err = db.Exec(`
+		UPDATE characters 
+		SET mounted_on_creature = NULL, mount_is_controlled = NULL, movement_remaining = $1
+		WHERE id = $2`,
+		newMovement, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "detail": err.Error()})
+		return
+	}
+	
+	dismountType := "voluntary"
+	if req.Forced {
+		dismountType = "forced"
+	}
+	
+	response := map[string]interface{}{
+		"success":   true,
+		"character": charName,
+		"dismounted_from": mountName,
+		"dismount_type":   dismountType,
+		"movement_remaining_ft": newMovement,
+	}
+	
+	if req.Forced {
+		response["message"] = fmt.Sprintf("%s is forcibly dismounted from %s! (No movement cost)", charName, mountName)
+		response["note"] = "Forced dismount: you may need to make a DC 10 Dexterity saving throw to land on your feet. On failure, you land prone."
+	} else {
+		response["message"] = fmt.Sprintf("%s dismounts from %s. (%dft movement spent)", charName, mountName, dismountCost)
+		response["movement_cost_ft"] = dismountCost
+	}
+	
+	json.NewEncoder(w).Encode(response)
+	
+	// Log to campaign feed
+	if lobbyID != 0 {
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, 'dismount', $3, $4)`,
+			lobbyID, req.CharacterID,
+			fmt.Sprintf("%s dismounts from %s", charName, mountName),
+			dismountType)
+	}
+}
+
+// getRaceSize returns the size category for a race
+func getRaceSize(race string) string {
+	race = strings.ToLower(race)
+	switch {
+	case strings.Contains(race, "halfling"), strings.Contains(race, "gnome"):
+		return "Small"
+	case strings.Contains(race, "goliath"):
+		return "Medium" // Goliaths are Medium (but count as Large for carrying)
+	default:
+		return "Medium"
+	}
+}
+
+// isMountLargeEnough checks if the mount is at least one size larger than the rider
+func isMountLargeEnough(mountSize, riderSize string) bool {
+	sizeOrder := map[string]int{
+		"Tiny": 1, "Small": 2, "Medium": 3, "Large": 4, "Huge": 5, "Gargantuan": 6,
+	}
+	mountOrder, ok1 := sizeOrder[mountSize]
+	riderOrder, ok2 := sizeOrder[riderSize]
+	if !ok1 || !ok2 {
+		// Default to allowing it if size is unknown
+		return true
+	}
+	return mountOrder > riderOrder
 }
 
 // handleCampaignMessages godoc

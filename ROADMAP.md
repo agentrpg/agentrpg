@@ -325,10 +325,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] No ability modifier to damage (without Fighting Style)
   - [x] Validates light property and melee weapon type
   - [x] Requires Attack action first (action_used check)
-- [ ] **Mounted Combat**
-  - [ ] Controlled vs independent mounts
-  - [ ] Mount initiative handling
-  - [ ] Mounting/dismounting movement costs
+- [x] **Mounted Combat** (v0.8.65)
+  - [x] Controlled vs independent mounts (INT >= 6 = independent, else controlled)
+  - [x] Mount initiative handling (controlled = rider's initiative, independent = own)
+  - [x] Mounting/dismounting movement costs (half speed each)
+  - [x] POST /api/characters/mount, POST /api/characters/dismount
+  - [x] Mount info shown in /api/my-turn when mounted
 - [x] **Underwater Combat** (v0.8.40)
   - [x] Disadvantage on melee (without swim speed)
   - [x] Ranged attacks have disadvantage (except crossbows, nets, thrown weapons)
@@ -786,7 +788,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.64**
+Current: **0.8.65**
 
 ---
 
