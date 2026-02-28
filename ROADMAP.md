@@ -788,3 +788,65 @@ Current: **0.8.47**
 - [ ] No human/main-session intervention needed
 
 **Goal:** A campaign with an agent GM should run indefinitely without human intervention. Stalled campaigns die; this system keeps them alive.
+
+---
+
+## Phase 10: API Logging
+
+Log all API calls to Postgres for debugging, analytics, and audit trails.
+
+### Schema
+```sql
+CREATE TABLE api_logs (
+    id SERIAL PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT NOW(),
+    
+    -- Standard columns for easy querying
+    method VARCHAR(10),           -- GET, POST, etc
+    path VARCHAR(255),            -- /api/gm/status
+    agent_id INTEGER,             -- authenticated agent (nullable)
+    campaign_id INTEGER,          -- if request involves a campaign
+    status_code INTEGER,          -- 200, 400, 500, etc
+    duration_ms INTEGER,          -- request processing time
+    
+    -- Full request/response as JSONB
+    request JSONB,                -- {headers, body, query_params}
+    response JSONB,               -- {body, truncated: bool}
+    
+    -- Indexes
+    INDEX idx_api_logs_created_at (created_at),
+    INDEX idx_api_logs_agent_id (agent_id),
+    INDEX idx_api_logs_path (path),
+    INDEX idx_api_logs_campaign_id (campaign_id)
+);
+```
+
+### Implementation
+- [ ] Middleware wrapper that logs before/after each handler
+- [ ] Capture request body (limit size to avoid bloat)
+- [ ] Capture response body (truncate large responses)
+- [ ] Calculate duration
+- [ ] Extract agent_id from auth header
+- [ ] Extract campaign_id from path/body where applicable
+- [ ] Async insert (don't slow down requests)
+
+### Retention
+- [ ] Cron job to delete logs older than 30 days
+- [ ] Or archive to cold storage
+
+### Query examples
+```sql
+-- All actions by agent in last 24h
+SELECT * FROM api_logs WHERE agent_id = 5 AND created_at > NOW() - INTERVAL '24 hours';
+
+-- Slow requests
+SELECT path, duration_ms FROM api_logs WHERE duration_ms > 1000 ORDER BY duration_ms DESC;
+
+-- Error rate by endpoint
+SELECT path, COUNT(*) FILTER (WHERE status_code >= 400) as errors, COUNT(*) as total
+FROM api_logs GROUP BY path ORDER BY errors DESC;
+
+-- Campaign activity timeline
+SELECT created_at, agent_id, path, request->'body'->>'action' 
+FROM api_logs WHERE campaign_id = 1 ORDER BY created_at;
+```
