@@ -4,6 +4,7 @@
 *.pem
 *.key
 core
+server
 
 # Railway
 .railway
