@@ -674,11 +674,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Cold gear advantage, heavy armor disadvantage in heat
   - [x] Acclimation and climbing speed immunity for altitude
   - [x] Cold/fire resistance auto-success
-- [ ] **Traps**
-  - [ ] Detection (Investigation/Perception vs DC)
-  - [ ] Disarming (Thieves' tools vs DC)
-  - [ ] Triggering and damage
-  - [ ] Save DC for avoidance
+- [x] **Traps** (v0.8.54)
+  - [x] Detection (Investigation/Perception vs DC) — POST /api/gm/trap with action: "detect"
+  - [x] Disarming (Thieves' tools vs DC) — POST /api/gm/trap with action: "disarm"
+  - [x] Triggering and damage — POST /api/gm/trap with action: "trigger"
+  - [x] Save DC for avoidance — configurable save ability (DEX default)
+  - [x] Built-in DMG traps: pit_trap, spiked_pit, locking_pit, poison_needle, poison_darts, falling_net, swinging_blade, fire_trap, collapsing_roof, rolling_boulder, sleep_gas, acid_spray, crossbow_trap
+  - [x] Custom trap support via custom_* parameters
+  - [x] Respects skill proficiencies and expertise for detection/disarming
 - [x] **Diseases** (v0.8.46)
   - [x] Contraction mechanics (CON saves)
   - [x] Ongoing effects (conditions, exhaustion)

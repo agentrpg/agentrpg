@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.53
+// @version 0.8.54
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.53"
+const version = "0.8.54"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -398,6 +398,7 @@ func main() {
 	http.HandleFunc("/api/gm/apply-poison", handleGMApplyPoison)
 	http.HandleFunc("/api/gm/apply-disease", handleGMApplyDisease)
 	http.HandleFunc("/api/gm/environmental-hazard", handleGMEnvironmentalHazard)
+	http.HandleFunc("/api/gm/trap", handleGMTrap)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -17259,6 +17260,186 @@ var builtinDiseases = map[string]Disease{
 	},
 }
 
+// Trap represents a D&D trap with its mechanics (v0.8.54)
+type Trap struct {
+	Name           string `json:"name"`
+	Trigger        string `json:"trigger"`         // How the trap is triggered
+	DetectDC       int    `json:"detect_dc"`       // DC to detect (Perception/Investigation)
+	DisarmDC       int    `json:"disarm_dc"`       // DC to disarm (thieves' tools usually)
+	SaveDC         int    `json:"save_dc"`         // DC for saving throw to avoid
+	SaveAbility    string `json:"save_ability"`    // DEX, CON, STR, etc.
+	Damage         string `json:"damage"`          // Dice expression (e.g., "2d10")
+	DamageType     string `json:"damage_type"`     // piercing, fire, etc.
+	Condition      string `json:"condition"`       // Condition applied (prone, restrained, etc.)
+	HalfOnSuccess  bool   `json:"half_on_success"` // Take half damage on successful save
+	Description    string `json:"description"`
+	Effect         string `json:"effect"`          // Additional effects description
+}
+
+// Built-in traps from DMG (Chapter 5: Adventure Environments)
+var builtinTraps = map[string]Trap{
+	"pit_trap": {
+		Name:        "Pit Trap",
+		Trigger:     "Stepping on covered pit",
+		DetectDC:    10,
+		DisarmDC:    10,
+		SaveDC:      10,
+		SaveAbility: "dex",
+		Damage:      "1d6",
+		DamageType:  "bludgeoning",
+		Description: "A 10-foot-deep pit covered with a cloth and hidden under debris. Creatures falling in take 1d6 bludgeoning damage.",
+		Effect:      "Victim falls into pit and must climb out (Athletics DC 10 or rope).",
+	},
+	"spiked_pit": {
+		Name:        "Spiked Pit",
+		Trigger:     "Stepping on covered pit",
+		DetectDC:    15,
+		DisarmDC:    15,
+		SaveDC:      12,
+		SaveAbility: "dex",
+		Damage:      "2d10",
+		DamageType:  "piercing",
+		Description: "A 10-foot-deep pit with sharpened wooden spikes at the bottom.",
+		Effect:      "Victim falls into pit with spikes. Must climb out and possibly risk additional spike damage.",
+	},
+	"locking_pit": {
+		Name:        "Locking Pit Trap",
+		Trigger:     "Stepping on covered pit",
+		DetectDC:    15,
+		DisarmDC:    20,
+		SaveDC:      13,
+		SaveAbility: "dex",
+		Damage:      "1d6",
+		DamageType:  "bludgeoning",
+		Condition:   "restrained",
+		Description: "A 10-foot-deep pit whose lid swings shut and locks after a creature falls in.",
+		Effect:      "Lid locks shut (DC 20 to pick, DC 25 to force open). Victim is restrained until freed.",
+	},
+	"poison_needle": {
+		Name:        "Poison Needle",
+		Trigger:     "Opening lock or chest without disabling",
+		DetectDC:    20,
+		DisarmDC:    15,
+		SaveDC:      11,
+		SaveAbility: "con",
+		Damage:      "2d10",
+		DamageType:  "poison",
+		Condition:   "poisoned",
+		Description: "A hidden needle springs out and injects poison into the triggering creature.",
+		Effect:      "On failed CON save, also poisoned for 1 hour.",
+	},
+	"poison_darts": {
+		Name:        "Poison Darts",
+		Trigger:     "Stepping on pressure plate",
+		DetectDC:    15,
+		DisarmDC:    15,
+		SaveDC:      13,
+		SaveAbility: "dex",
+		Damage:      "1d10",
+		DamageType:  "piercing",
+		Description: "Pressure plate triggers darts from wall slots. Each creature in path is attacked.",
+		Effect:      "If hit, DC 15 CON save or take additional 2d10 poison damage.",
+	},
+	"falling_net": {
+		Name:        "Falling Net",
+		Trigger:     "Tripwire or pressure plate",
+		DetectDC:    10,
+		DisarmDC:    15,
+		SaveDC:      10,
+		SaveAbility: "dex",
+		Condition:   "restrained",
+		Description: "A hidden net drops from above, entangling creatures below.",
+		Effect:      "Restrained until freed. DC 10 STR to escape, or cut net (AC 10, 5 HP, immune to non-slashing damage).",
+	},
+	"swinging_blade": {
+		Name:        "Swinging Blade",
+		Trigger:     "Stepping on pressure plate or tripwire",
+		DetectDC:    15,
+		DisarmDC:    15,
+		SaveDC:      15,
+		SaveAbility: "dex",
+		Damage:      "3d10",
+		DamageType:  "slashing",
+		HalfOnSuccess: true,
+		Description: "A hidden blade swings down from the ceiling or wall.",
+		Effect:      "Blade may reset automatically depending on mechanism.",
+	},
+	"fire_trap": {
+		Name:        "Fire-Breathing Statue",
+		Trigger:     "Stepping on pressure plate",
+		DetectDC:    15,
+		DisarmDC:    15,
+		SaveDC:      15,
+		SaveAbility: "dex",
+		Damage:      "4d10",
+		DamageType:  "fire",
+		HalfOnSuccess: true,
+		Description: "A statue exhales a cone of fire when the trap is triggered.",
+		Effect:      "15-foot cone of flame. All creatures in area must save.",
+	},
+	"collapsing_roof": {
+		Name:        "Collapsing Roof",
+		Trigger:     "Tripwire or support removal",
+		DetectDC:    10,
+		DisarmDC:    15,
+		SaveDC:      15,
+		SaveAbility: "dex",
+		Damage:      "4d10",
+		DamageType:  "bludgeoning",
+		HalfOnSuccess: true,
+		Description: "The ceiling collapses, burying creatures beneath rubble.",
+		Effect:      "On failed save, creature is also restrained by rubble. DC 15 STR (or DC 20 from outside) to escape.",
+	},
+	"rolling_boulder": {
+		Name:        "Rolling Boulder",
+		Trigger:     "Pressure plate or tripwire",
+		DetectDC:    15,
+		DisarmDC:    20,
+		SaveDC:      15,
+		SaveAbility: "dex",
+		Damage:      "10d10",
+		DamageType:  "bludgeoning",
+		Description: "A massive boulder rolls down a corridor, crushing everything in its path.",
+		Effect:      "Boulder continues rolling. Creatures in subsequent squares must also save.",
+	},
+	"sleep_gas": {
+		Name:        "Sleep Gas Trap",
+		Trigger:     "Opening container or pressure plate",
+		DetectDC:    15,
+		DisarmDC:    15,
+		SaveDC:      13,
+		SaveAbility: "con",
+		Condition:   "unconscious",
+		Description: "A gas fills the area, putting creatures to sleep.",
+		Effect:      "Unconscious for 10 minutes or until awakened. Undead and creatures immune to being charmed are unaffected.",
+	},
+	"acid_spray": {
+		Name:        "Acid Spray",
+		Trigger:     "Opening door or container",
+		DetectDC:    15,
+		DisarmDC:    15,
+		SaveDC:      13,
+		SaveAbility: "dex",
+		Damage:      "4d6",
+		DamageType:  "acid",
+		HalfOnSuccess: true,
+		Description: "Acid sprays from hidden nozzles when the trap is triggered.",
+		Effect:      "May also damage equipment if GM rules (DC 10 save for non-magical items).",
+	},
+	"crossbow_trap": {
+		Name:        "Crossbow Trap",
+		Trigger:     "Tripwire or door handle",
+		DetectDC:    15,
+		DisarmDC:    15,
+		SaveDC:      13,
+		SaveAbility: "dex",
+		Damage:      "1d10",
+		DamageType:  "piercing",
+		Description: "A hidden crossbow fires at creatures who trigger the trap.",
+		Effect:      "Attack roll +8 instead of save if preferred (GM's choice).",
+	},
+}
+
 // handleGMApplyPoison godoc
 // @Summary Apply poison to a character
 // @Description Apply poison to a character using built-in poisons or custom poison parameters. The target makes a CON save. On failure, takes damage and/or gains a condition based on the poison type. Supports contact, ingested, inhaled, and injury poisons per DMG rules.
@@ -18427,6 +18608,536 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMTrap godoc
+// @Summary Trigger, detect, or disarm a trap
+// @Description Apply trap mechanics using built-in DMG traps or custom parameters. Actions: trigger (spring the trap), detect (Perception/Investigation check), disarm (thieves' tools check). Built-in traps include pit traps, poison needles, swinging blades, fire-breathing statues, and more.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,action=string,trap_name=string,custom_*=various} true "Trap request: action (trigger/detect/disarm), trap_name (optional built-in), or custom_* params"
+// @Success 200 {object} map[string]interface{} "Trap result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/trap [post]
+func handleGMTrap(w http.ResponseWriter, r *http.Request) {
+	// Handle GET with ?list=true to show available traps
+	if r.Method == "GET" && r.URL.Query().Get("list") == "true" {
+		w.Header().Set("Content-Type", "application/json")
+		trapList := []map[string]interface{}{}
+		for key, t := range builtinTraps {
+			trapList = append(trapList, map[string]interface{}{
+				"key":            key,
+				"name":           t.Name,
+				"trigger":        t.Trigger,
+				"detect_dc":      t.DetectDC,
+				"disarm_dc":      t.DisarmDC,
+				"save_dc":        t.SaveDC,
+				"save_ability":   t.SaveAbility,
+				"damage":         t.Damage,
+				"damage_type":    t.DamageType,
+				"condition":      t.Condition,
+				"half_on_success": t.HalfOnSuccess,
+				"description":    t.Description,
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"traps": trapList,
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID    int    `json:"character_id"`     // Target character
+		Action         string `json:"action"`           // trigger, detect, disarm
+		TrapName       string `json:"trap_name"`        // Built-in trap key
+		// Custom trap parameters
+		CustomDetectDC     int    `json:"custom_detect_dc"`
+		CustomDisarmDC     int    `json:"custom_disarm_dc"`
+		CustomSaveDC       int    `json:"custom_save_dc"`
+		CustomSaveAbility  string `json:"custom_save_ability"`  // dex, con, str, etc.
+		CustomDamage       string `json:"custom_damage"`        // Dice expression
+		CustomDamageType   string `json:"custom_damage_type"`
+		CustomCondition    string `json:"custom_condition"`     // Condition to apply
+		CustomHalfOnSuccess bool  `json:"custom_half_on_success"`
+		CustomDescription  string `json:"custom_description"`
+		// Additional options
+		UseInvestigation bool   `json:"use_investigation"` // Use Investigation instead of Perception for detect
+		UseSkill         string `json:"use_skill"`         // Override skill for disarm (default: thieves' tools)
+		Reason           string `json:"reason"`            // Flavor text
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate action
+	validActions := map[string]bool{"trigger": true, "detect": true, "disarm": true}
+	actionLower := strings.ToLower(req.Action)
+	if !validActions[actionLower] {
+		w.WriteHeader(http.StatusBadRequest)
+		keys := []string{}
+		for k := range builtinTraps {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "invalid_action",
+			"valid_actions":   []string{"trigger", "detect", "disarm"},
+			"available_traps": keys,
+			"message":         "Specify action: 'trigger' (spring trap), 'detect' (Perception/Investigation check), or 'disarm' (thieves' tools check)",
+		})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	// Determine trap to use
+	var trap Trap
+	var trapSource string
+	
+	if req.TrapName != "" {
+		if t, ok := builtinTraps[req.TrapName]; ok {
+			trap = t
+			trapSource = "builtin"
+		} else {
+			w.WriteHeader(http.StatusBadRequest)
+			keys := []string{}
+			for k := range builtinTraps {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":           "unknown_trap",
+				"message":         fmt.Sprintf("Unknown trap: %s", req.TrapName),
+				"available_traps": keys,
+			})
+			return
+		}
+	} else if req.CustomSaveDC > 0 || req.CustomDetectDC > 0 || req.CustomDisarmDC > 0 {
+		// Custom trap
+		trap = Trap{
+			Name:          "Custom Trap",
+			DetectDC:      req.CustomDetectDC,
+			DisarmDC:      req.CustomDisarmDC,
+			SaveDC:        req.CustomSaveDC,
+			SaveAbility:   req.CustomSaveAbility,
+			Damage:        req.CustomDamage,
+			DamageType:    req.CustomDamageType,
+			Condition:     req.CustomCondition,
+			HalfOnSuccess: req.CustomHalfOnSuccess,
+			Description:   req.CustomDescription,
+		}
+		if trap.SaveAbility == "" {
+			trap.SaveAbility = "dex" // Default to DEX saves
+		}
+		if trap.DetectDC == 0 {
+			trap.DetectDC = 15 // Default detect DC
+		}
+		if trap.DisarmDC == 0 {
+			trap.DisarmDC = 15 // Default disarm DC
+		}
+		if trap.SaveDC == 0 {
+			trap.SaveDC = 15 // Default save DC
+		}
+		trapSource = "custom"
+	} else {
+		w.WriteHeader(http.StatusBadRequest)
+		keys := []string{}
+		for k := range builtinTraps {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "no_trap_specified",
+			"message":         "Specify trap_name (built-in) or custom_* parameters",
+			"available_traps": keys,
+		})
+		return
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName string
+	var str, dex, int_, wis, currentHP, maxHP int
+	var conditionsStr string
+	var skillProficiencies, expertise, toolProficiencies string
+	err = db.QueryRow(`
+		SELECT name, str, dex, int, wis, hp, max_hp, COALESCE(conditions, ''),
+		       COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(tool_proficiencies, '')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &str, &dex, &int_, &wis, &currentHP, &maxHP, &conditionsStr,
+		&skillProficiencies, &expertise, &toolProficiencies)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Get character level for proficiency bonus
+	var level int
+	db.QueryRow("SELECT COALESCE(level, 1) FROM characters WHERE id = $1", req.CharacterID).Scan(&level)
+	profBonus := proficiencyBonus(level)
+	
+	// Calculate ability modifiers
+	strMod := modifier(str)
+	dexMod := modifier(dex)
+	intMod := modifier(int_)
+	wisMod := modifier(wis)
+	
+	// Handle the action
+	switch actionLower {
+	case "detect":
+		// Perception or Investigation check vs detect DC
+		skill := "perception"
+		abilityMod := wisMod
+		if req.UseInvestigation {
+			skill = "investigation"
+			abilityMod = intMod
+		}
+		
+		// Check proficiency
+		isProficient := strings.Contains(strings.ToLower(skillProficiencies), skill)
+		hasExpertise := strings.Contains(strings.ToLower(expertise), skill)
+		
+		bonus := abilityMod
+		if isProficient {
+			bonus += profBonus
+		}
+		if hasExpertise {
+			bonus += profBonus // Double proficiency for expertise
+		}
+		
+		roll := rollDie(20)
+		total := roll + bonus
+		success := total >= trap.DetectDC
+		
+		// Log the action
+		resultText := fmt.Sprintf("DC %d vs %d (roll %d + %d) = %s", trap.DetectDC, total, roll, bonus,
+			map[bool]string{true: "DETECTED", false: "failed to detect"}[success])
+		
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.CharacterID, "trap_detect",
+			fmt.Sprintf("%s searches for traps (%s)", charName, skill),
+			resultText)
+		
+		message := ""
+		if success {
+			message = fmt.Sprintf("🔍 %s notices the %s! (%s: rolled %d + %d = %d vs DC %d)",
+				charName, trap.Name, skill, roll, bonus, total, trap.DetectDC)
+		} else {
+			message = fmt.Sprintf("👀 %s doesn't detect anything suspicious. (%s: rolled %d + %d = %d vs DC %d)",
+				charName, skill, roll, bonus, total, trap.DetectDC)
+		}
+		
+		response := map[string]interface{}{
+			"success":      true,
+			"action":       "detect",
+			"detected":     success,
+			"character":    charName,
+			"character_id": req.CharacterID,
+			"trap":         trap.Name,
+			"trap_source":  trapSource,
+			"skill":        skill,
+			"roll":         roll,
+			"modifier":     bonus,
+			"total":        total,
+			"dc":           trap.DetectDC,
+			"message":      message,
+		}
+		if isProficient {
+			response["proficient"] = true
+		}
+		if hasExpertise {
+			response["expertise"] = true
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+		
+	case "disarm":
+		// Usually thieves' tools, but can be overridden
+		toolUsed := "thieves' tools"
+		if req.UseSkill != "" {
+			toolUsed = req.UseSkill
+		}
+		
+		abilityMod := dexMod // Thieves' tools use DEX
+		
+		// Check tool proficiency
+		isProficient := strings.Contains(strings.ToLower(toolProficiencies), "thieves")
+		hasExpertise := strings.Contains(strings.ToLower(expertise), "thieves")
+		
+		bonus := abilityMod
+		if isProficient {
+			bonus += profBonus
+		}
+		if hasExpertise {
+			bonus += profBonus
+		}
+		
+		roll := rollDie(20)
+		total := roll + bonus
+		success := total >= trap.DisarmDC
+		
+		// Log the action
+		resultText := fmt.Sprintf("DC %d vs %d (roll %d + %d) = %s", trap.DisarmDC, total, roll, bonus,
+			map[bool]string{true: "DISARMED", false: "failed"}[success])
+		
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.CharacterID, "trap_disarm",
+			fmt.Sprintf("%s attempts to disarm %s using %s", charName, trap.Name, toolUsed),
+			resultText)
+		
+		message := ""
+		if success {
+			message = fmt.Sprintf("🔧 %s successfully disarms the %s! (%s: rolled %d + %d = %d vs DC %d)",
+				charName, trap.Name, toolUsed, roll, bonus, total, trap.DisarmDC)
+		} else {
+			message = fmt.Sprintf("💥 %s fails to disarm the %s! (%s: rolled %d + %d = %d vs DC %d) The trap may be triggered!",
+				charName, trap.Name, toolUsed, roll, bonus, total, trap.DisarmDC)
+		}
+		
+		response := map[string]interface{}{
+			"success":      true,
+			"action":       "disarm",
+			"disarmed":     success,
+			"character":    charName,
+			"character_id": req.CharacterID,
+			"trap":         trap.Name,
+			"trap_source":  trapSource,
+			"tool":         toolUsed,
+			"roll":         roll,
+			"modifier":     bonus,
+			"total":        total,
+			"dc":           trap.DisarmDC,
+			"message":      message,
+		}
+		if isProficient {
+			response["proficient"] = true
+		}
+		if hasExpertise {
+			response["expertise"] = true
+		}
+		if !success {
+			response["warning"] = "Trap may trigger on failure (GM's discretion)"
+		}
+		json.NewEncoder(w).Encode(response)
+		return
+		
+	case "trigger":
+		// The trap goes off - make saving throw
+		saveAbility := strings.ToLower(trap.SaveAbility)
+		var saveMod int
+		switch saveAbility {
+		case "str":
+			saveMod = strMod
+		case "dex":
+			saveMod = dexMod
+		case "con":
+			var con int
+			db.QueryRow("SELECT con FROM characters WHERE id = $1", req.CharacterID).Scan(&con)
+			saveMod = modifier(con)
+		case "int":
+			saveMod = intMod
+		case "wis":
+			saveMod = wisMod
+		case "cha":
+			var cha int
+			db.QueryRow("SELECT cha FROM characters WHERE id = $1", req.CharacterID).Scan(&cha)
+			saveMod = modifier(cha)
+		default:
+			saveMod = dexMod
+			saveAbility = "dex"
+		}
+		
+		// Roll saving throw
+		saveRoll := rollDie(20)
+		saveTotal := saveRoll + saveMod
+		saved := saveTotal >= trap.SaveDC
+		
+		// Calculate damage
+		var damageTaken int
+		var damageRoll string
+		if trap.Damage != "" {
+			diceResult := parseDice(trap.Damage)
+			damageTaken = diceResult.Total
+			damageRoll = fmt.Sprintf("%s = %d", trap.Damage, damageTaken)
+			
+			if saved && trap.HalfOnSuccess {
+				damageTaken = damageTaken / 2
+				damageRoll = fmt.Sprintf("%s = %d (halved to %d)", trap.Damage, diceResult.Total, damageTaken)
+			} else if saved && !trap.HalfOnSuccess {
+				damageTaken = 0
+				damageRoll = fmt.Sprintf("%s = 0 (save negates)", trap.Damage)
+			}
+		}
+		
+		// Apply damage
+		newHP := currentHP
+		if damageTaken > 0 {
+			newHP = currentHP - damageTaken
+			if newHP < 0 {
+				newHP = 0
+			}
+			db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, req.CharacterID)
+		}
+		
+		// Apply condition if failed
+		conditionApplied := ""
+		if !saved && trap.Condition != "" {
+			conditionApplied = trap.Condition
+			// Add condition to character
+			newConditions := conditionsStr
+			if newConditions != "" {
+				newConditions += ", "
+			}
+			newConditions += conditionApplied
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", newConditions, req.CharacterID)
+		}
+		
+		// Log the action
+		resultParts := []string{}
+		resultParts = append(resultParts, fmt.Sprintf("%s save DC %d: rolled %d + %d = %d (%s)",
+			strings.ToUpper(saveAbility), trap.SaveDC, saveRoll, saveMod, saveTotal,
+			map[bool]string{true: "SUCCESS", false: "FAILED"}[saved]))
+		if trap.Damage != "" {
+			resultParts = append(resultParts, fmt.Sprintf("Damage: %s", damageRoll))
+		}
+		if conditionApplied != "" {
+			resultParts = append(resultParts, fmt.Sprintf("Condition: %s", conditionApplied))
+		}
+		
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.CharacterID, "trap_trigger",
+			fmt.Sprintf("%s triggers the %s!", charName, trap.Name),
+			strings.Join(resultParts, " | "))
+		
+		// Build message
+		var message string
+		if saved {
+			if trap.HalfOnSuccess && damageTaken > 0 {
+				message = fmt.Sprintf("⚡ %s triggers the %s but reacts quickly! (%s save: %d vs DC %d — SUCCESS) Takes %d %s damage (half).",
+					charName, trap.Name, strings.ToUpper(saveAbility), saveTotal, trap.SaveDC, damageTaken, trap.DamageType)
+			} else {
+				message = fmt.Sprintf("⚡ %s triggers the %s but avoids the worst! (%s save: %d vs DC %d — SUCCESS)",
+					charName, trap.Name, strings.ToUpper(saveAbility), saveTotal, trap.SaveDC)
+			}
+		} else {
+			parts := []string{}
+			parts = append(parts, fmt.Sprintf("💥 %s triggers the %s! (%s save: %d vs DC %d — FAILED)",
+				charName, trap.Name, strings.ToUpper(saveAbility), saveTotal, trap.SaveDC))
+			if damageTaken > 0 {
+				parts = append(parts, fmt.Sprintf("Takes %d %s damage!", damageTaken, trap.DamageType))
+			}
+			if conditionApplied != "" {
+				parts = append(parts, fmt.Sprintf("Now %s!", conditionApplied))
+			}
+			message = strings.Join(parts, " ")
+		}
+		
+		response := map[string]interface{}{
+			"success":       true,
+			"action":        "trigger",
+			"character":     charName,
+			"character_id":  req.CharacterID,
+			"trap":          trap.Name,
+			"trap_source":   trapSource,
+			"save_ability":  saveAbility,
+			"save_roll":     saveRoll,
+			"save_modifier": saveMod,
+			"save_total":    saveTotal,
+			"save_dc":       trap.SaveDC,
+			"saved":         saved,
+			"hp_before":     currentHP,
+			"hp_after":      newHP,
+			"max_hp":        maxHP,
+			"message":       message,
+		}
+		
+		if trap.Damage != "" {
+			response["damage_dice"] = trap.Damage
+			response["damage_taken"] = damageTaken
+			response["damage_type"] = trap.DamageType
+			if saved && trap.HalfOnSuccess {
+				response["half_damage"] = true
+			}
+		}
+		
+		if conditionApplied != "" {
+			response["condition_applied"] = conditionApplied
+		}
+		
+		if trap.Effect != "" {
+			response["effect"] = trap.Effect
+		}
+		
+		if trap.Description != "" {
+			response["description"] = trap.Description
+		}
+		
+		if newHP == 0 {
+			response["unconscious"] = true
+			response["death_saves_needed"] = true
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
 }
 
 // handleObserve godoc
