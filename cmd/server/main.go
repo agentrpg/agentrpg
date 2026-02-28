@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.63
+// @version 0.8.64
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.63"
+const version = "0.8.64"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2234,6 +2234,64 @@ func hasAnyCharm(charID int) bool {
 		}
 	}
 	return false
+}
+
+// ============================================
+// FRIGHTENED CONDITION EFFECTS (v0.8.64)
+// ============================================
+
+// getFrightenedSourceID returns the ID of what frightened this character, or 0 if not frightened
+// Frightened condition format: "frightened" (generic) or "frightened:123" (frightened by character/monster 123)
+func getFrightenedSourceID(charID int) int {
+	conditions := getCharConditions(charID)
+	for _, c := range conditions {
+		cLower := strings.ToLower(c)
+		if strings.HasPrefix(cLower, "frightened:") {
+			parts := strings.Split(c, ":")
+			if len(parts) == 2 {
+				if id, err := strconv.Atoi(parts[1]); err == nil {
+					return id
+				}
+			}
+		}
+	}
+	return 0
+}
+
+// isFrightenedBy checks if charID is frightened by sourceID
+func isFrightenedBy(charID, sourceID int) bool {
+	fearSource := getFrightenedSourceID(charID)
+	return fearSource == sourceID && sourceID > 0
+}
+
+// hasAnyFrightened checks if character has any form of frightened condition
+func hasAnyFrightened(charID int) bool {
+	conditions := getCharConditions(charID)
+	for _, c := range conditions {
+		cLower := strings.ToLower(c)
+		if cLower == "frightened" || strings.HasPrefix(cLower, "frightened:") {
+			return true
+		}
+	}
+	return false
+}
+
+// getFrightenedSourceName returns the name of what frightened this character
+func getFrightenedSourceName(charID int) string {
+	sourceID := getFrightenedSourceID(charID)
+	if sourceID == 0 {
+		return ""
+	}
+	
+	// Try to get name from characters table first
+	var name string
+	err := db.QueryRow("SELECT name FROM characters WHERE id = $1", sourceID).Scan(&name)
+	if err == nil && name != "" {
+		return name
+	}
+	
+	// Could extend to check monsters table in future
+	return fmt.Sprintf("creature #%d", sourceID)
 }
 
 // parseTargetFromDescription tries to find a character ID from action description
@@ -6708,6 +6766,26 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(activeEffects) > 0 {
 			response["active_condition_effects"] = activeEffects
+		}
+	}
+	
+	// Add frightened movement restriction warning (v0.8.64)
+	if hasAnyFrightened(charID) {
+		sourceName := getFrightenedSourceName(charID)
+		sourceID := getFrightenedSourceID(charID)
+		
+		movementWarning := "⚠️ FRIGHTENED: You cannot willingly move closer to the source of your fear."
+		if sourceName != "" {
+			movementWarning = fmt.Sprintf("⚠️ FRIGHTENED: You cannot willingly move closer to %s.", sourceName)
+		}
+		
+		response["frightened_warning"] = map[string]interface{}{
+			"warning":         movementWarning,
+			"source_id":       sourceID,
+			"source_name":     sourceName,
+			"effects":         "Disadvantage on ability checks and attack rolls while the source is visible.",
+			"movement_rules":  "You may move away from the source, move perpendicular, or stay in place.",
+			"action_advice":   "When submitting a move action, if you are moving toward the source, set toward_frightened_source: true (will be blocked).",
 		}
 	}
 	
@@ -15258,7 +15336,7 @@ func resetReaction(charID int) {
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{action=string,description=string,target=string,movement_cost=int} true "Action details"
+// @Param request body object{action=string,description=string,target=string,movement_cost=int,toward_frightened_source=bool} true "Action details"
 // @Success 200 {object} map[string]interface{} "Action result with dice rolls"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 400 {object} map[string]interface{} "No active game or resource exhausted"
@@ -15278,10 +15356,11 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		Action       string `json:"action"`
-		Description  string `json:"description"`
-		Target       string `json:"target"`
-		MovementCost int    `json:"movement_cost"` // feet of movement for move actions
+		Action                  string `json:"action"`
+		Description             string `json:"description"`
+		Target                  string `json:"target"`
+		MovementCost            int    `json:"movement_cost"`              // feet of movement for move actions
+		TowardFrightenedSource  bool   `json:"toward_frightened_source"`   // v0.8.64: set true if moving toward source of fear (blocks movement)
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	
@@ -15342,6 +15421,26 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 			"message":           fmt.Sprintf("Your speed is 0 due to %s", blockingCondition),
 			"blocking_condition": blockingCondition,
 			"hint":              "You must remove the condition before you can move.",
+		})
+		return
+	}
+	
+	// CHECK: Frightened movement restriction (v0.8.64)
+	// When frightened, you cannot willingly move closer to the source of your fear
+	if req.Action == "move" && req.TowardFrightenedSource && hasAnyFrightened(charID) {
+		sourceName := getFrightenedSourceName(charID)
+		sourceID := getFrightenedSourceID(charID)
+		message := "You cannot willingly move closer to the source of your fear while frightened."
+		if sourceName != "" {
+			message = fmt.Sprintf("You cannot willingly move closer to %s while frightened.", sourceName)
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":               false,
+			"error":                 "frightened_movement",
+			"message":               message,
+			"frightened_source_id":  sourceID,
+			"frightened_source":     sourceName,
+			"hint":                  "You may move away from the source, move perpendicular, or stay in place. You may also take the Dash action to flee faster.",
 		})
 		return
 	}

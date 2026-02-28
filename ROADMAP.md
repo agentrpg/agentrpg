@@ -374,9 +374,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Level 6: Death (displayed in sheet)
   - [x] Cumulative tracking
   - [x] Long rest removes 1 level (with food/drink)
-- [x] **Frightened** (partial - attack disadvantage implemented)
+- [x] **Frightened** ✅ (v0.8.64)
   - [x] Disadvantage on ability checks/attacks while source visible
-  - [ ] Can't willingly move closer to source
+  - [x] Can't willingly move closer to source (v0.8.64)
+    - [x] Helper functions: getFrightenedSourceID, isFrightenedBy, hasAnyFrightened, getFrightenedSourceName
+    - [x] "frightened:SOURCE_ID" condition format (like charmed:ID)
+    - [x] Move action blocked when toward_frightened_source=true
+    - [x] /api/my-turn shows frightened_warning with source info and movement rules
 - [x] **Grappled** ✅ (v0.8.8, v0.8.27)
   - [x] Speed becomes 0 (enforced in canMove)
   - [x] Ends if grappler incapacitated (v0.8.27: auto-release via handleAddCondition)
@@ -782,7 +786,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.63**
+Current: **0.8.64**
 
 ---
 
