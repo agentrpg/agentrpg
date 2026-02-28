@@ -512,10 +512,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Alternative to ASI
   - [ ] SRD feats: Grappler, Great Weapon Master, etc.
   - [ ] Feat prerequisites checking
-- [ ] **Backgrounds**
-  - [ ] Mechanical benefits: skill proficiencies, tool proficiencies, languages
-  - [ ] Starting equipment from background
-  - [ ] Background feature (roleplay benefit)
+- [x] **Backgrounds** (v0.8.55)
+  - [x] Mechanical benefits: skill proficiencies, tool proficiencies, languages
+  - [x] Starting equipment from background (added to inventory on creation)
+  - [x] Background feature (name + description shown in character sheet)
+  - [x] Background-specific starting gold
+  - [x] GET /api/universe/backgrounds to list all backgrounds
+  - [x] GET /api/universe/backgrounds/{slug} for details
+  - [x] 13 PHB backgrounds: acolyte, charlatan, criminal, entertainer, folk_hero, guild_artisan, hermit, noble, outlander, sage, sailor, soldier, urchin
 - [ ] **Proficiencies** (partial)
   - [x] Skill proficiencies (add prof bonus when proficient, v0.8.9)
     - [x] Character creation accepts skill_proficiencies array
