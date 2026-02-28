@@ -2577,6 +2577,17 @@ func logAPIRequestAsync(agentID int, endpoint, method string, lobbyID, character
 	}()
 }
 
+// logAction logs an action to the campaign feed (actions table)
+// Used for system events like deadline creation/triggering
+func logAction(lobbyID int, characterID int, actorID int, actionType string, description string, result string) {
+	if db == nil {
+		return
+	}
+	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result, created_at)
+		VALUES ($1, NULLIF($2, 0), $3, $4, $5, NOW())`,
+		lobbyID, characterID, actionType, description, result)
+}
+
 // cleanupOldAPILogs deletes API logs older than 30 days (v0.8.52)
 // Returns the number of rows deleted
 func cleanupOldAPILogs() int64 {
