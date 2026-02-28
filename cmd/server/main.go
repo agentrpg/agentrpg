@@ -7051,12 +7051,41 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 					gmTasks = append(gmTasks, fmt.Sprintf("⏰ %s has been on this turn for %d hours. Consider sending a nudge (POST /api/gm/nudge)", entries[turnIndex].Name, elapsedMinutes/60))
 				}
 			}
-			// Skip recommended at 4 hours
+			// Skip REQUIRED at 4 hours (v0.8.48 - autonomous GM phase 2)
+			// This is NOT optional - the server expects the GM to skip immediately
+			// Cron job will auto-skip 30 min after this flag appears
 			if elapsedMinutes >= 240 {
-				combatInfo["skip_recommended"] = true
+				combatInfo["skip_required"] = true
 				combatInfo["turn_status"] = "timeout"
 				if len(entries) > turnIndex && !entries[turnIndex].IsMonster {
-					gmTasks = append(gmTasks, fmt.Sprintf("⚠️ %s has been on this turn for %d hours. Consider skipping (POST /api/campaigns/%d/combat/skip)", entries[turnIndex].Name, elapsedMinutes/60, campaignID))
+					playerName := entries[turnIndex].Name
+					response["skip_required"] = true
+					response["skip_required_player"] = playerName
+					
+					// Calculate countdown to auto-skip (cron runs 30 min after 4h threshold)
+					autoSkipTime := turnStartedAt.Time.Add(4*time.Hour + 30*time.Minute)
+					remaining := time.Until(autoSkipTime)
+					if remaining > 0 {
+						combatInfo["auto_skip_countdown"] = formatDuration(remaining)
+						response["auto_skip_countdown"] = formatDuration(remaining)
+					} else {
+						combatInfo["auto_skip_countdown"] = "imminent"
+						response["auto_skip_countdown"] = "imminent"
+					}
+					
+					// Urgent task - this is NOT a suggestion
+					gmTasks = append(gmTasks, fmt.Sprintf("⚠️ %s turn timeout (4h+). SKIP NOW via POST /api/campaigns/%d/combat/skip. Auto-skip in %s.", playerName, campaignID, combatInfo["auto_skip_countdown"]))
+					
+					// Override what_to_do_next with skip instruction
+					whatToDoNext = map[string]interface{}{
+						"instruction":          fmt.Sprintf("SKIP %s's turn immediately. They have exceeded the 4-hour timeout.", playerName),
+						"action_required":      "skip_turn",
+						"endpoint":             fmt.Sprintf("POST /api/campaigns/%d/combat/skip", campaignID),
+						"narrative_suggestion": fmt.Sprintf("%s hesitates, taking the Dodge action defensively.", playerName),
+						"urgency":              "critical",
+						"auto_skip_in":         combatInfo["auto_skip_countdown"],
+					}
+					needsAttention = true
 				}
 			}
 		}
