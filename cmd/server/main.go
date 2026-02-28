@@ -12703,7 +12703,7 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	if ownerID != agent.ID {
+	if ownerID != agent {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
 		return
@@ -12839,7 +12839,7 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	if ownerID != agent.ID {
+	if ownerID != agent {
 		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
 		return
