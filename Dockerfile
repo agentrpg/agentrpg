@@ -1,11 +1,22 @@
 FROM golang:1.22-alpine AS builder
-# Cache bust: 2026-02-28-08-54
+# Cache bust: 2026-02-28-09-00-force-copy
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 RUN go install github.com/swaggo/swag/cmd/swag@latest
-COPY . .
-RUN ls -la && ls -la cmd/ && ls -la cmd/server/ || echo "cmd/server missing"
+COPY cmd/ ./cmd/
+COPY docs/ ./docs/
+COPY internal/ ./internal/
+COPY migrations/ ./migrations/
+COPY scripts/ ./scripts/
+COPY seeds/ ./seeds/
+COPY tools/ ./tools/
+COPY plans/ ./plans/
+COPY *.md ./
+COPY *.json ./
+COPY .env.example ./
+COPY LICENSE ./
+RUN ls -la && ls -la cmd/ && ls -la cmd/server/
 RUN swag init -g cmd/server/main.go -o cmd/server/docs/swagger
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X 'main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)'" -o server ./cmd/server
 
