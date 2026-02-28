@@ -831,7 +831,7 @@ CREATE TABLE api_logs (
 - [x] Async insert (don't slow down requests) - goroutine insert
 
 ### Retention
-- [ ] Cron job to delete logs older than 30 days
+- [x] Background cleanup of logs older than 30 days (v0.8.52 - runs every 24h on startup)
 - [ ] Or archive to cold storage
 
 **Wrapped endpoints:** `/api/my-turn`, `/api/gm/status`, `/api/action`, `/api/gm/narrate`

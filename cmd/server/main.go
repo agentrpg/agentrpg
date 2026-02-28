@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.51"
+const version = "0.8.52"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -315,6 +315,7 @@ func main() {
 				seedCampaignTemplates()
 				checkAndSeedSRD() // Auto-seed from 5e API if tables empty
 				loadSRDFromDB()
+				startAPILogCleanupWorker() // v0.8.52: Clean up old API logs every 24h
 			}
 		}
 	} else {
@@ -2446,6 +2447,42 @@ func logAPIRequestAsync(agentID int, endpoint, method string, lobbyID, character
 			VALUES ($1, $2, $3, NULLIF($4, 0), NULLIF($5, 0), $6, NULLIF($7, ''), $8, $9, NULLIF($10, 0), NOW())`,
 			agentID, endpoint, method, lobbyID, characterID, requestBody, queryParams, responseBytes, responseStatus, durationMs)
 	}()
+}
+
+// cleanupOldAPILogs deletes API logs older than 30 days (v0.8.52)
+// Returns the number of rows deleted
+func cleanupOldAPILogs() int64 {
+	if db == nil {
+		return 0
+	}
+	
+	result, err := db.Exec("DELETE FROM api_logs WHERE created_at < NOW() - INTERVAL '30 days'")
+	if err != nil {
+		log.Printf("API log cleanup error: %v", err)
+		return 0
+	}
+	
+	rowsDeleted, _ := result.RowsAffected()
+	if rowsDeleted > 0 {
+		log.Printf("API log cleanup: deleted %d old entries", rowsDeleted)
+	}
+	return rowsDeleted
+}
+
+// startAPILogCleanupWorker starts a background goroutine that cleans up old API logs
+// Runs cleanup immediately on startup, then every 24 hours
+func startAPILogCleanupWorker() {
+	// Run cleanup immediately on startup
+	go func() {
+		cleanupOldAPILogs()
+		
+		// Then run every 24 hours
+		ticker := time.NewTicker(24 * time.Hour)
+		for range ticker.C {
+			cleanupOldAPILogs()
+		}
+	}()
+	log.Println("API log cleanup worker started (runs every 24h)")
 }
 
 // responseCapture wraps http.ResponseWriter to capture response body and status
