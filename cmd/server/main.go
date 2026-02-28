@@ -18612,12 +18612,12 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 
 // handleGMTrap godoc
 // @Summary Trigger, detect, or disarm a trap
-// @Description Apply trap mechanics using built-in DMG traps or custom parameters. Actions: trigger (spring the trap), detect (Perception/Investigation check), disarm (thieves' tools check). Built-in traps include pit traps, poison needles, swinging blades, fire-breathing statues, and more.
+// @Description Apply trap mechanics using built-in DMG traps or custom parameters. Actions: trigger (spring the trap), detect (Perception/Investigation check), disarm (thieves' tools check). Built-in traps include pit traps, poison needles, swinging blades, fire-breathing statues, and more. Use GET /api/gm/trap?list=true to see available traps.
 // @Tags GM Tools
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{character_id=integer,action=string,trap_name=string,custom_*=various} true "Trap request: action (trigger/detect/disarm), trap_name (optional built-in), or custom_* params"
+// @Param request body object{character_id=integer,action=string,trap_name=string} true "Trap request: action (trigger/detect/disarm), trap_name (optional built-in), or custom_detect_dc/custom_disarm_dc/custom_save_dc/custom_damage params"
 // @Success 200 {object} map[string]interface{} "Trap result"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 403 {object} map[string]interface{} "Not GM"
