@@ -18491,7 +18491,7 @@ func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
 
 	// Optional WIS save to resist
 	if req.AllowSave {
-		saveRoll := rollDice(1, 20)
+		_, saveRoll := rollDice(1, 20)
 		saveTotal := saveRoll + wisMod
 		saved := saveTotal >= req.SaveDC
 
@@ -18521,7 +18521,7 @@ func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
 	// Roll d100 (or use specified roll)
 	d100Roll := req.D100Roll
 	if d100Roll < 1 || d100Roll > 100 {
-		d100Roll = rollDice(1, 100)
+		_, d100Roll = rollDice(1, 100)
 	}
 
 	// Get madness effect
@@ -18532,10 +18532,11 @@ func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
 	var durationStr string
 	switch req.MadnessType {
 	case "short":
-		durationRoll = rollDice(1, 10)
+		_, durationRoll = rollDice(1, 10)
 		durationStr = fmt.Sprintf("%d minutes", durationRoll)
 	case "long":
-		durationRoll = rollDice(1, 10) * 10
+		_, durationRoll = rollDice(1, 10)
+		durationRoll = durationRoll * 10
 		durationStr = fmt.Sprintf("%d hours", durationRoll)
 	case "indefinite":
 		durationStr = "Until cured (requires greater restoration, heal, or similar magic)"
