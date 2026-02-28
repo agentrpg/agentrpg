@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.52
+// @version 0.8.53
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.52"
+const version = "0.8.53"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -397,6 +397,7 @@ func main() {
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
 	http.HandleFunc("/api/gm/apply-poison", handleGMApplyPoison)
 	http.HandleFunc("/api/gm/apply-disease", handleGMApplyDisease)
+	http.HandleFunc("/api/gm/environmental-hazard", handleGMEnvironmentalHazard)
 	http.HandleFunc("/api/observe", handleObserve)
 	http.HandleFunc("/api/roll", handleRoll)
 	http.HandleFunc("/api/conditions", handleConditionsList)
@@ -17993,6 +17994,438 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 		response["recovery_rules"] = disease.Recovery
 	}
 
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMEnvironmentalHazard godoc
+// @Summary Apply environmental hazard effects
+// @Description Apply 5e environmental hazard rules. Hazard types: extreme_cold (below 0°F, DC 10 CON, exhaustion), extreme_heat (above 100°F, DC 5+ CON, exhaustion), frigid_water (freezing water, DC 10 CON/min, exhaustion), high_altitude (above 10000ft, DC 15 CON, exhaustion). Hazards cause CON saves with exhaustion on failure. Resistances/immunities to relevant damage types grant automatic success.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth (base64 of email:password)"
+// @Param request body object true "Hazard request" example({"character_id": 5, "hazard": "extreme_cold", "hours": 1})
+// @Success 200 {object} map[string]interface{} "Hazard applied"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/environmental-hazard [post]
+func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID   int    `json:"character_id"`
+		Hazard        string `json:"hazard"`         // extreme_cold, extreme_heat, frigid_water, high_altitude
+		Hours         int    `json:"hours"`          // Duration of exposure (for cold/heat/altitude)
+		Minutes       int    `json:"minutes"`        // Duration in frigid water
+		HasColdGear   bool   `json:"has_cold_gear"`  // Cold weather gear for extreme_cold
+		HeavyArmor    bool   `json:"heavy_armor"`    // Wearing medium/heavy armor (extreme_heat)
+		IsAcclimated  bool   `json:"is_acclimated"`  // Acclimated to high altitude (30+ days)
+		HasClimbSpeed bool   `json:"has_climb_speed"` // Creature has climbing speed (naturally acclimated)
+		Reason        string `json:"reason"`         // Optional description
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate request
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	validHazards := map[string]bool{
+		"extreme_cold":  true,
+		"extreme_heat":  true,
+		"frigid_water":  true,
+		"high_altitude": true,
+	}
+	
+	hazardLower := strings.ToLower(req.Hazard)
+	if !validHazards[hazardLower] {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_hazard",
+			"valid_hazards": []string{"extreme_cold", "extreme_heat", "frigid_water", "high_altitude"},
+			"message":       fmt.Sprintf("Unknown hazard type: %s", req.Hazard),
+		})
+		return
+	}
+	
+	// Default durations
+	if req.Hours == 0 && req.Minutes == 0 {
+		if hazardLower == "frigid_water" {
+			req.Minutes = 1 // Default 1 minute in water
+		} else {
+			req.Hours = 1 // Default 1 hour of exposure
+		}
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName string
+	var con, exhaustionLevel int
+	var conditionsStr string
+	err = db.QueryRow(`
+		SELECT name, con, COALESCE(exhaustion_level, 0), COALESCE(conditions, '')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &con, &exhaustionLevel, &conditionsStr)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	conMod := modifier(con)
+	
+	// Check for resistances/immunities based on hazard type
+	condList := strings.Split(conditionsStr, ",")
+	hasColdResistance := false
+	hasColdImmunity := false
+	hasFireResistance := false
+	hasFireImmunity := false
+	
+	for _, c := range condList {
+		c = strings.ToLower(strings.TrimSpace(c))
+		if c == "resistance:cold" || c == "resistant:cold" {
+			hasColdResistance = true
+		}
+		if c == "immunity:cold" || c == "immune:cold" {
+			hasColdImmunity = true
+		}
+		if c == "resistance:fire" || c == "resistant:fire" {
+			hasFireResistance = true
+		}
+		if c == "immunity:fire" || c == "immune:fire" {
+			hasFireImmunity = true
+		}
+	}
+	
+	// Determine hazard parameters
+	var saveDC int
+	var numSaves int
+	var damageType string
+	var autoSuccess bool
+	var advantage bool
+	var disadvantage bool
+	var hazardDesc string
+	
+	switch hazardLower {
+	case "extreme_cold":
+		// DC 10 CON save per hour
+		saveDC = 10
+		numSaves = req.Hours
+		if numSaves < 1 {
+			numSaves = 1
+		}
+		damageType = "cold"
+		hazardDesc = "extreme cold (below 0°F)"
+		autoSuccess = hasColdImmunity || hasColdResistance
+		advantage = req.HasColdGear
+		
+	case "extreme_heat":
+		// DC 5 CON save first hour, increases by 1 each subsequent hour
+		saveDC = 5
+		numSaves = req.Hours
+		if numSaves < 1 {
+			numSaves = 1
+		}
+		damageType = "fire"
+		hazardDesc = "extreme heat (above 100°F)"
+		autoSuccess = hasFireImmunity || hasFireResistance
+		disadvantage = req.HeavyArmor
+		
+	case "frigid_water":
+		// DC 10 CON save per minute
+		saveDC = 10
+		numSaves = req.Minutes
+		if numSaves < 1 {
+			numSaves = 1
+		}
+		damageType = "cold"
+		hazardDesc = "frigid water"
+		autoSuccess = hasColdImmunity || hasColdResistance
+		
+	case "high_altitude":
+		// DC 15 CON save per hour
+		saveDC = 15
+		numSaves = req.Hours
+		if numSaves < 1 {
+			numSaves = 1
+		}
+		hazardDesc = "high altitude (above 10,000 ft)"
+		// Acclimation or climbing speed = immune
+		autoSuccess = req.IsAcclimated || req.HasClimbSpeed
+	}
+	
+	// Handle auto-success cases
+	if autoSuccess {
+		immuneReason := ""
+		switch hazardLower {
+		case "extreme_cold", "frigid_water":
+			if hasColdImmunity {
+				immuneReason = "immunity to cold"
+			} else if hasColdResistance {
+				immuneReason = "resistance to cold"
+			}
+		case "extreme_heat":
+			if hasFireImmunity {
+				immuneReason = "immunity to fire"
+			} else if hasFireResistance {
+				immuneReason = "resistance to fire"
+			}
+		case "high_altitude":
+			if req.HasClimbSpeed {
+				immuneReason = "climbing speed (naturally acclimated)"
+			} else if req.IsAcclimated {
+				immuneReason = "acclimation (30+ days at altitude)"
+			}
+		}
+		
+		// Log the event
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.CharacterID, "environmental_hazard",
+			fmt.Sprintf("%s exposed to %s", charName, hazardDesc),
+			fmt.Sprintf("Automatically unaffected due to %s", immuneReason))
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"character":      charName,
+			"character_id":   req.CharacterID,
+			"hazard":         hazardLower,
+			"hazard_desc":    hazardDesc,
+			"auto_success":   true,
+			"immune_reason":  immuneReason,
+			"exhaustion_gained": 0,
+			"exhaustion_level":  exhaustionLevel,
+			"message":        fmt.Sprintf("❄️ %s is unaffected by %s due to %s.", charName, hazardDesc, immuneReason),
+		})
+		return
+	}
+	
+	// Roll saves
+	saveResults := []map[string]interface{}{}
+	exhaustionGained := 0
+	
+	for i := 0; i < numSaves; i++ {
+		// For extreme heat, DC increases by 1 each hour
+		currentDC := saveDC
+		if hazardLower == "extreme_heat" {
+			currentDC = saveDC + i
+		}
+		
+		// Roll the save (with advantage/disadvantage)
+		roll1 := rollDie(20)
+		roll2 := rollDie(20)
+		saveRoll := roll1
+		
+		rollNote := ""
+		if advantage && !disadvantage {
+			if roll2 > roll1 {
+				saveRoll = roll2
+			}
+			rollNote = fmt.Sprintf(" (advantage: %d, %d)", roll1, roll2)
+		} else if disadvantage && !advantage {
+			if roll2 < roll1 {
+				saveRoll = roll2
+			}
+			rollNote = fmt.Sprintf(" (disadvantage: %d, %d)", roll1, roll2)
+		}
+		
+		saveTotal := saveRoll + conMod
+		saved := saveTotal >= currentDC
+		
+		timeLabel := ""
+		if hazardLower == "frigid_water" {
+			timeLabel = fmt.Sprintf("minute %d", i+1)
+		} else {
+			timeLabel = fmt.Sprintf("hour %d", i+1)
+		}
+		
+		result := map[string]interface{}{
+			"time":       timeLabel,
+			"dc":         currentDC,
+			"roll":       saveRoll,
+			"modifier":   conMod,
+			"total":      saveTotal,
+			"saved":      saved,
+		}
+		
+		if rollNote != "" {
+			result["roll_note"] = rollNote
+		}
+		
+		if !saved {
+			exhaustionGained++
+			result["exhaustion_gained"] = 1
+		}
+		
+		saveResults = append(saveResults, result)
+		
+		// Check for death (exhaustion 6)
+		if exhaustionLevel + exhaustionGained >= 6 {
+			// Cap at 6 and stop
+			break
+		}
+	}
+	
+	// Apply exhaustion
+	newExhaustion := exhaustionLevel + exhaustionGained
+	if newExhaustion > 6 {
+		newExhaustion = 6
+	}
+	
+	// Update exhaustion in database
+	if exhaustionGained > 0 {
+		// Update or add exhaustion condition
+		newConditions := []string{}
+		foundExhaustion := false
+		for _, c := range condList {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				continue
+			}
+			if strings.HasPrefix(strings.ToLower(c), "exhaustion:") {
+				newConditions = append(newConditions, fmt.Sprintf("exhaustion:%d", newExhaustion))
+				foundExhaustion = true
+			} else {
+				newConditions = append(newConditions, c)
+			}
+		}
+		if !foundExhaustion && newExhaustion > 0 {
+			newConditions = append(newConditions, fmt.Sprintf("exhaustion:%d", newExhaustion))
+		}
+		
+		db.Exec("UPDATE characters SET conditions = $1, exhaustion_level = $2 WHERE id = $3",
+			strings.Join(newConditions, ", "), newExhaustion, req.CharacterID)
+	}
+	
+	// Build message
+	var message string
+	timeUnit := "hour(s)"
+	duration := req.Hours
+	if hazardLower == "frigid_water" {
+		timeUnit = "minute(s)"
+		duration = req.Minutes
+	}
+	
+	if exhaustionGained == 0 {
+		message = fmt.Sprintf("✅ %s endures %d %s of %s without effect! All saves passed.", 
+			charName, duration, timeUnit, hazardDesc)
+	} else if newExhaustion >= 6 {
+		message = fmt.Sprintf("💀 %s succumbs to %s! Gained %d exhaustion level(s), reaching exhaustion 6 (DEATH).",
+			charName, hazardDesc, exhaustionGained)
+	} else {
+		message = fmt.Sprintf("😰 %s struggles against %s! Gained %d exhaustion level(s) over %d %s. Now at exhaustion %d.",
+			charName, hazardDesc, exhaustionGained, duration, timeUnit, newExhaustion)
+	}
+	
+	// Log the action
+	reason := req.Reason
+	if reason == "" {
+		reason = fmt.Sprintf("exposed to %s for %d %s", hazardDesc, duration, timeUnit)
+	}
+	
+	resultSummary := fmt.Sprintf("%d/%d saves failed → %d exhaustion gained (now level %d)", 
+		exhaustionGained, numSaves, exhaustionGained, newExhaustion)
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "environmental_hazard",
+		fmt.Sprintf("%s %s", charName, reason),
+		resultSummary)
+	
+	// Build response
+	response := map[string]interface{}{
+		"success":           true,
+		"character":         charName,
+		"character_id":      req.CharacterID,
+		"hazard":            hazardLower,
+		"hazard_desc":       hazardDesc,
+		"duration":          duration,
+		"time_unit":         timeUnit,
+		"save_dc":           saveDC,
+		"num_saves":         numSaves,
+		"saves":             saveResults,
+		"exhaustion_gained": exhaustionGained,
+		"exhaustion_level":  newExhaustion,
+		"message":           message,
+	}
+	
+	if advantage {
+		response["advantage"] = true
+		response["advantage_reason"] = "cold weather gear"
+	}
+	if disadvantage {
+		response["disadvantage"] = true
+		response["disadvantage_reason"] = "wearing medium/heavy armor in heat"
+	}
+	if newExhaustion >= 6 {
+		response["death"] = true
+	}
+	
+	// Include exhaustion effects reminder
+	exhaustionEffects := map[int]string{
+		1: "Disadvantage on ability checks",
+		2: "Speed halved",
+		3: "Disadvantage on attack rolls and saving throws",
+		4: "Hit point maximum halved",
+		5: "Speed reduced to 0",
+		6: "Death",
+	}
+	if newExhaustion > 0 && newExhaustion <= 6 {
+		effects := []string{}
+		for i := 1; i <= newExhaustion; i++ {
+			effects = append(effects, fmt.Sprintf("Level %d: %s", i, exhaustionEffects[i]))
+		}
+		response["exhaustion_effects"] = effects
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 

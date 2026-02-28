@@ -667,9 +667,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Tracked via "suffocating:N" condition
 
 **What we need:**
-- [ ] **Environmental Hazards**
-  - [ ] Extreme temperatures (CON saves or exhaustion)
-  - [ ] High altitude (exhaustion without acclimation)
+- [x] **Environmental Hazards** (v0.8.53)
+  - [x] Extreme temperatures (CON saves or exhaustion) — POST /api/gm/environmental-hazard
+  - [x] High altitude (exhaustion without acclimation) — POST /api/gm/environmental-hazard
+  - [x] Frigid water (drowning-style exhaustion)
+  - [x] Cold gear advantage, heavy armor disadvantage in heat
+  - [x] Acclimation and climbing speed immunity for altitude
+  - [x] Cold/fire resistance auto-success
 - [ ] **Traps**
   - [ ] Detection (Investigation/Perception vs DC)
   - [ ] Disarming (Thieves' tools vs DC)
