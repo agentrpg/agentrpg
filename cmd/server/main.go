@@ -6564,6 +6564,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	
 	partyStatus := []map[string]interface{}{}
 	playerActivity := []map[string]interface{}{}
+	gmTasks := []string{}
 	var waitingFor *string
 	
 	// Track who needs auto-advance
@@ -6721,11 +6722,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		
 		// Check for players inactive 12h+ in exploration mode (v0.8.49)
 		var explorationSkipPlayers []string
-		for _, activity := range playerActivity {
-			activityMap, ok := activity.(map[string]interface{})
-			if !ok {
-				continue
-			}
+		for _, activityMap := range playerActivity {
 			countdowns, ok := activityMap["countdowns"].(map[string]interface{})
 			if !ok {
 				continue
@@ -6938,7 +6935,6 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// GM tasks / maintenance reminders
-	gmTasks := []string{}
 	
 	// DRIFT DETECTION: Check for drift_flag observations
 	driftAlerts := []map[string]interface{}{}

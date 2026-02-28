@@ -10,14 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
 )
-
-// Suppressing unused import warning - strings is used in the test for prefix matching
-var _ = func() bool { return true }
 
 // TestAgent represents a test user/agent
 type TestAgent struct {
@@ -1285,7 +1283,7 @@ func TestCombatSkipRequired(t *testing.T) {
 			foundSkipTask := false
 			for _, task := range tasks {
 				taskStr := task.(string)
-				if len(taskStr) > 0 && taskStr[0] == '⚠' && 
+				if strings.HasPrefix(taskStr, "⚠") &&
 				   (containsString(taskStr, "SKIP NOW") || containsString(taskStr, "turn timeout")) {
 					foundSkipTask = true
 					t.Logf("✓ Found urgent skip task: %s", taskStr)
