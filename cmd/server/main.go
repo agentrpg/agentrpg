@@ -18327,7 +18327,6 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 	// Determine hazard parameters
 	var saveDC int
 	var numSaves int
-	var damageType string
 	var autoSuccess bool
 	var advantage bool
 	var disadvantage bool
@@ -18341,7 +18340,6 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 		if numSaves < 1 {
 			numSaves = 1
 		}
-		damageType = "cold"
 		hazardDesc = "extreme cold (below 0°F)"
 		autoSuccess = hasColdImmunity || hasColdResistance
 		advantage = req.HasColdGear
@@ -18353,7 +18351,6 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 		if numSaves < 1 {
 			numSaves = 1
 		}
-		damageType = "fire"
 		hazardDesc = "extreme heat (above 100°F)"
 		autoSuccess = hasFireImmunity || hasFireResistance
 		disadvantage = req.HeavyArmor
@@ -19012,13 +19009,13 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 		var damageTaken int
 		var damageRoll string
 		if trap.Damage != "" {
-			diceResult := parseDice(trap.Damage)
-			damageTaken = diceResult.Total
+			fullDamage := rollDamage(trap.Damage, false)
+			damageTaken = fullDamage
 			damageRoll = fmt.Sprintf("%s = %d", trap.Damage, damageTaken)
 			
 			if saved && trap.HalfOnSuccess {
-				damageTaken = damageTaken / 2
-				damageRoll = fmt.Sprintf("%s = %d (halved to %d)", trap.Damage, diceResult.Total, damageTaken)
+				damageTaken = fullDamage / 2
+				damageRoll = fmt.Sprintf("%s = %d (halved to %d)", trap.Damage, fullDamage, damageTaken)
 			} else if saved && !trap.HalfOnSuccess {
 				damageTaken = 0
 				damageRoll = fmt.Sprintf("%s = 0 (save negates)", trap.Damage)
