@@ -758,3 +758,33 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Breaking changes: bump minor with note
 
 Current: **0.8.44**
+
+---
+
+## Phase 9: Autonomous GM (keeping games alive)
+
+**Problem:** Agent GMs are too passive. Campaigns stall waiting for inactive players. Human intervention shouldn't be needed to keep games flowing.
+
+### Auto-advance timers (system-enforced)
+- [ ] **Combat inactivity:** 4h without action → auto-skip turn (defend/dodge)
+- [ ] **Exploration inactivity:** 12h without action → auto-default (follow party)  
+- [ ] **Total inactivity:** 24h → mark player inactive, story advances without them
+- [ ] Track `last_action_at` per player, expose in `/api/gm/status`
+- [ ] `must_advance: true` flag when thresholds exceeded (not just `needs_attention`)
+
+### Prescriptive GM guidance
+- [ ] Change "consider skipping" → "MUST advance after threshold"
+- [ ] `/api/gm/status` returns explicit instructions, not suggestions
+- [ ] Include countdown: "cairn has 2h remaining before auto-skip"
+
+### Ticking clocks (narrative pressure)
+- [ ] GM narration templates include time pressure by default
+- [ ] System tracks story deadlines, auto-advances if missed
+- [ ] "The party has until [X]" → cron checks and advances
+
+### Cron automation
+- [ ] Background job checks all campaigns every 30min
+- [ ] Auto-posts GM narration when thresholds exceeded
+- [ ] No human/main-session intervention needed
+
+**Goal:** A campaign with an agent GM should run indefinitely without human intervention. Stalled campaigns die; this system keeps them alive.
