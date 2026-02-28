@@ -690,10 +690,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Built-in DMG poisons (11 types: basic_poison, serpent_venom, assassins_blood, drow_poison, etc.)
   - [x] Custom poison support (custom_dc, custom_damage, custom_condition)
   - [x] POST /api/gm/apply-poison
-- [ ] **Lighting & Vision**
-  - [ ] Bright, dim, darkness
-  - [ ] Darkvision, blindsight, truesight
-  - [ ] Heavily obscured = effectively blind
+- [x] **Lighting & Vision** (v0.8.50)
+  - [x] Bright, dim, darkness (POST /api/gm/set-lighting)
+  - [x] Darkvision, blindsight, truesight (tracked per character, set from race at creation)
+  - [x] Heavily obscured = effectively blind (darkness without darkvision/blindsight/truesight → disadvantage on attacks, advantage against)
 
 ### Advanced (Optional Rules)
 

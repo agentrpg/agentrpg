@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.48
+// @version 0.8.50
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.49"
+const version = "0.8.50"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -389,6 +389,7 @@ func main() {
 	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
 	http.HandleFunc("/api/gm/suffocation", handleGMSuffocation)
 	http.HandleFunc("/api/gm/underwater", handleGMUnderwater)
+	http.HandleFunc("/api/gm/set-lighting", handleGMSetLighting)
 	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
@@ -659,6 +660,11 @@ func initDB() {
 		-- (unless crossbow/net/thrown), and fire damage is halved
 		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS underwater BOOLEAN DEFAULT FALSE;
 		
+		-- Lighting tracking (v0.8.50)
+		-- Area lighting level: 'bright' (normal), 'dim' (disadvantage on Perception), 'darkness' (heavily obscured)
+		-- Affects attack rolls based on characters' vision capabilities
+		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS lighting VARCHAR(20) DEFAULT 'bright';
+		
 		-- Magic item attunement (max 3 attuned items per character)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attuned_items JSONB DEFAULT '[]';
 		
@@ -724,6 +730,17 @@ func initDB() {
 		-- Equipped Shield (v0.8.45 - Armor Mechanics)
 		-- TRUE if currently holding a shield (+2 AC)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS equipped_shield BOOLEAN DEFAULT FALSE;
+		
+		-- Vision capabilities (v0.8.50 - Lighting & Vision)
+		-- Darkvision range in feet (60 for most races with it, 120 for drow/deep gnome)
+		-- Allows treating darkness as dim light within range
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS darkvision_range INTEGER DEFAULT 0;
+		-- Blindsight range in feet (rare, usually from class features or magic)
+		-- Can perceive surroundings without relying on sight
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS blindsight_range INTEGER DEFAULT 0;
+		-- Truesight range in feet (very rare, usually from magic)
+		-- Can see in darkness, see invisible, see through illusions
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS truesight_range INTEGER DEFAULT 0;
 		
 		-- Class skill choices (Phase 8 P1 - Proficiencies)
 		-- Available skills a class can choose from, and how many to pick
@@ -5432,11 +5449,17 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 		}
 		languageProfsStr := strings.Join(languages, ", ")
 		
+		// Get darkvision range from race (v0.8.50)
+		darkvisionRange := 0
+		if race, ok := srdRaces[raceKey]; ok {
+			darkvisionRange = race.DarkvisionRange
+		}
+		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise, language_proficiencies)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19, $20) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr, languageProfsStr).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise, language_proficiencies, darkvision_range)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr, languageProfsStr, darkvisionRange).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -5520,6 +5543,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var languageProfsRaw string
 	var equippedArmor sql.NullString
 	var equippedShield bool
+	var darkvisionRange, blindsightRange, truesightRange int
 	
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
@@ -5536,7 +5560,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(tool_proficiencies, ''),
 			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, ''),
 			COALESCE(expertise, ''), COALESCE(language_proficiencies, ''),
-			equipped_armor, COALESCE(equipped_shield, false)
+			equipped_armor, COALESCE(equipped_shield, false),
+			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0)
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
@@ -5544,7 +5569,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
-		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield)
+		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
+		&darkvisionRange, &blindsightRange, &truesightRange)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -5756,6 +5782,21 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	response["equipment"] = equipment
+	
+	// Vision capabilities (v0.8.50)
+	vision := map[string]interface{}{}
+	if darkvisionRange > 0 {
+		vision["darkvision"] = darkvisionRange
+	}
+	if blindsightRange > 0 {
+		vision["blindsight"] = blindsightRange
+	}
+	if truesightRange > 0 {
+		vision["truesight"] = truesightRange
+	}
+	if len(vision) > 0 {
+		response["vision"] = vision
+	}
 	
 	// Recalculate AC based on equipped armor (in case stored AC is out of sync)
 	calculatedAC := calculateArmorAC(modifier(dex), equippedArmor.String, equippedShield)
@@ -13887,11 +13928,35 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 	hasAdvantage := false
 	hasDisadvantage := false
 	
-	// Get attacker conditions
+	// Get attacker conditions and lobby_id for lighting check (v0.8.50)
 	var conditionsJSON []byte
-	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&conditionsJSON)
+	var lobbyID int
+	db.QueryRow("SELECT COALESCE(conditions, '[]'), COALESCE(lobby_id, 0) FROM characters WHERE id = $1", charID).Scan(&conditionsJSON, &lobbyID)
 	var conditions []string
 	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Lighting check (v0.8.50): Darkness without darkvision/blindsight/truesight = effectively blinded
+	if lobbyID > 0 {
+		attackerVision := canSeeInLighting(charID, getCampaignLighting(lobbyID))
+		if attackerVision == "blind" {
+			// Attacker can't see: disadvantage on attacks
+			hasDisadvantage = true
+		}
+		
+		// Check defender's vision for advantage against them
+		if len(targetID) > 0 && targetID[0] > 0 {
+			// Get defender's character info (might be a monster - handle gracefully)
+			var defenderLobbyID int
+			db.QueryRow("SELECT COALESCE(lobby_id, 0) FROM characters WHERE id = $1", targetID[0]).Scan(&defenderLobbyID)
+			if defenderLobbyID > 0 {
+				defenderVision := canSeeInLighting(targetID[0], getCampaignLighting(defenderLobbyID))
+				if defenderVision == "blind" {
+					// Defender can't see: advantage on attacks against them
+					hasAdvantage = true
+				}
+			}
+		}
+	}
 	
 	// Attacker conditions
 	for _, cond := range conditions {
@@ -15558,6 +15623,70 @@ func isUnderwaterExemptWeapon(weaponKey string) bool {
 	return exemptWeapons[strings.ToLower(weaponKey)]
 }
 
+// getCampaignLighting returns the current lighting level for a campaign (v0.8.50)
+// Returns: "bright" (default), "dim", or "darkness"
+func getCampaignLighting(lobbyID int) string {
+	var lighting string
+	err := db.QueryRow("SELECT COALESCE(lighting, 'bright') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&lighting)
+	if err != nil {
+		return "bright" // Default to bright light
+	}
+	return lighting
+}
+
+// getCharacterVision returns vision capabilities for a character (v0.8.50)
+// Returns darkvision, blindsight, truesight ranges in feet
+func getCharacterVision(charID int) (darkvision, blindsight, truesight int) {
+	db.QueryRow(`SELECT COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0) 
+		FROM characters WHERE id = $1`, charID).Scan(&darkvision, &blindsight, &truesight)
+	return
+}
+
+// canSeeInLighting checks if a character can see clearly in given lighting (v0.8.50)
+// Returns:
+// - "normal": can see normally (bright light, or has appropriate vision)
+// - "dim": can see but with disadvantage on Perception (dim light without special vision)
+// - "blind": effectively blinded (darkness without darkvision/blindsight/truesight)
+func canSeeInLighting(charID int, lighting string) string {
+	darkvision, blindsight, truesight := getCharacterVision(charID)
+	
+	switch lighting {
+	case "bright":
+		return "normal"
+	case "dim":
+		// Dim light: disadvantage on Perception, but no attack penalties
+		// Darkvision treats dim light as bright for combat purposes
+		if darkvision > 0 || blindsight > 0 || truesight > 0 {
+			return "normal"
+		}
+		return "dim" // Perception disadvantage only, attacks unaffected
+	case "darkness":
+		// Darkness: heavily obscured = effectively blinded
+		// Truesight sees through darkness
+		if truesight > 0 {
+			return "normal"
+		}
+		// Blindsight doesn't rely on light
+		if blindsight > 0 {
+			return "normal"
+		}
+		// Darkvision treats darkness as dim light (no attack penalty, Perception disadvantage)
+		if darkvision > 0 {
+			return "dim"
+		}
+		// No vision capabilities = effectively blinded
+		return "blind"
+	}
+	return "normal"
+}
+
+// isEffectivelyBlinded checks if a character is effectively blind due to lighting (v0.8.50)
+// When effectively blinded: disadvantage on attacks, advantage on attacks against them
+func isEffectivelyBlinded(charID int, lobbyID int) bool {
+	lighting := getCampaignLighting(lobbyID)
+	return canSeeInLighting(charID, lighting) == "blind"
+}
+
 // handleGMUnderwater godoc
 // @Summary Toggle underwater combat mode
 // @Description Set or toggle underwater combat for a campaign. When underwater: melee attacks have disadvantage, ranged attacks have disadvantage (unless crossbow/net/thrown), fire damage is halved.
@@ -15687,6 +15816,175 @@ func handleGMUnderwater(w http.ResponseWriter, r *http.Request) {
 		"message":    statusText,
 		"note":       "Underwater effects apply to all combatants. Crossbows, nets, and thrown weapons (javelin, trident, spear, dart) work normally for ranged attacks.",
 	})
+}
+
+// handleGMSetLighting godoc
+// @Summary Set area lighting level
+// @Description Set the lighting level for a campaign area. Lighting affects visibility and attack rolls: bright (normal), dim (disadvantage on Perception), darkness (heavily obscured - effectively blinded without darkvision/blindsight/truesight).
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{campaign_id=integer,lighting=string} true "Lighting level: 'bright', 'dim', or 'darkness'"
+// @Success 200 {object} map[string]interface{} "Lighting updated"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/set-lighting [post]
+func handleGMSetLighting(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CampaignID int    `json:"campaign_id"`
+		Lighting   string `json:"lighting"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CampaignID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "campaign_id required",
+		})
+		return
+	}
+	
+	// Validate lighting value
+	req.Lighting = strings.ToLower(req.Lighting)
+	validLighting := map[string]bool{"bright": true, "dim": true, "darkness": true}
+	if !validLighting[req.Lighting] {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_lighting",
+			"message":       "lighting must be 'bright', 'dim', or 'darkness'",
+			"valid_options": []string{"bright", "dim", "darkness"},
+		})
+		return
+	}
+	
+	// Verify agent is DM
+	var dmID int
+	err = db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", req.CampaignID).Scan(&dmID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "campaign_not_found",
+			"message": fmt.Sprintf("Campaign %d not found", req.CampaignID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this campaign",
+		})
+		return
+	}
+	
+	// Upsert lighting in combat_state
+	_, err = db.Exec(`
+		INSERT INTO combat_state (lobby_id, active, lighting)
+		VALUES ($1, false, $2)
+		ON CONFLICT (lobby_id) DO UPDATE SET lighting = $2
+	`, req.CampaignID, req.Lighting)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "message": err.Error()})
+		return
+	}
+	
+	// Log the action
+	var statusText string
+	switch req.Lighting {
+	case "bright":
+		statusText = "The area is brightly lit"
+	case "dim":
+		statusText = "The area is shrouded in dim light"
+	case "darkness":
+		statusText = "Darkness falls over the area"
+	}
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4)
+	`, req.CampaignID, "environment", statusText,
+		fmt.Sprintf("Lighting set to: %s", req.Lighting))
+	
+	// Describe effects
+	effects := []string{}
+	notes := []string{}
+	
+	switch req.Lighting {
+	case "bright":
+		effects = append(effects, "Normal visibility for all creatures")
+	case "dim":
+		effects = append(effects, "Disadvantage on Wisdom (Perception) checks relying on sight")
+		notes = append(notes, "Creatures with darkvision treat dim light as bright light")
+	case "darkness":
+		effects = append(effects, "Heavily obscured - creatures without darkvision/blindsight/truesight are effectively blinded")
+		effects = append(effects, "Blinded: Disadvantage on attacks, advantage against them, auto-fail sight-based checks")
+		notes = append(notes, "Darkvision: treats darkness as dim light (Perception disadvantage only)")
+		notes = append(notes, "Blindsight/Truesight: unaffected by darkness")
+	}
+	
+	// Get party vision capabilities for helpful info
+	partyVision := []map[string]interface{}{}
+	rows, _ := db.Query(`SELECT name, COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0) 
+		FROM characters WHERE lobby_id = $1`, req.CampaignID)
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			var darkvision, blindsight, truesight int
+			rows.Scan(&name, &darkvision, &blindsight, &truesight)
+			if darkvision > 0 || blindsight > 0 || truesight > 0 {
+				vision := map[string]interface{}{"name": name}
+				if darkvision > 0 {
+					vision["darkvision"] = darkvision
+				}
+				if blindsight > 0 {
+					vision["blindsight"] = blindsight
+				}
+				if truesight > 0 {
+					vision["truesight"] = truesight
+				}
+				partyVision = append(partyVision, vision)
+			}
+		}
+	}
+	
+	response := map[string]interface{}{
+		"success":     true,
+		"campaign_id": req.CampaignID,
+		"lighting":    req.Lighting,
+		"effects":     effects,
+		"message":     statusText,
+	}
+	if len(notes) > 0 {
+		response["notes"] = notes
+	}
+	if len(partyVision) > 0 {
+		response["party_vision_capabilities"] = partyVision
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleGMMoraleCheck godoc
@@ -21068,26 +21366,27 @@ var srdClasses = map[string]SRDClass{
 }
 
 type SRDRace struct {
-	Name        string         `json:"name"`
-	Size        string         `json:"size"`
-	Speed       int            `json:"speed"`
-	AbilityMods map[string]int `json:"ability_modifiers"`
-	Traits      []string       `json:"traits"`
-	Languages   []string       `json:"languages"`
+	Name           string         `json:"name"`
+	Size           string         `json:"size"`
+	Speed          int            `json:"speed"`
+	AbilityMods    map[string]int `json:"ability_modifiers"`
+	Traits         []string       `json:"traits"`
+	Languages      []string       `json:"languages"`
+	DarkvisionRange int           `json:"darkvision_range"` // v0.8.50: 0 = none, 60 = standard, 120 = superior
 }
 
 var srdRaces = map[string]SRDRace{
-	"human": {Name: "Human", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 1, "DEX": 1, "CON": 1, "INT": 1, "WIS": 1, "CHA": 1}, Traits: []string{"Extra Language"}, Languages: []string{"Common", "one other"}},
-	"elf": {Name: "Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"DEX": 2}, Traits: []string{"Darkvision", "Keen Senses", "Fey Ancestry", "Trance"}, Languages: []string{"Common", "Elvish"}},
-	"high_elf": {Name: "High Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"DEX": 2, "INT": 1}, Traits: []string{"Darkvision", "Keen Senses", "Fey Ancestry", "Trance", "Cantrip"}, Languages: []string{"Common", "Elvish"}},
-	"dwarf": {Name: "Dwarf", Size: "Medium", Speed: 25, AbilityMods: map[string]int{"CON": 2}, Traits: []string{"Darkvision", "Dwarven Resilience", "Stonecunning"}, Languages: []string{"Common", "Dwarvish"}},
-	"hill_dwarf": {Name: "Hill Dwarf", Size: "Medium", Speed: 25, AbilityMods: map[string]int{"CON": 2, "WIS": 1}, Traits: []string{"Darkvision", "Dwarven Resilience", "Stonecunning", "Dwarven Toughness"}, Languages: []string{"Common", "Dwarvish"}},
-	"halfling": {Name: "Halfling", Size: "Small", Speed: 25, AbilityMods: map[string]int{"DEX": 2}, Traits: []string{"Lucky", "Brave", "Halfling Nimbleness"}, Languages: []string{"Common", "Halfling"}},
-	"dragonborn": {Name: "Dragonborn", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 2, "CHA": 1}, Traits: []string{"Draconic Ancestry", "Breath Weapon", "Damage Resistance"}, Languages: []string{"Common", "Draconic"}},
-	"gnome": {Name: "Gnome", Size: "Small", Speed: 25, AbilityMods: map[string]int{"INT": 2}, Traits: []string{"Darkvision", "Gnome Cunning"}, Languages: []string{"Common", "Gnomish"}},
-	"half_elf": {Name: "Half-Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"CHA": 2}, Traits: []string{"Darkvision", "Fey Ancestry", "Skill Versatility"}, Languages: []string{"Common", "Elvish"}},
-	"half_orc": {Name: "Half-Orc", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 2, "CON": 1}, Traits: []string{"Darkvision", "Menacing", "Relentless Endurance", "Savage Attacks"}, Languages: []string{"Common", "Orc"}},
-	"tiefling": {Name: "Tiefling", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"INT": 1, "CHA": 2}, Traits: []string{"Darkvision", "Hellish Resistance", "Infernal Legacy"}, Languages: []string{"Common", "Infernal"}},
+	"human": {Name: "Human", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 1, "DEX": 1, "CON": 1, "INT": 1, "WIS": 1, "CHA": 1}, Traits: []string{"Extra Language"}, Languages: []string{"Common", "one other"}, DarkvisionRange: 0},
+	"elf": {Name: "Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"DEX": 2}, Traits: []string{"Darkvision", "Keen Senses", "Fey Ancestry", "Trance"}, Languages: []string{"Common", "Elvish"}, DarkvisionRange: 60},
+	"high_elf": {Name: "High Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"DEX": 2, "INT": 1}, Traits: []string{"Darkvision", "Keen Senses", "Fey Ancestry", "Trance", "Cantrip"}, Languages: []string{"Common", "Elvish"}, DarkvisionRange: 60},
+	"dwarf": {Name: "Dwarf", Size: "Medium", Speed: 25, AbilityMods: map[string]int{"CON": 2}, Traits: []string{"Darkvision", "Dwarven Resilience", "Stonecunning"}, Languages: []string{"Common", "Dwarvish"}, DarkvisionRange: 60},
+	"hill_dwarf": {Name: "Hill Dwarf", Size: "Medium", Speed: 25, AbilityMods: map[string]int{"CON": 2, "WIS": 1}, Traits: []string{"Darkvision", "Dwarven Resilience", "Stonecunning", "Dwarven Toughness"}, Languages: []string{"Common", "Dwarvish"}, DarkvisionRange: 60},
+	"halfling": {Name: "Halfling", Size: "Small", Speed: 25, AbilityMods: map[string]int{"DEX": 2}, Traits: []string{"Lucky", "Brave", "Halfling Nimbleness"}, Languages: []string{"Common", "Halfling"}, DarkvisionRange: 0},
+	"dragonborn": {Name: "Dragonborn", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 2, "CHA": 1}, Traits: []string{"Draconic Ancestry", "Breath Weapon", "Damage Resistance"}, Languages: []string{"Common", "Draconic"}, DarkvisionRange: 0},
+	"gnome": {Name: "Gnome", Size: "Small", Speed: 25, AbilityMods: map[string]int{"INT": 2}, Traits: []string{"Darkvision", "Gnome Cunning"}, Languages: []string{"Common", "Gnomish"}, DarkvisionRange: 60},
+	"half_elf": {Name: "Half-Elf", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"CHA": 2}, Traits: []string{"Darkvision", "Fey Ancestry", "Skill Versatility"}, Languages: []string{"Common", "Elvish"}, DarkvisionRange: 60},
+	"half_orc": {Name: "Half-Orc", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"STR": 2, "CON": 1}, Traits: []string{"Darkvision", "Menacing", "Relentless Endurance", "Savage Attacks"}, Languages: []string{"Common", "Orc"}, DarkvisionRange: 60},
+	"tiefling": {Name: "Tiefling", Size: "Medium", Speed: 30, AbilityMods: map[string]int{"INT": 1, "CHA": 2}, Traits: []string{"Darkvision", "Hellish Resistance", "Infernal Legacy"}, Languages: []string{"Common", "Infernal"}, DarkvisionRange: 60},
 }
 
 type SRDWeapon struct {
