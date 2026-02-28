@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.48"
+const version = "0.8.49"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -3826,6 +3826,18 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 			}
 			handleCombatStatus(w, r, campaignID)
 			return
+		case "exploration":
+			// Exploration mode management endpoints
+			if len(parts) > 2 {
+				switch parts[2] {
+				case "skip":
+					handleExplorationSkip(w, r, campaignID)
+					return
+				}
+			}
+			// Default: return exploration status
+			handleExplorationStatus(w, r, campaignID)
+			return
 		case "items":
 			// Campaign-specific items (GM CRUD)
 			if len(parts) > 2 {
@@ -6706,6 +6718,33 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 				"narrative_suggestion": "Engage the senses: sight, sound, smell. Give them something to interact with.",
 			}
 		}
+		
+		// Check for players inactive 12h+ in exploration mode (v0.8.49)
+		var explorationSkipPlayers []string
+		for _, activity := range playerActivity {
+			activityMap, ok := activity.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			countdowns, ok := activityMap["countdowns"].(map[string]interface{})
+			if !ok {
+				continue
+			}
+			explorationSkip, ok := countdowns["exploration_skip_in"].(string)
+			if ok && explorationSkip == "overdue" {
+				if name, ok := activityMap["name"].(string); ok {
+					explorationSkipPlayers = append(explorationSkipPlayers, name)
+				}
+			}
+		}
+		
+		if len(explorationSkipPlayers) > 0 {
+			needsAttention = true
+			gmTasks = append(gmTasks, fmt.Sprintf("⚠️ Exploration skip required: %v inactive 12h+. POST /api/campaigns/%d/exploration/skip with character_id.", explorationSkipPlayers, campaignID))
+			whatToDoNext["exploration_skip_required"] = true
+			whatToDoNext["exploration_skip_players"] = explorationSkipPlayers
+			whatToDoNext["exploration_skip_instruction"] = fmt.Sprintf("Skip inactive players via POST /api/campaigns/%d/exploration/skip with {\"character_id\": ID}. They will be marked as following the party.", campaignID)
+		}
 	}
 	
 	// Build monster guidance (if in combat and monsters present)
@@ -6996,6 +7035,13 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		response["must_advance_reason"] = mustAdvanceReason
 		needsAttention = true
 		gmTasks = append(gmTasks, "🚨 "+mustAdvanceReason)
+	}
+	
+	// Add exploration_skip_required to top-level response (v0.8.49)
+	if whatToDoNext["exploration_skip_required"] == true {
+		response["exploration_skip_required"] = true
+		response["exploration_skip_players"] = whatToDoNext["exploration_skip_players"]
+		response["exploration_skip_endpoint"] = fmt.Sprintf("POST /api/campaigns/%d/exploration/skip", campaignID)
 	}
 	
 	if waitingFor != nil {
@@ -18027,6 +18073,188 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleExplorationStatus godoc
+// @Summary Get exploration mode status
+// @Description Returns exploration mode status including inactive players
+// @Tags Exploration
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Exploration status"
+// @Router /campaigns/{id}/exploration [get]
+func handleExplorationStatus(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Check if in combat
+	var combatActive bool
+	db.QueryRow("SELECT active FROM combat_state WHERE lobby_id = $1", campaignID).Scan(&combatActive)
+	
+	if combatActive {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mode":    "combat",
+			"message": "Campaign is in combat mode. Use /api/campaigns/{id}/combat for combat status.",
+		})
+		return
+	}
+	
+	// Get inactive players (12h+ without action)
+	type InactivePlayer struct {
+		ID            int       `json:"id"`
+		Name          string    `json:"name"`
+		InactiveHours int       `json:"inactive_hours"`
+		LastActionAt  time.Time `json:"last_action_at"`
+		SkipRequired  bool      `json:"skip_required"`
+	}
+	var inactivePlayers []InactivePlayer
+	
+	rows, err := db.Query(`
+		SELECT c.id, c.name, 
+			COALESCE(
+				(SELECT MAX(a.created_at) FROM actions a WHERE a.character_id = c.id AND a.action_type NOT IN ('poll', 'joined')),
+				c.created_at
+			) as last_action
+		FROM characters c
+		WHERE c.lobby_id = $1
+	`, campaignID)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id int
+			var name string
+			var lastAction time.Time
+			rows.Scan(&id, &name, &lastAction)
+			
+			inactiveDuration := time.Since(lastAction)
+			inactiveHours := int(inactiveDuration.Hours())
+			
+			if inactiveHours >= 12 {
+				inactivePlayers = append(inactivePlayers, InactivePlayer{
+					ID:            id,
+					Name:          name,
+					InactiveHours: inactiveHours,
+					LastActionAt:  lastAction,
+					SkipRequired:  true,
+				})
+			}
+		}
+	}
+	
+	response := map[string]interface{}{
+		"mode":             "exploration",
+		"inactive_players": inactivePlayers,
+		"skip_threshold":   "12 hours",
+	}
+	
+	if len(inactivePlayers) > 0 {
+		var names []string
+		for _, p := range inactivePlayers {
+			names = append(names, p.Name)
+		}
+		response["skip_required"] = true
+		response["skip_required_players"] = names
+		response["skip_endpoint"] = fmt.Sprintf("POST /api/campaigns/%d/exploration/skip", campaignID)
+		response["instruction"] = "Use the skip endpoint with character_id to mark inactive players as following the party."
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleExplorationSkip godoc
+// @Summary Skip inactive player in exploration mode (GM only)
+// @Description Mark an inactive player (12h+) as following the party. Records a 'following' action.
+// @Tags Exploration
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=int} true "Character to skip"
+// @Success 200 {object} map[string]interface{} "Player skipped"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Only GM can skip"
+// @Router /campaigns/{id}/exploration/skip [post]
+func handleExplorationSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Verify GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "only_gm_can_skip"})
+		return
+	}
+	
+	// Check not in combat
+	var combatActive bool
+	db.QueryRow("SELECT active FROM combat_state WHERE lobby_id = $1", campaignID).Scan(&combatActive)
+	if combatActive {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "in_combat",
+			"message": "Use /api/campaigns/{id}/combat/skip for combat mode",
+		})
+		return
+	}
+	
+	// Parse request
+	var req struct {
+		CharacterID int `json:"character_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	// Get character info
+	var charName string
+	var charLobbyID int
+	err = db.QueryRow("SELECT name, lobby_id FROM characters WHERE id = $1", req.CharacterID).Scan(&charName, &charLobbyID)
+	if err != nil || charLobbyID != campaignID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Calculate inactive duration
+	var lastActionAt sql.NullTime
+	db.QueryRow(`
+		SELECT MAX(created_at) FROM actions 
+		WHERE character_id = $1 AND action_type NOT IN ('poll', 'joined')
+	`, req.CharacterID).Scan(&lastActionAt)
+	
+	inactiveMinutes := 0
+	if lastActionAt.Valid {
+		inactiveMinutes = int(time.Since(lastActionAt.Time).Minutes())
+	}
+	
+	// Record the skip as a "following" action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'following', 'Marked as following the party (exploration skip)', $3)
+	`, campaignID, req.CharacterID, fmt.Sprintf("Inactive for %d minutes, defaulting to follow party", inactiveMinutes))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"skipped":           charName,
+		"character_id":      req.CharacterID,
+		"inactive_minutes":  inactiveMinutes,
+		"action_recorded":   "following",
+		"message":           fmt.Sprintf("%s is now following the party (inactive %d hours)", charName, inactiveMinutes/60),
+	})
 }
 
 // handleCombatAdd godoc
