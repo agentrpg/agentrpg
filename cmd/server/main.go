@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.56"
+const version = "0.8.57"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -397,6 +397,7 @@ func main() {
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
 	http.HandleFunc("/api/gm/apply-poison", handleGMApplyPoison)
 	http.HandleFunc("/api/gm/apply-disease", handleGMApplyDisease)
+	http.HandleFunc("/api/gm/apply-madness", handleGMApplyMadness)
 	http.HandleFunc("/api/gm/environmental-hazard", handleGMEnvironmentalHazard)
 	http.HandleFunc("/api/gm/trap", handleGMTrap)
 	http.HandleFunc("/api/observe", handleObserve)
@@ -17338,6 +17339,90 @@ var builtinDiseases = map[string]Disease{
 	},
 }
 
+// Madness represents a D&D madness effect (v0.8.57)
+// Based on DMG Chapter 8: Running the Game - Madness
+type Madness struct {
+	Roll        string `json:"roll"`        // d100 range (e.g., "01-20")
+	Effect      string `json:"effect"`      // The madness effect
+	Condition   string `json:"condition"`   // Mechanical condition to apply (if any)
+	Duration    string `json:"duration"`    // How long the madness lasts
+}
+
+// Short-term madness table (DMG p259) - lasts 1d10 minutes
+var shortTermMadness = []Madness{
+	{Roll: "01-20", Effect: "The character retreats into their mind and becomes paralyzed. The effect ends if the character takes any damage.", Condition: "paralyzed", Duration: "1d10 minutes"},
+	{Roll: "21-30", Effect: "The character becomes incapacitated and spends the duration screaming, laughing, or weeping.", Condition: "incapacitated", Duration: "1d10 minutes"},
+	{Roll: "31-40", Effect: "The character becomes frightened and must use their action and movement each round to flee from the source of the fear.", Condition: "frightened", Duration: "1d10 minutes"},
+	{Roll: "41-50", Effect: "The character begins babbling and is incapable of normal speech or spellcasting.", Condition: "incapacitated", Duration: "1d10 minutes"},
+	{Roll: "51-60", Effect: "The character must use their action each round to attack the nearest creature.", Condition: "", Duration: "1d10 minutes"},
+	{Roll: "61-70", Effect: "The character experiences vivid hallucinations and has disadvantage on ability checks.", Condition: "", Duration: "1d10 minutes"},
+	{Roll: "71-75", Effect: "The character does whatever anyone tells them to do that isn't obviously self-destructive.", Condition: "", Duration: "1d10 minutes"},
+	{Roll: "76-80", Effect: "The character experiences an overpowering urge to eat something strange such as dirt, slime, or offal.", Condition: "", Duration: "1d10 minutes"},
+	{Roll: "81-90", Effect: "The character is stunned.", Condition: "stunned", Duration: "1d10 minutes"},
+	{Roll: "91-100", Effect: "The character falls unconscious.", Condition: "unconscious", Duration: "1d10 minutes"},
+}
+
+// Long-term madness table (DMG p260) - lasts 1d10 × 10 hours
+var longTermMadness = []Madness{
+	{Roll: "01-10", Effect: "The character feels compelled to repeat a specific activity over and over, such as washing hands, touching things, praying, or counting coins.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "11-20", Effect: "The character experiences vivid hallucinations and has disadvantage on ability checks.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "21-30", Effect: "The character suffers extreme paranoia. The character has disadvantage on Wisdom and Charisma checks.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "31-40", Effect: "The character regards something (usually the source of madness) with intense revulsion, as if affected by the antipathy effect of the antipathy/sympathy spell.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "41-45", Effect: "The character experiences a powerful delusion. Choose a potion. The character imagines that they are under its effects.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "46-55", Effect: "The character becomes attached to a 'lucky charm' such as a person or an object, and has disadvantage on attack rolls, ability checks, and saving throws while more than 30 feet from it.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "56-65", Effect: "The character is blinded (25%) or deafened (75%).", Condition: "blinded", Duration: "1d10x10 hours"},
+	{Roll: "66-75", Effect: "The character experiences uncontrollable tremors or tics, which impose disadvantage on attack rolls, ability checks, and saving throws that involve Strength or Dexterity.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "76-85", Effect: "The character suffers from partial amnesia. The character knows who they are and retains racial traits and class features, but doesn't recognize other people or remember anything that happened before the madness took effect.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "86-90", Effect: "Whenever the character takes damage, they must succeed on a DC 15 Wisdom saving throw or be affected as though they failed a saving throw against the confusion spell. The confusion effect lasts for 1 minute.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "91-95", Effect: "The character loses the ability to speak.", Condition: "", Duration: "1d10x10 hours"},
+	{Roll: "96-100", Effect: "The character falls unconscious. No amount of jostling or damage can wake the character.", Condition: "unconscious", Duration: "1d10x10 hours"},
+}
+
+// Indefinite madness table (DMG p260) - lasts until cured
+var indefiniteMadness = []Madness{
+	{Roll: "01-15", Effect: "Being drunk keeps me sane.", Condition: "", Duration: "Until cured"},
+	{Roll: "16-25", Effect: "I keep whatever I find.", Condition: "", Duration: "Until cured"},
+	{Roll: "26-30", Effect: "I try to become more like someone else I know—adopting their style of dress, mannerisms, and name.", Condition: "", Duration: "Until cured"},
+	{Roll: "31-35", Effect: "I must bend the truth, exaggerate, or outright lie to be interesting to other people.", Condition: "", Duration: "Until cured"},
+	{Roll: "36-45", Effect: "Achieving my goal is the only thing of interest to me, and I'll ignore everything else to pursue it.", Condition: "", Duration: "Until cured"},
+	{Roll: "46-50", Effect: "I find it hard to care about anything that goes on around me.", Condition: "", Duration: "Until cured"},
+	{Roll: "51-55", Effect: "I don't like the way people judge me all the time.", Condition: "", Duration: "Until cured"},
+	{Roll: "56-70", Effect: "I am the smartest, wisest, strongest, fastest, and most beautiful person I know.", Condition: "", Duration: "Until cured"},
+	{Roll: "71-80", Effect: "I am convinced that powerful enemies are hunting me, and their agents are everywhere I go. I am sure they're watching me all the time.", Condition: "", Duration: "Until cured"},
+	{Roll: "81-85", Effect: "There's only one person I can trust. And only I can see this special friend.", Condition: "", Duration: "Until cured"},
+	{Roll: "86-95", Effect: "I can't take anything seriously. The more serious the situation, the funnier I find it.", Condition: "", Duration: "Until cured"},
+	{Roll: "96-100", Effect: "I've discovered that I really like killing people.", Condition: "", Duration: "Until cured"},
+}
+
+// getMadnessFromRoll returns the madness effect for a given d100 roll and table
+func getMadnessFromRoll(roll int, madnessType string) Madness {
+	var table []Madness
+	switch madnessType {
+	case "short":
+		table = shortTermMadness
+	case "long":
+		table = longTermMadness
+	case "indefinite":
+		table = indefiniteMadness
+	default:
+		table = shortTermMadness
+	}
+	
+	for _, m := range table {
+		// Parse roll range (e.g., "01-20" or "91-100")
+		parts := strings.Split(m.Roll, "-")
+		if len(parts) != 2 {
+			continue
+		}
+		low, _ := strconv.Atoi(parts[0])
+		high, _ := strconv.Atoi(parts[1])
+		if roll >= low && roll <= high {
+			return m
+		}
+	}
+	return table[0] // Default to first entry if parsing fails
+}
+
 // Trap represents a D&D trap with its mechanics (v0.8.54)
 type Trap struct {
 	Name           string `json:"name"`
@@ -18251,6 +18336,262 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 	// Include recovery info for contracted diseases
 	if !saved && disease.Recovery != "" {
 		response["recovery_rules"] = disease.Recovery
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMApplyMadness godoc
+// @Summary Apply madness effects
+// @Description Apply D&D 5e madness effects (DMG Chapter 8). Madness types: short (1d10 minutes), long (1d10 × 10 hours), indefinite (until cured). Each type has a d100 table of effects. Can specify a roll or let the server roll randomly. Effects may include conditions like paralyzed, stunned, frightened, or roleplay effects.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth (base64 of email:password)"
+// @Param request body object true "Madness request" example({"character_id": 5, "madness_type": "short", "reason": "Glimpsed the Far Realm"})
+// @Success 200 {object} map[string]interface{} "Madness applied"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/apply-madness [post]
+func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "GET" && r.URL.Query().Get("list") == "true" {
+		// Return available madness tables
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"madness_types": []map[string]interface{}{
+				{
+					"type":        "short",
+					"duration":    "1d10 minutes",
+					"description": "Short-term madness from sudden shocks or witnessing horrors. Usually passes quickly.",
+					"effects":     shortTermMadness,
+				},
+				{
+					"type":        "long",
+					"duration":    "1d10 × 10 hours",
+					"description": "Long-term madness from prolonged exposure or severe trauma. Lasts for hours.",
+					"effects":     longTermMadness,
+				},
+				{
+					"type":        "indefinite",
+					"duration":    "Until cured",
+					"description": "Indefinite madness from reality-shattering experiences. Requires greater restoration, heal, or similar magic to cure.",
+					"effects":     indefiniteMadness,
+				},
+			},
+			"note": "Use POST with character_id and madness_type to apply madness. Optionally specify d100_roll to force a specific result.",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+
+	var req struct {
+		CharacterID  int    `json:"character_id"`
+		MadnessType  string `json:"madness_type"`  // "short", "long", or "indefinite"
+		D100Roll     int    `json:"d100_roll"`     // Optional: force a specific roll (1-100)
+		Reason       string `json:"reason"`        // Flavor text for the log
+		AllowSave    bool   `json:"allow_save"`    // If true, character can make WIS save to resist
+		SaveDC       int    `json:"save_dc"`       // DC for WIS save (default 15)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_request",
+			"message":       "character_id required",
+			"madness_types": []string{"short", "long", "indefinite"},
+		})
+		return
+	}
+
+	// Validate madness type
+	if req.MadnessType == "" {
+		req.MadnessType = "short"
+	}
+	if req.MadnessType != "short" && req.MadnessType != "long" && req.MadnessType != "indefinite" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_madness_type",
+			"message":       fmt.Sprintf("Unknown madness type: %s", req.MadnessType),
+			"madness_types": []string{"short", "long", "indefinite"},
+		})
+		return
+	}
+
+	// Default save DC
+	if req.SaveDC == 0 {
+		req.SaveDC = 15
+	}
+
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+
+	// Get character info
+	var charName string
+	var wis int
+	var conditionsStr string
+	err = db.QueryRow(`
+		SELECT name, wis, COALESCE(conditions, '')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &wis, &conditionsStr)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+
+	// Calculate WIS modifier
+	wisMod := (wis - 10) / 2
+
+	response := map[string]interface{}{
+		"character":    charName,
+		"character_id": req.CharacterID,
+		"madness_type": req.MadnessType,
+	}
+
+	// Optional WIS save to resist
+	if req.AllowSave {
+		saveRoll := rollDice(1, 20)
+		saveTotal := saveRoll + wisMod
+		saved := saveTotal >= req.SaveDC
+
+		response["save_allowed"] = true
+		response["save_dc"] = req.SaveDC
+		response["save_roll"] = saveRoll
+		response["save_modifier"] = wisMod
+		response["save_total"] = saveTotal
+		response["saved"] = saved
+
+		if saved {
+			response["success"] = true
+			response["message"] = fmt.Sprintf("%s resisted the madness! (WIS save: %d + %d = %d vs DC %d)", charName, saveRoll, wisMod, saveTotal, req.SaveDC)
+			
+			db.Exec(`
+				INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+				VALUES ($1, $2, $3, $4, $5)
+			`, lobbyID, req.CharacterID, "madness_resisted",
+				fmt.Sprintf("%s resisted %s madness", charName, req.MadnessType),
+				fmt.Sprintf("WIS save: %d + %d = %d vs DC %d (success)", saveRoll, wisMod, saveTotal, req.SaveDC))
+			
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+	}
+
+	// Roll d100 (or use specified roll)
+	d100Roll := req.D100Roll
+	if d100Roll < 1 || d100Roll > 100 {
+		d100Roll = rollDice(1, 100)
+	}
+
+	// Get madness effect
+	madness := getMadnessFromRoll(d100Roll, req.MadnessType)
+
+	// Roll duration
+	var durationRoll int
+	var durationStr string
+	switch req.MadnessType {
+	case "short":
+		durationRoll = rollDice(1, 10)
+		durationStr = fmt.Sprintf("%d minutes", durationRoll)
+	case "long":
+		durationRoll = rollDice(1, 10) * 10
+		durationStr = fmt.Sprintf("%d hours", durationRoll)
+	case "indefinite":
+		durationStr = "Until cured (requires greater restoration, heal, or similar magic)"
+	}
+
+	// Apply condition if specified
+	if madness.Condition != "" {
+		conditions := []string{}
+		if conditionsStr != "" {
+			conditions = strings.Split(conditionsStr, ",")
+		}
+		
+		// Check if already has this condition
+		hasCondition := false
+		for _, c := range conditions {
+			if strings.TrimSpace(c) == madness.Condition {
+				hasCondition = true
+				break
+			}
+		}
+		
+		if !hasCondition {
+			conditions = append(conditions, fmt.Sprintf("madness_%s:%s", req.MadnessType, madness.Condition))
+			newConditions := strings.Join(conditions, ",")
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", newConditions, req.CharacterID)
+			response["condition_applied"] = madness.Condition
+		}
+	}
+
+	// Build reason text
+	reason := "succumbed to madness"
+	if req.Reason != "" {
+		reason = req.Reason
+	}
+
+	// Log the madness
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "madness",
+		fmt.Sprintf("%s %s", charName, reason),
+		fmt.Sprintf("%s madness (d100: %d): %s. Duration: %s", strings.Title(req.MadnessType), d100Roll, madness.Effect, durationStr))
+
+	response["success"] = true
+	response["d100_roll"] = d100Roll
+	response["roll_range"] = madness.Roll
+	response["effect"] = madness.Effect
+	response["duration"] = durationStr
+	if req.MadnessType != "indefinite" {
+		response["duration_roll"] = durationRoll
+	}
+	response["message"] = fmt.Sprintf("%s %s. %s", charName, reason, madness.Effect)
+	
+	// Add recovery info for indefinite madness
+	if req.MadnessType == "indefinite" {
+		response["recovery"] = "Requires greater restoration, heal, or wish spell, or other powerful magic to cure."
 	}
 
 	json.NewEncoder(w).Encode(response)

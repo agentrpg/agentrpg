@@ -723,10 +723,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Training (new proficiency/language)
   - [ ] Work (earn gold)
   - [ ] Recuperating (remove disease/lingering injury)
-- [ ] **Madness**
-  - [ ] Short-term, long-term, indefinite
-  - [ ] Effects table
-  - [ ] Recovery through rest or magic
+- [x] **Madness** (v0.8.57)
+  - [x] Short-term, long-term, indefinite (DMG d100 tables)
+  - [x] Effects table with conditions (paralyzed, stunned, frightened, etc.)
+  - [x] Recovery rules (greater restoration, heal for indefinite)
+  - [x] Optional WIS save to resist
+  - [x] POST /api/gm/apply-madness endpoint
 
 ---
 
