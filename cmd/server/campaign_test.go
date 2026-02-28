@@ -1148,3 +1148,257 @@ func TestCampaignFlow(t *testing.T) {
 
 	t.Log("\n=== Campaign Flow Test Complete ===")
 }
+
+// TestCombatSkipRequired tests the autonomous GM Phase 2: skip_required at 4h
+func TestCombatSkipRequired(t *testing.T) {
+	if os.Getenv("DATABASE_URL") == "" && os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("No database URL set - skipping integration test")
+	}
+
+	initTestDB(t)
+	testPrefix := fmt.Sprintf("test_skip_%d_", time.Now().Unix())
+	defer cleanupTestData(t, testPrefix)
+
+	t.Log("=== Testing Combat Skip Required (Autonomous GM Phase 2) ===")
+
+	// Setup: Create GM, campaign, and character
+	_, result := makeRequest(t, "POST", "/api/register", map[string]interface{}{
+		"name":     testPrefix + "SkipGM",
+		"password": "gm123",
+	}, "")
+	gmID := int(result["agent_id"].(float64))
+	gmAuth := createAuth(fmt.Sprintf("%d", gmID), "gm123")
+
+	_, result = makeRequest(t, "POST", "/api/register", map[string]interface{}{
+		"name":     testPrefix + "SlowPlayer",
+		"password": "player123",
+	}, "")
+	playerID := int(result["agent_id"].(float64))
+	playerAuth := createAuth(fmt.Sprintf("%d", playerID), "player123")
+
+	_, result = makeRequest(t, "POST", "/api/characters", map[string]interface{}{
+		"name":  testPrefix + "Slowpoke",
+		"class": "fighter",
+		"race":  "human",
+	}, playerAuth)
+	charID := int(result["character_id"].(float64))
+	charName := testPrefix + "Slowpoke"
+
+	_, result = makeRequest(t, "POST", "/api/campaigns", map[string]interface{}{
+		"name": testPrefix + "Skip Test Campaign",
+	}, gmAuth)
+	campaignID := int(result["campaign_id"].(float64))
+
+	// Join and start
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/join", campaignID), map[string]interface{}{
+		"character_id": charID,
+	}, playerAuth)
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/start", campaignID), nil, gmAuth)
+
+	// Start combat with the player in turn order
+	_, result = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/combat/start", campaignID), nil, gmAuth)
+	t.Logf("Combat started: %v", result)
+
+	// Test 1: Before 4h - no skip_required
+	t.Run("BeforeThreshold_NoSkipRequired", func(t *testing.T) {
+		_, result := makeRequest(t, "GET", "/api/gm/status", nil, gmAuth)
+
+		if result["skip_required"] != nil && result["skip_required"].(bool) {
+			t.Error("skip_required should not be set before 4h threshold")
+		}
+
+		if combat, ok := result["combat"].(map[string]interface{}); ok {
+			if combat["skip_required"] != nil && combat["skip_required"].(bool) {
+				t.Error("combat.skip_required should not be set before 4h threshold")
+			}
+		}
+		t.Log("Correctly no skip_required before 4h")
+	})
+
+	// Test 2: Set turn_started_at to 5 hours ago (exceeds 4h threshold)
+	t.Run("AfterThreshold_SkipRequired", func(t *testing.T) {
+		// Directly update the turn_started_at to simulate 5 hours elapsed
+		fiveHoursAgo := time.Now().Add(-5 * time.Hour)
+		_, err := db.Exec(`UPDATE combat_state SET turn_started_at = $1 WHERE lobby_id = $2`, fiveHoursAgo, campaignID)
+		if err != nil {
+			t.Fatalf("Failed to update turn_started_at: %v", err)
+		}
+
+		_, result := makeRequest(t, "GET", "/api/gm/status", nil, gmAuth)
+
+		// Check skip_required at top level
+		if result["skip_required"] == nil || !result["skip_required"].(bool) {
+			t.Error("skip_required should be true after 4h threshold")
+		} else {
+			t.Log("✓ skip_required is true")
+		}
+
+		// Check skip_required_player
+		if result["skip_required_player"] == nil {
+			t.Error("skip_required_player should be set")
+		} else {
+			playerName := result["skip_required_player"].(string)
+			if playerName != charName {
+				t.Errorf("skip_required_player should be %s, got %s", charName, playerName)
+			} else {
+				t.Logf("✓ skip_required_player is %s", playerName)
+			}
+		}
+
+		// Check auto_skip_countdown (should show time remaining or "imminent")
+		if result["auto_skip_countdown"] == nil {
+			t.Error("auto_skip_countdown should be set")
+		} else {
+			countdown := result["auto_skip_countdown"].(string)
+			// After 5h, countdown should be "imminent" (since 4h30m has passed)
+			if countdown != "imminent" {
+				t.Logf("auto_skip_countdown: %s (expected 'imminent' at 5h)", countdown)
+			} else {
+				t.Log("✓ auto_skip_countdown is 'imminent'")
+			}
+		}
+
+		// Check combat.skip_required
+		if combat, ok := result["combat"].(map[string]interface{}); ok {
+			if combat["skip_required"] == nil || !combat["skip_required"].(bool) {
+				t.Error("combat.skip_required should be true")
+			}
+			if combat["turn_status"] != "timeout" {
+				t.Errorf("combat.turn_status should be 'timeout', got %v", combat["turn_status"])
+			}
+			t.Logf("✓ combat.turn_status is '%v'", combat["turn_status"])
+		}
+
+		// Check what_to_do_next has skip instruction
+		if whatToDo, ok := result["what_to_do_next"].(map[string]interface{}); ok {
+			if whatToDo["action_required"] != "skip_turn" {
+				t.Errorf("what_to_do_next.action_required should be 'skip_turn', got %v", whatToDo["action_required"])
+			}
+			if whatToDo["urgency"] != "critical" {
+				t.Errorf("what_to_do_next.urgency should be 'critical', got %v", whatToDo["urgency"])
+			}
+			t.Logf("✓ what_to_do_next has skip instruction: %v", whatToDo["instruction"])
+		}
+
+		// Check gm_tasks contains urgent skip message
+		if tasks, ok := result["gm_tasks"].([]interface{}); ok {
+			foundSkipTask := false
+			for _, task := range tasks {
+				taskStr := task.(string)
+				if len(taskStr) > 0 && taskStr[0] == '⚠' && 
+				   (containsString(taskStr, "SKIP NOW") || containsString(taskStr, "turn timeout")) {
+					foundSkipTask = true
+					t.Logf("✓ Found urgent skip task: %s", taskStr)
+					break
+				}
+			}
+			if !foundSkipTask {
+				t.Error("gm_tasks should contain urgent skip instruction with 'SKIP NOW'")
+			}
+		}
+
+		// Check needs_attention is true
+		if result["needs_attention"] == nil || !result["needs_attention"].(bool) {
+			t.Error("needs_attention should be true when skip_required")
+		} else {
+			t.Log("✓ needs_attention is true")
+		}
+	})
+
+	// Test 3: Countdown calculation when within 30-minute grace period
+	t.Run("CountdownCalculation", func(t *testing.T) {
+		// Set turn_started_at to 4h 15m ago (within the 30-min grace period)
+		fourHours15MinAgo := time.Now().Add(-4*time.Hour - 15*time.Minute)
+		_, err := db.Exec(`UPDATE combat_state SET turn_started_at = $1 WHERE lobby_id = $2`, fourHours15MinAgo, campaignID)
+		if err != nil {
+			t.Fatalf("Failed to update turn_started_at: %v", err)
+		}
+
+		_, result := makeRequest(t, "GET", "/api/gm/status", nil, gmAuth)
+
+		// skip_required should still be true (past 4h)
+		if result["skip_required"] == nil || !result["skip_required"].(bool) {
+			t.Error("skip_required should be true at 4h 15m")
+		}
+
+		// Countdown should show ~15 minutes remaining
+		if result["auto_skip_countdown"] != nil {
+			countdown := result["auto_skip_countdown"].(string)
+			// Should be around 15m, not "imminent"
+			if countdown == "imminent" {
+				t.Error("auto_skip_countdown should show remaining time, not 'imminent' at 4h 15m")
+			} else {
+				t.Logf("✓ auto_skip_countdown shows remaining time: %s", countdown)
+			}
+		}
+	})
+
+	t.Log("=== Combat Skip Required Tests Complete ===")
+}
+
+// containsString is a helper to check if a string contains a substring
+func containsString(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && (s[:len(substr)] == substr || containsString(s[1:], substr)))
+}
+
+// TestSkipRequiredVsSkipRecommended verifies the old skip_recommended is replaced
+func TestSkipRequiredVsSkipRecommended(t *testing.T) {
+	if os.Getenv("DATABASE_URL") == "" && os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("No database URL set - skipping integration test")
+	}
+
+	initTestDB(t)
+	testPrefix := fmt.Sprintf("test_skipvs_%d_", time.Now().Unix())
+	defer cleanupTestData(t, testPrefix)
+
+	// Setup
+	_, result := makeRequest(t, "POST", "/api/register", map[string]interface{}{
+		"name":     testPrefix + "GM",
+		"password": "gm123",
+	}, "")
+	gmID := int(result["agent_id"].(float64))
+	gmAuth := createAuth(fmt.Sprintf("%d", gmID), "gm123")
+
+	_, result = makeRequest(t, "POST", "/api/register", map[string]interface{}{
+		"name":     testPrefix + "Player",
+		"password": "player123",
+	}, "")
+	playerID := int(result["agent_id"].(float64))
+	playerAuth := createAuth(fmt.Sprintf("%d", playerID), "player123")
+
+	_, result = makeRequest(t, "POST", "/api/characters", map[string]interface{}{
+		"name":  testPrefix + "TestChar",
+		"class": "fighter",
+		"race":  "human",
+	}, playerAuth)
+	charID := int(result["character_id"].(float64))
+
+	_, result = makeRequest(t, "POST", "/api/campaigns", map[string]interface{}{
+		"name": testPrefix + "Test Campaign",
+	}, gmAuth)
+	campaignID := int(result["campaign_id"].(float64))
+
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/join", campaignID), map[string]interface{}{
+		"character_id": charID,
+	}, playerAuth)
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/start", campaignID), nil, gmAuth)
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/combat/start", campaignID), nil, gmAuth)
+
+	// Set to 5 hours ago
+	fiveHoursAgo := time.Now().Add(-5 * time.Hour)
+	db.Exec(`UPDATE combat_state SET turn_started_at = $1 WHERE lobby_id = $2`, fiveHoursAgo, campaignID)
+
+	_, result = makeRequest(t, "GET", "/api/gm/status", nil, gmAuth)
+
+	// Verify skip_recommended is NOT present (replaced by skip_required)
+	if combat, ok := result["combat"].(map[string]interface{}); ok {
+		if combat["skip_recommended"] != nil {
+			t.Error("skip_recommended should NOT be present - it's been replaced by skip_required")
+		}
+		if combat["skip_required"] == nil || !combat["skip_required"].(bool) {
+			t.Error("skip_required should be present and true")
+		} else {
+			t.Log("✓ skip_required is used instead of skip_recommended")
+		}
+	}
+}

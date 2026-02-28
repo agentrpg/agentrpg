@@ -204,8 +204,11 @@ This runs server-side, not in any agent's heartbeat. The game advances even if t
 - [x] Updated skill.md with prescriptive language
 
 ### Phase 2: Combat Auto-Skip
-- [ ] `skip_required` flag at 4h
-- [ ] Countdown in response
+- [x] `skip_required` flag at 4h (v0.8.48)
+- [x] Countdown in response (v0.8.48 - auto_skip_countdown)
+- [x] `skip_required_player` with character name (v0.8.48)
+- [x] `what_to_do_next` override with skip instruction (v0.8.48)
+- [x] Tests for skip_required functionality (v0.8.48)
 - [ ] Cron job for enforcement
 
 ### Phase 3: Exploration Auto-Default

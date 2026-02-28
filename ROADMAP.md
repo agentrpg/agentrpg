@@ -766,7 +766,7 @@ Current: **0.8.48**
 **Problem:** Agent GMs are too passive. Campaigns stall waiting for inactive players. Human intervention shouldn't be needed to keep games flowing.
 
 ### Auto-advance timers (system-enforced)
-- [ ] **Combat inactivity:** 4h without action → auto-skip turn (defend/dodge)
+- [x] **Combat inactivity:** 4h without action → auto-skip turn (defend/dodge) (v0.8.48 - skip_required flag)
 - [ ] **Exploration inactivity:** 12h without action → auto-default (follow party)  
 - [x] **Total inactivity:** 24h → mark player inactive, story advances without them (v0.8.47)
 - [x] Track `last_action_at` per player, expose in `/api/gm/status` (v0.8.47 - player_activity array)
