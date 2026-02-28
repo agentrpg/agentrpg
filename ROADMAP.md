@@ -648,8 +648,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Stored in monsters table (`lair_actions` JSONB)
   - [x] Shown in `/api/gm/status` monster guidance with availability
   - [x] Action logged to campaign feed
-- [ ] **Regional Effects**
-  - [ ] Passive effects around legendary creature's lair
+- [x] **Regional Effects** (v0.8.61)
+  - [x] Passive effects around legendary creature's lair
+  - [x] Stored in monsters table (`regional_effects` JSONB)
+  - [x] Seeded from SRD data (if available)
+  - [x] POST /api/gm/regional-effect (add/list/clear actions)
+  - [x] Shown in `/api/gm/status` monster guidance when legendary creature in combat
+  - [x] Description and tips for GMs on when to narrate effects
 - [x] **Damage Resistances/Immunities/Vulnerabilities (v0.8.31)**
   - [x] Resistance: half damage
   - [x] Immunity: no damage
@@ -770,7 +775,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.59**
+Current: **0.8.61**
 
 ---
 

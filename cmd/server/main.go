@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.60"
+const version = "0.8.61"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -378,6 +378,7 @@ func main() {
 	http.HandleFunc("/api/gm/legendary-resistance", handleGMLegendaryResistance)
 	http.HandleFunc("/api/gm/legendary-action", handleGMLegendaryAction)
 	http.HandleFunc("/api/gm/lair-action", handleGMLairAction)
+	http.HandleFunc("/api/gm/regional-effect", handleGMRegionalEffect)
 	http.HandleFunc("/api/characters/attune", handleCharacterAttune)
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/characters/equip-armor", handleCharacterEquipArmor)
@@ -780,6 +781,13 @@ func initDB() {
 		-- Only one lair action can be used per round
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS lair_actions JSONB DEFAULT '[]';
 		
+		-- Regional Effects (v0.8.61 - Phase 8 Monster/NPC Features)
+		-- JSONB array of passive effects that exist around a legendary creature's lair
+		-- Each effect has: desc (description of the effect)
+		-- Regional effects don't require actions - they're always active when the creature is in its lair
+		-- Examples: "Water sources within 1 mile are fouled" or "Beasts within 6 miles sense the dragon's presence"
+		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS regional_effects JSONB DEFAULT '[]';
+		
 		-- Monster Damage Resistances/Immunities/Vulnerabilities (v0.8.31 - Phase 8 P2)
 		-- Stored as comma-separated strings for easy querying
 		-- e.g., "fire, cold" or "bludgeoning, piercing, slashing from nonmagical attacks"
@@ -1178,6 +1186,22 @@ func seedMonstersFromAPI() {
 		}
 		lairActionsJSON, _ := json.Marshal(lairActions)
 		
+		// Parse regional effects (v0.8.61)
+		// Regional effects are passive effects around a legendary creature's lair
+		// Unlike lair actions, these are always active when the creature is in its lair
+		regionalEffects := []map[string]interface{}{}
+		if reArr, ok := detail["regional_effects"].([]interface{}); ok {
+			for _, re := range reArr {
+				if reMap, ok := re.(map[string]interface{}); ok {
+					effect := map[string]interface{}{
+						"desc": reMap["desc"],
+					}
+					regionalEffects = append(regionalEffects, effect)
+				}
+			}
+		}
+		regionalEffectsJSON, _ := json.Marshal(regionalEffects)
+		
 		// Parse damage resistances/immunities/vulnerabilities (v0.8.31)
 		damageResistances := extractDamageTypesFromAPI(detail, "damage_resistances")
 		damageImmunities := extractDamageTypesFromAPI(detail, "damage_immunities")
@@ -1199,8 +1223,8 @@ func seedMonstersFromAPI() {
 		xp := 0
 		if v, ok := detail["xp"].(float64); ok { xp = int(v) }
 		
-		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count, lair_actions, damage_resistances, damage_immunities, damage_vulnerabilities, condition_immunities)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+		db.Exec(`INSERT INTO monsters (slug, name, size, type, ac, hp, hit_dice, speed, str, dex, con, intl, wis, cha, cr, xp, actions, legendary_resistances, legendary_actions, legendary_action_count, lair_actions, regional_effects, damage_resistances, damage_immunities, damage_vulnerabilities, condition_immunities)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name, size = EXCLUDED.size, type = EXCLUDED.type,
 				ac = EXCLUDED.ac, hp = EXCLUDED.hp, hit_dice = EXCLUDED.hit_dice,
@@ -1211,13 +1235,14 @@ func seedMonstersFromAPI() {
 				legendary_actions = EXCLUDED.legendary_actions,
 				legendary_action_count = EXCLUDED.legendary_action_count,
 				lair_actions = EXCLUDED.lair_actions,
+				regional_effects = EXCLUDED.regional_effects,
 				damage_resistances = EXCLUDED.damage_resistances,
 				damage_immunities = EXCLUDED.damage_immunities,
 				damage_vulnerabilities = EXCLUDED.damage_vulnerabilities,
 				condition_immunities = EXCLUDED.condition_immunities`,
 			r["index"], detail["name"], detail["size"], detail["type"], ac, hp,
 			detail["hit_dice"], speed, str, dex, con, intl, wis, cha, fmt.Sprintf("%v", detail["challenge_rating"]), xp, string(actionsJSON),
-			legendaryResistances, string(legendaryActionsJSON), legendaryActionCount, string(lairActionsJSON),
+			legendaryResistances, string(legendaryActionsJSON), legendaryActionCount, string(lairActionsJSON), string(regionalEffectsJSON),
 			damageResistances, damageImmunities, damageVulnerabilities, conditionImmunities)
 	}
 	log.Println("Monsters seeded")
@@ -7173,6 +7198,30 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 							"initiative_20":    "Lair actions resolve on initiative 20 (losing ties), before or between creature turns.",
 						}
 					}
+					
+					// Add regional effects info if monster has any (v0.8.61)
+					var regionalEffectsJSON []byte
+					db.QueryRow(`SELECT COALESCE(regional_effects, '[]') FROM monsters WHERE slug = $1`, 
+						e.MonsterKey).Scan(&regionalEffectsJSON)
+					
+					type RegionalEffect struct {
+						Desc string `json:"desc"`
+					}
+					var regionalEffects []RegionalEffect
+					json.Unmarshal(regionalEffectsJSON, &regionalEffects)
+					
+					if len(regionalEffects) > 0 {
+						effectsList := []string{}
+						for _, re := range regionalEffects {
+							effectsList = append(effectsList, re.Desc)
+						}
+						
+						guidance["regional_effects"] = map[string]interface{}{
+							"effects":      effectsList,
+							"description":  "Passive effects that are always active when this legendary creature is in or near its lair.",
+							"tip":          "Regional effects don't require actions. Describe them when appropriate, especially when players interact with the environment.",
+						}
+					}
 				}
 				
 				// Look up monster in SRD for tactics
@@ -12846,6 +12895,218 @@ func handleGMLairAction(w http.ResponseWriter, r *http.Request) {
 		"message":     fmt.Sprintf("On initiative count 20, %s's lair triggers: %s", found.Name, actionName),
 		"tip":         "Use POST /api/gm/narrate to describe the effects and have affected characters make saving throws as appropriate.",
 	})
+}
+
+// handleGMRegionalEffect godoc
+// @Summary Add or list regional effects for a campaign location
+// @Description Manage regional effects - passive effects around a legendary creature's lair. Regional effects are always active and don't require actions. Use to describe environmental changes like fouled water, restless animals, or unnatural weather.
+// @Tags Game Master
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{action=string,monster_slug=string,effect=string} true "Regional effect action (add/list/clear)"
+// @Success 200 {object} map[string]interface{} "Regional effect result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/regional-effect [post]
+func handleGMRegionalEffect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" && r.Method != "GET" {
+		http.Error(w, "POST or GET required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		Action      string `json:"action"`       // "add", "list", or "clear"
+		MonsterSlug string `json:"monster_slug"` // Which monster's regional effects to modify
+		Effect      string `json:"effect"`       // Description of the regional effect (for "add")
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		// Default to list
+		req.Action = "list"
+	}
+	
+	if req.Action == "" {
+		req.Action = "list"
+	}
+	
+	switch req.Action {
+	case "list":
+		// List all regional effects for monsters in this campaign's document
+		// For now, just return regional effects from monsters that might be in play
+		var campaignDoc []byte
+		db.QueryRow(`SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1`, campaignID).Scan(&campaignDoc)
+		
+		// Get regional effects from all monsters in the SRD
+		rows, err := db.Query(`
+			SELECT slug, name, COALESCE(regional_effects, '[]') 
+			FROM monsters 
+			WHERE regional_effects IS NOT NULL AND regional_effects != '[]'
+			ORDER BY name
+			LIMIT 50
+		`)
+		
+		monstersWithEffects := []map[string]interface{}{}
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var slug, name string
+				var effectsJSON []byte
+				rows.Scan(&slug, &name, &effectsJSON)
+				
+				var effects []map[string]interface{}
+				json.Unmarshal(effectsJSON, &effects)
+				
+				if len(effects) > 0 {
+					effectDescs := []string{}
+					for _, e := range effects {
+						if desc, ok := e["desc"].(string); ok {
+							effectDescs = append(effectDescs, desc)
+						}
+					}
+					monstersWithEffects = append(monstersWithEffects, map[string]interface{}{
+						"slug":    slug,
+						"name":    name,
+						"effects": effectDescs,
+					})
+				}
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"monsters_with_regional_effects": monstersWithEffects,
+			"description": "Regional effects are passive environmental changes around a legendary creature's lair. They are always active and don't require actions.",
+			"tip":         "Use action:'add' with monster_slug and effect to add a custom regional effect. Use action:'clear' with monster_slug to remove all custom effects.",
+		})
+		
+	case "add":
+		if req.MonsterSlug == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "monster_slug_required",
+				"message": "Provide monster_slug to specify which monster's lair effects to modify",
+			})
+			return
+		}
+		if req.Effect == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "effect_required",
+				"message": "Provide effect description",
+				"example": "Water sources within 1 mile of the lair are supernaturally fouled.",
+			})
+			return
+		}
+		
+		// Get current regional effects
+		var effectsJSON []byte
+		var monsterName string
+		err := db.QueryRow(`SELECT name, COALESCE(regional_effects, '[]') FROM monsters WHERE slug = $1`, req.MonsterSlug).Scan(&monsterName, &effectsJSON)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "monster_not_found",
+				"message": fmt.Sprintf("Monster '%s' not found in database", req.MonsterSlug),
+			})
+			return
+		}
+		
+		var effects []map[string]interface{}
+		json.Unmarshal(effectsJSON, &effects)
+		
+		// Add the new effect
+		effects = append(effects, map[string]interface{}{"desc": req.Effect})
+		
+		newEffectsJSON, _ := json.Marshal(effects)
+		_, err = db.Exec(`UPDATE monsters SET regional_effects = $1 WHERE slug = $2`, string(newEffectsJSON), req.MonsterSlug)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+			return
+		}
+		
+		// Log the addition
+		db.Exec(`INSERT INTO actions (lobby_id, action_type, description, result) VALUES ($1, 'regional_effect', $2, $3)`,
+			campaignID,
+			fmt.Sprintf("Regional Effect added to %s's lair", monsterName),
+			req.Effect)
+		
+		effectDescs := []string{}
+		for _, e := range effects {
+			if desc, ok := e["desc"].(string); ok {
+				effectDescs = append(effectDescs, desc)
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"monster":      monsterName,
+			"monster_slug": req.MonsterSlug,
+			"effect_added": req.Effect,
+			"all_effects":  effectDescs,
+			"tip":          "Regional effects appear in /api/gm/status when this monster is in combat. Describe them when appropriate during exploration.",
+		})
+		
+	case "clear":
+		if req.MonsterSlug == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "monster_slug_required",
+				"message": "Provide monster_slug to specify which monster's regional effects to clear",
+			})
+			return
+		}
+		
+		var monsterName string
+		err := db.QueryRow(`SELECT name FROM monsters WHERE slug = $1`, req.MonsterSlug).Scan(&monsterName)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "monster_not_found",
+				"message": fmt.Sprintf("Monster '%s' not found in database", req.MonsterSlug),
+			})
+			return
+		}
+		
+		_, err = db.Exec(`UPDATE monsters SET regional_effects = '[]' WHERE slug = $1`, req.MonsterSlug)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"monster":      monsterName,
+			"monster_slug": req.MonsterSlug,
+			"message":      fmt.Sprintf("All regional effects cleared from %s", monsterName),
+		})
+		
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_action",
+			"message": "Action must be 'add', 'list', or 'clear'",
+		})
+	}
 }
 
 // handleCharacterAttune godoc
