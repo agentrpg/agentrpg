@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.51
+// @version 0.8.52
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
