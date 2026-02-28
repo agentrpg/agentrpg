@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.54
+// @version 0.8.58
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.57"
+const version = "0.8.58"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -382,6 +382,7 @@ func main() {
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/characters/equip-armor", handleCharacterEquipArmor)
 	http.HandleFunc("/api/characters/unequip-armor", handleCharacterUnequipArmor)
+	http.HandleFunc("/api/characters/downtime", handleCharacterDowntime)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", withAPILogging(handleAction))
@@ -13328,6 +13329,312 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 		"equipped_shield": newShield,
 		"new_ac":          newAC,
 	})
+}
+
+// handleCharacterDowntime godoc
+// @Summary Perform downtime activities
+// @Description Spend downtime days on activities like working for gold, training, crafting, etc. (PHB Chapter 8: Downtime Activities)
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,activity=string,days=int,skill=string} true "Downtime activity"
+// @Success 200 {object} map[string]interface{} "Activity result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/downtime [post]
+func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Activity    string `json:"activity"` // work, recuperate, train, craft, research
+		Days        int    `json:"days"`     // number of downtime days (1-30)
+		Skill       string `json:"skill"`    // skill or tool to use (optional for work)
+		// Future fields for other activities:
+		// Proficiency string `json:"proficiency"` // for training
+		// Item        string `json:"item"`        // for crafting
+		// Topic       string `json:"topic"`       // for research
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	if req.Activity == "" {
+		req.Activity = "work"
+	}
+	
+	if req.Days <= 0 {
+		req.Days = 1
+	}
+	if req.Days > 30 {
+		req.Days = 30 // Max 30 days at once
+	}
+	
+	// Verify character belongs to agent
+	var charName string
+	var ownerID, level, charCha, charDex, charWis int
+	var skillProfsStr, toolProfsStr, expSkillsStr string
+	var currentGold int
+	err = db.QueryRow(`
+		SELECT name, agent_id, level, cha, dex, wis, 
+		       COALESCE(skill_proficiencies, ''), 
+		       COALESCE(tool_proficiencies, ''),
+		       COALESCE(expertise, ''),
+		       COALESCE(gold, 0)
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(
+		&charName, &ownerID, &level, &charCha, &charDex, &charWis,
+		&skillProfsStr, &toolProfsStr, &expSkillsStr, &currentGold)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	// Parse proficiencies
+	var skillProfs, toolProfs, expSkills []string
+	if skillProfsStr != "" {
+		json.Unmarshal([]byte(skillProfsStr), &skillProfs)
+	}
+	if toolProfsStr != "" {
+		json.Unmarshal([]byte(toolProfsStr), &toolProfs)
+	}
+	if expSkillsStr != "" {
+		json.Unmarshal([]byte(expSkillsStr), &expSkills)
+	}
+	
+	switch strings.ToLower(req.Activity) {
+	case "work":
+		// PHB: Work downtime activity
+		// Make a skill check (Performance, Persuasion) or tool check
+		// DC 10 = Poor lifestyle (1 gp/day)
+		// DC 15 = Modest lifestyle (1 gp/day)
+		// DC 20 = Comfortable lifestyle (2 gp/day)
+		
+		// Determine which skill/tool to use
+		skillUsed := req.Skill
+		abilityMod := 0
+		isProficient := false
+		isExpert := false
+		
+		if skillUsed == "" {
+			// Auto-select best option: Performance, Persuasion, or a tool
+			// Check for tool proficiencies first (more reliable income)
+			if len(toolProfs) > 0 {
+				skillUsed = toolProfs[0]
+				// Most tools use DEX or WIS
+				if strings.Contains(strings.ToLower(skillUsed), "thieves") {
+					abilityMod = modifier(charDex)
+				} else {
+					abilityMod = modifier(charWis)
+				}
+				isProficient = true
+				isExpert = containsSkill(expSkills, skillUsed)
+			} else if containsSkill(skillProfs, "performance") {
+				skillUsed = "Performance"
+				abilityMod = modifier(charCha)
+				isProficient = true
+				isExpert = containsSkill(expSkills, "performance")
+			} else if containsSkill(skillProfs, "persuasion") {
+				skillUsed = "Persuasion"
+				abilityMod = modifier(charCha)
+				isProficient = true
+				isExpert = containsSkill(expSkills, "persuasion")
+			} else {
+				// Default to Persuasion unproficient
+				skillUsed = "Persuasion"
+				abilityMod = modifier(charCha)
+			}
+		} else {
+			// Use specified skill
+			skillLower := strings.ToLower(skillUsed)
+			if skillLower == "performance" {
+				abilityMod = modifier(charCha)
+				isProficient = containsSkill(skillProfs, "performance")
+				isExpert = containsSkill(expSkills, "performance")
+			} else if skillLower == "persuasion" {
+				abilityMod = modifier(charCha)
+				isProficient = containsSkill(skillProfs, "persuasion")
+				isExpert = containsSkill(expSkills, "persuasion")
+			} else {
+				// Assume tool proficiency
+				isProficient = containsSkill(toolProfs, skillUsed)
+				isExpert = containsSkill(expSkills, skillUsed)
+				// Determine ability based on tool type
+				toolLower := strings.ToLower(skillUsed)
+				if strings.Contains(toolLower, "thieves") || strings.Contains(toolLower, "artisan") {
+					abilityMod = modifier(charDex)
+				} else if strings.Contains(toolLower, "herbalism") || strings.Contains(toolLower, "navigator") {
+					abilityMod = modifier(charWis)
+				} else {
+					abilityMod = modifier(charDex) // Default
+				}
+			}
+		}
+		
+		// Calculate total modifier
+		profBonus := proficiencyBonus(level)
+		totalMod := abilityMod
+		if isProficient {
+			if isExpert {
+				totalMod += profBonus * 2
+			} else {
+				totalMod += profBonus
+			}
+		}
+		
+		// Track results per day
+		dailyResults := []map[string]interface{}{}
+		totalGold := 0
+		
+		for day := 1; day <= req.Days; day++ {
+			roll := rollDie(20)
+			total := roll + totalMod
+			
+			var lifestyle string
+			var goldEarned int
+			
+			if total >= 20 {
+				lifestyle = "Comfortable"
+				goldEarned = 2
+			} else if total >= 15 {
+				lifestyle = "Modest"
+				goldEarned = 1
+			} else if total >= 10 {
+				lifestyle = "Poor"
+				goldEarned = 1
+			} else {
+				lifestyle = "Squalid"
+				goldEarned = 0
+			}
+			
+			totalGold += goldEarned
+			dailyResults = append(dailyResults, map[string]interface{}{
+				"day":       day,
+				"roll":      roll,
+				"modifier":  totalMod,
+				"total":     total,
+				"lifestyle": lifestyle,
+				"gold":      goldEarned,
+			})
+		}
+		
+		// Update character's gold
+		newGold := currentGold + totalGold
+		db.Exec(`UPDATE characters SET gold = $1 WHERE id = $2`, newGold, req.CharacterID)
+		
+		// Record the activity
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) 
+			SELECT lobby_id, $1, 'downtime', $2, $3 FROM characters WHERE id = $1`,
+			req.CharacterID,
+			fmt.Sprintf("Work (%s) for %d days", skillUsed, req.Days),
+			fmt.Sprintf("Earned %d gp total", totalGold))
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"activity":   "work",
+			"character":  charName,
+			"days":       req.Days,
+			"skill_used": skillUsed,
+			"modifier":   totalMod,
+			"proficient": isProficient,
+			"expertise":  isExpert,
+			"results":    dailyResults,
+			"total_gold": totalGold,
+			"new_gold":   newGold,
+			"message":    fmt.Sprintf("%s worked for %d days using %s and earned %d gp.", charName, req.Days, skillUsed, totalGold),
+		})
+		
+	case "recuperate":
+		// PHB: Recuperating - spend 3 days to end one disease/poison or gain advantage on saves
+		if req.Days < 3 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "insufficient_days",
+				"message": "Recuperating requires at least 3 days of downtime",
+			})
+			return
+		}
+		
+		// Get current conditions
+		var conditionsStr string
+		db.QueryRow(`SELECT COALESCE(conditions, '') FROM characters WHERE id = $1`, req.CharacterID).Scan(&conditionsStr)
+		
+		// Remove one disease or poisoned condition
+		condRemoved := ""
+		if conditionsStr != "" {
+			conditions := strings.Split(conditionsStr, ",")
+			newConditions := []string{}
+			removed := false
+			for _, c := range conditions {
+				c = strings.TrimSpace(c)
+				if !removed && (strings.HasPrefix(c, "disease:") || c == "poisoned") {
+					condRemoved = c
+					removed = true
+				} else if c != "" {
+					newConditions = append(newConditions, c)
+				}
+			}
+			newConditionsStr := strings.Join(newConditions, ",")
+			db.Exec(`UPDATE characters SET conditions = $1 WHERE id = $2`, newConditionsStr, req.CharacterID)
+		}
+		
+		daysUsed := 3
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) 
+			SELECT lobby_id, $1, 'downtime', $2, $3 FROM characters WHERE id = $1`,
+			req.CharacterID,
+			fmt.Sprintf("Recuperate for %d days", daysUsed),
+			fmt.Sprintf("Condition removed: %s", condRemoved))
+		
+		response := map[string]interface{}{
+			"success":   true,
+			"activity":  "recuperate",
+			"character": charName,
+			"days_used": daysUsed,
+		}
+		if condRemoved != "" {
+			response["condition_removed"] = condRemoved
+			response["message"] = fmt.Sprintf("%s spent 3 days recuperating and recovered from %s.", charName, condRemoved)
+		} else {
+			response["message"] = fmt.Sprintf("%s spent 3 days recuperating. No diseases or poisons to remove, but gains advantage on saves against ongoing effects.", charName)
+			response["effect"] = "Advantage on saving throws against ongoing effects for 3 days"
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		
+	default:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "unknown_activity",
+			"message": fmt.Sprintf("Unknown activity: %s. Supported: work, recuperate", req.Activity),
+			"available": []string{"work", "recuperate"},
+		})
+	}
 }
 
 // handleCampaignMessages godoc

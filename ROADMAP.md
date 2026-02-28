@@ -622,9 +622,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] POST /api/characters/unequip-armor endpoint
   - [x] Character sheet shows equipment with armor details
   - [ ] Donning/doffing time (future enhancement)
-- [ ] **Tool Checks**
-  - [ ] Tool proficiency for relevant checks
-  - [ ] Specific tool types: Thieves' tools, Herbalism kit, etc.
+- [x] **Tool Checks** (v0.8.11)
+  - [x] Tool proficiency for relevant checks
+  - [x] Specific tool types: Thieves' tools, Herbalism kit, etc.
 
 ### Monster/NPC Features
 
@@ -717,12 +717,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Critical (≤25% HP): DC+5 and disadvantage
   - [x] Constructs and undead immune (no fear)
   - [x] GM guidance on flee behavior
-- [ ] **Downtime Activities**
+- [x] **Downtime Activities** (partial v0.8.58)
   - [ ] Crafting
   - [ ] Research
   - [ ] Training (new proficiency/language)
-  - [ ] Work (earn gold)
-  - [ ] Recuperating (remove disease/lingering injury)
+  - [x] Work (earn gold) — POST /api/characters/downtime with activity="work"
+  - [x] Recuperating (remove disease/lingering injury) — POST /api/characters/downtime with activity="recuperate"
 - [x] **Madness** (v0.8.57)
   - [x] Short-term, long-term, indefinite (DMG d100 tables)
   - [x] Effects table with conditions (paralyzed, stunned, frightened, etc.)
