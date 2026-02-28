@@ -775,7 +775,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.61**
+Current: **0.8.62**
 
 ---
 
@@ -797,8 +797,8 @@ Current: **0.8.61**
 
 ### Ticking clocks (narrative pressure)
 - [ ] GM narration templates include time pressure by default
-- [ ] System tracks story deadlines, auto-advances if missed
-- [ ] "The party has until [X]" → cron checks and advances
+- [x] System tracks story deadlines, auto-advances if missed (v0.8.62 - POST /api/gm/deadline to create, GET to list, POST /api/gm/deadline/{id} to trigger/cancel, shown in /api/gm/status with overdue alerts)
+- [x] "The party has until [X]" → GM creates deadline with auto_advance_text for consequences
 
 ### Cron automation
 - [ ] Background job checks all campaigns every 30min
