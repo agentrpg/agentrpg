@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.59
+// @version 0.8.60
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.59"
+const version = "0.8.60"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -13366,12 +13366,12 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 
 // handleCharacterDowntime godoc
 // @Summary Perform downtime activities
-// @Description Spend downtime days on activities like working for gold, training to learn new proficiencies, crafting, etc. (PHB Chapter 8: Downtime Activities). Training takes 250 days at 1 gp/day to learn a new tool or language.
+// @Description Spend downtime days on activities like working for gold, training to learn new proficiencies, crafting items, or researching topics. (PHB Chapter 8: Downtime Activities). Training takes 250 days at 1 gp/day. Crafting progresses at 5 gp/day with half-cost materials. Research costs 1 gp/day with Investigation checks.
 // @Tags Characters
 // @Accept json
 // @Produce json
 // @Security BasicAuth
-// @Param request body object{character_id=int,activity=string,days=int,skill=string,proficiency=string,prof_type=string} true "Downtime activity. activity: work|recuperate|train. For train: proficiency is the tool/language name, prof_type is 'tool' or 'language'."
+// @Param request body object{character_id=int,activity=string,days=int,skill=string,proficiency=string,prof_type=string,item=string,item_cost=int,tool=string,topic=string} true "Downtime activity. activity: work|recuperate|train|craft|research. For train: proficiency + prof_type. For craft: item + item_cost + tool (optional). For research: topic."
 // @Success 200 {object} map[string]interface{} "Activity result"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 400 {object} map[string]interface{} "Bad request"
@@ -13399,9 +13399,10 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		Skill       string `json:"skill"`       // skill or tool to use (optional for work)
 		Proficiency string `json:"proficiency"` // for training: tool or language name
 		ProfType    string `json:"prof_type"`   // for training: "tool" or "language"
-		// Future fields for other activities:
-		// Item        string `json:"item"`        // for crafting
-		// Topic       string `json:"topic"`       // for research
+		Item        string `json:"item"`        // for crafting: item name to craft
+		ItemCost    int    `json:"item_cost"`   // for crafting: market value in gp (required)
+		Tool        string `json:"tool"`        // for crafting: which tool to use
+		Topic       string `json:"topic"`       // for research: what to research
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -13853,11 +13854,355 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		
 		json.NewEncoder(w).Encode(response)
 		
+	case "craft":
+		// PHB: Crafting during downtime
+		// You can craft nonmagical items if proficient with required tools
+		// Progress: 5 gp worth per day
+		// Raw materials cost: half the item's market price
+		// Must pay upfront for materials
+		
+		if req.Item == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "item_required",
+				"message": "Specify the item to craft",
+				"example": map[string]interface{}{
+					"item":      "Longsword",
+					"item_cost": 15,
+					"tool":      "smith's tools",
+				},
+			})
+			return
+		}
+		
+		if req.ItemCost <= 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "item_cost_required",
+				"message": "Specify the item's market value in gp (item_cost)",
+				"tip":     "Check /api/srd/equipment for standard item prices",
+			})
+			return
+		}
+		
+		// Determine which tool is needed/used
+		toolUsed := req.Tool
+		if toolUsed == "" {
+			// Try to auto-detect based on item name
+			itemLower := strings.ToLower(req.Item)
+			if strings.Contains(itemLower, "sword") || strings.Contains(itemLower, "axe") || 
+			   strings.Contains(itemLower, "mace") || strings.Contains(itemLower, "armor") ||
+			   strings.Contains(itemLower, "shield") || strings.Contains(itemLower, "chain") ||
+			   strings.Contains(itemLower, "plate") || strings.Contains(itemLower, "helm") {
+				toolUsed = "smith's tools"
+			} else if strings.Contains(itemLower, "bow") || strings.Contains(itemLower, "arrow") ||
+			          strings.Contains(itemLower, "crossbow") || strings.Contains(itemLower, "bolt") {
+				toolUsed = "woodcarver's tools"
+			} else if strings.Contains(itemLower, "leather") || strings.Contains(itemLower, "hide") ||
+			          strings.Contains(itemLower, "boots") || strings.Contains(itemLower, "gloves") {
+				toolUsed = "leatherworker's tools"
+			} else if strings.Contains(itemLower, "potion") || strings.Contains(itemLower, "antitoxin") {
+				toolUsed = "alchemist's supplies"
+			} else if strings.Contains(itemLower, "cloth") || strings.Contains(itemLower, "robe") ||
+			          strings.Contains(itemLower, "cloak") {
+				toolUsed = "weaver's tools"
+			} else if strings.Contains(itemLower, "gem") || strings.Contains(itemLower, "ring") ||
+			          strings.Contains(itemLower, "amulet") || strings.Contains(itemLower, "necklace") {
+				toolUsed = "jeweler's tools"
+			} else if strings.Contains(itemLower, "glass") || strings.Contains(itemLower, "vial") ||
+			          strings.Contains(itemLower, "bottle") {
+				toolUsed = "glassblower's tools"
+			} else if strings.Contains(itemLower, "pot") || strings.Contains(itemLower, "jug") ||
+			          strings.Contains(itemLower, "flask") {
+				toolUsed = "potter's tools"
+			} else if strings.Contains(itemLower, "cart") || strings.Contains(itemLower, "wagon") ||
+			          strings.Contains(itemLower, "wheel") {
+				toolUsed = "carpenter's tools"
+			} else {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "tool_required",
+					"message": "Could not auto-detect required tool. Specify which tool to use.",
+					"common_tools": []string{
+						"smith's tools", "woodcarver's tools", "leatherworker's tools",
+						"alchemist's supplies", "weaver's tools", "jeweler's tools",
+						"carpenter's tools", "potter's tools", "glassblower's tools",
+					},
+				})
+				return
+			}
+		}
+		
+		// Check tool proficiency
+		hasTool := false
+		for _, t := range toolProfs {
+			if strings.EqualFold(strings.TrimSpace(t), strings.TrimSpace(toolUsed)) {
+				hasTool = true
+				break
+			}
+		}
+		
+		if !hasTool {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "not_proficient",
+				"message":          fmt.Sprintf("Crafting %s requires proficiency with %s", req.Item, toolUsed),
+				"tool_required":    toolUsed,
+				"your_tools":       toolProfs,
+				"tip":              "Use activity='train' to learn a new tool proficiency (250 days at 1 gp/day)",
+			})
+			return
+		}
+		
+		// Calculate crafting progress
+		// PHB: 5 gp of progress per day
+		// Materials cost: half the item's market price (paid upfront when starting)
+		materialCost := req.ItemCost / 2
+		if materialCost < 1 {
+			materialCost = 1
+		}
+		
+		craftKey := fmt.Sprintf("craft:%s", strings.ToLower(req.Item))
+		currentProgress := trainingProgress[craftKey] // Reuse training_progress for craft progress
+		
+		// If starting new craft, check materials cost
+		if currentProgress == 0 {
+			if currentGold < materialCost {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":         "insufficient_gold",
+					"message":       fmt.Sprintf("Crafting %s requires %d gp for raw materials (half of %d gp market value)", req.Item, materialCost, req.ItemCost),
+					"gold_have":     currentGold,
+					"gold_need":     materialCost,
+				})
+				return
+			}
+			// Deduct material cost
+			currentGold -= materialCost
+			db.Exec(`UPDATE characters SET gold = $1 WHERE id = $2`, currentGold, req.CharacterID)
+		}
+		
+		// Calculate days needed
+		daysNeeded := req.ItemCost / 5
+		if daysNeeded < 1 {
+			daysNeeded = 1
+		}
+		
+		// Add progress
+		newProgress := currentProgress + req.Days
+		
+		response := map[string]interface{}{
+			"success":    true,
+			"activity":   "craft",
+			"character":  charName,
+			"item":       req.Item,
+			"tool_used":  toolUsed,
+			"days_spent": req.Days,
+			"item_cost":  req.ItemCost,
+		}
+		
+		if newProgress >= daysNeeded {
+			// Crafting complete! Add to inventory
+			var inventoryStr string
+			db.QueryRow(`SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1`, req.CharacterID).Scan(&inventoryStr)
+			var inventory []map[string]interface{}
+			json.Unmarshal([]byte(inventoryStr), &inventory)
+			
+			// Add the crafted item
+			inventory = append(inventory, map[string]interface{}{
+				"name":    req.Item,
+				"value":   req.ItemCost,
+				"crafted": true,
+			})
+			
+			inventoryJSON, _ := json.Marshal(inventory)
+			db.Exec(`UPDATE characters SET inventory = $1 WHERE id = $2`, string(inventoryJSON), req.CharacterID)
+			
+			// Clear crafting progress
+			delete(trainingProgress, craftKey)
+			trainingJSON, _ := json.Marshal(trainingProgress)
+			db.Exec(`UPDATE characters SET training_progress = $1 WHERE id = $2`, string(trainingJSON), req.CharacterID)
+			
+			// Record the completion
+			db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) 
+				SELECT lobby_id, $1, 'downtime', $2, $3 FROM characters WHERE id = $1`,
+				req.CharacterID,
+				fmt.Sprintf("Crafted %s using %s", req.Item, toolUsed),
+				fmt.Sprintf("Completed in %d days, materials cost %d gp", newProgress, materialCost))
+			
+			response["complete"] = true
+			response["total_days"] = newProgress
+			response["materials_cost"] = materialCost
+			response["message"] = fmt.Sprintf("%s finished crafting %s after %d days using %s! Item added to inventory.", charName, req.Item, newProgress, toolUsed)
+		} else {
+			// Still crafting
+			trainingProgress[craftKey] = newProgress
+			trainingJSON, _ := json.Marshal(trainingProgress)
+			db.Exec(`UPDATE characters SET training_progress = $1 WHERE id = $2`, string(trainingJSON), req.CharacterID)
+			
+			daysRemaining := daysNeeded - newProgress
+			
+			// Record partial progress
+			db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) 
+				SELECT lobby_id, $1, 'downtime', $2, $3 FROM characters WHERE id = $1`,
+				req.CharacterID,
+				fmt.Sprintf("Crafting %s using %s - %d days", req.Item, toolUsed, req.Days),
+				fmt.Sprintf("Progress: %d/%d days (%.0f%%)", newProgress, daysNeeded, float64(newProgress)/float64(daysNeeded)*100))
+			
+			response["complete"] = false
+			response["progress_days"] = newProgress
+			response["days_needed"] = daysNeeded
+			response["days_remaining"] = daysRemaining
+			response["percent_complete"] = float64(newProgress) / float64(daysNeeded) * 100
+			if currentProgress == 0 {
+				response["materials_cost"] = materialCost
+				response["gold_remaining"] = currentGold
+			}
+			response["message"] = fmt.Sprintf("%s worked on crafting %s for %d days. Progress: %d/%d days (%.0f%%). %d days remaining.", 
+				charName, req.Item, req.Days, newProgress, daysNeeded, 
+				float64(newProgress)/float64(daysNeeded)*100, daysRemaining)
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		
+	case "research":
+		// PHB/DMG: Researching during downtime
+		// Spend time in a library or consulting sages
+		// Costs 1 gp per day (access fees, bribes, etc.)
+		// Make Intelligence (Investigation) check to find information
+		
+		if req.Topic == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "topic_required",
+				"message": "Specify a topic to research",
+				"example": map[string]interface{}{
+					"topic": "history of the ancient dragon cult",
+					"days":  7,
+				},
+			})
+			return
+		}
+		
+		// Check gold (1 gp per day)
+		goldNeeded := req.Days
+		if currentGold < goldNeeded {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":     "insufficient_gold",
+				"message":   fmt.Sprintf("Research costs 1 gp per day for library access and bribes. You need %d gp but only have %d gp.", goldNeeded, currentGold),
+				"gold_have": currentGold,
+				"gold_need": goldNeeded,
+			})
+			return
+		}
+		
+		// Get Intelligence modifier
+		var charInt int
+		db.QueryRow(`SELECT int FROM characters WHERE id = $1`, req.CharacterID).Scan(&charInt)
+		intMod := modifier(charInt)
+		
+		// Check for Investigation proficiency
+		isProficient := containsSkill(skillProfs, "investigation")
+		isExpert := containsSkill(expSkills, "investigation")
+		
+		profBonus := proficiencyBonus(level)
+		totalMod := intMod
+		if isProficient {
+			if isExpert {
+				totalMod += profBonus * 2
+			} else {
+				totalMod += profBonus
+			}
+		}
+		
+		// Deduct gold
+		newGold := currentGold - goldNeeded
+		db.Exec(`UPDATE characters SET gold = $1 WHERE id = $2`, newGold, req.CharacterID)
+		
+		// More days = better chance of finding good information
+		// Each day is a separate check, track best result
+		// DC 10: Basic facts
+		// DC 15: Detailed information
+		// DC 20: Secret or hidden knowledge
+		// DC 25: Legendary or obscure lore
+		
+		dailyResults := []map[string]interface{}{}
+		bestRoll := 0
+		
+		for day := 1; day <= req.Days; day++ {
+			roll := rollDie(20)
+			total := roll + totalMod
+			if total > bestRoll {
+				bestRoll = total
+			}
+			
+			var quality string
+			if total >= 25 {
+				quality = "legendary"
+			} else if total >= 20 {
+				quality = "secret"
+			} else if total >= 15 {
+				quality = "detailed"
+			} else if total >= 10 {
+				quality = "basic"
+			} else {
+				quality = "nothing"
+			}
+			
+			dailyResults = append(dailyResults, map[string]interface{}{
+				"day":     day,
+				"roll":    roll,
+				"total":   total,
+				"quality": quality,
+			})
+		}
+		
+		// Determine overall findings based on best roll
+		var findings string
+		var findingsQuality string
+		
+		if bestRoll >= 25 {
+			findingsQuality = "legendary"
+			findings = fmt.Sprintf("After %d days of research on '%s', you uncover legendary lore known only to the most dedicated scholars. The GM should provide exceptionally rare or powerful information.", req.Days, req.Topic)
+		} else if bestRoll >= 20 {
+			findingsQuality = "secret"
+			findings = fmt.Sprintf("Your %d days researching '%s' reveal secret knowledge not commonly known. The GM should provide hidden or sensitive information.", req.Days, req.Topic)
+		} else if bestRoll >= 15 {
+			findingsQuality = "detailed"
+			findings = fmt.Sprintf("Through %d days of diligent research on '%s', you gain detailed and useful information. The GM should provide comprehensive facts.", req.Days, req.Topic)
+		} else if bestRoll >= 10 {
+			findingsQuality = "basic"
+			findings = fmt.Sprintf("Your %d days spent researching '%s' yield basic information. The GM should provide common knowledge about the topic.", req.Days, req.Topic)
+		} else {
+			findingsQuality = "none"
+			findings = fmt.Sprintf("Despite %d days of research on '%s', you find nothing useful. The topic may be too obscure, or the resources available insufficient.", req.Days, req.Topic)
+		}
+		
+		// Record the research
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) 
+			SELECT lobby_id, $1, 'downtime', $2, $3 FROM characters WHERE id = $1`,
+			req.CharacterID,
+			fmt.Sprintf("Research: %s (%d days)", req.Topic, req.Days),
+			fmt.Sprintf("Best check: %d (%s quality)", bestRoll, findingsQuality))
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"activity":         "research",
+			"character":        charName,
+			"topic":            req.Topic,
+			"days":             req.Days,
+			"gold_spent":       goldNeeded,
+			"new_gold":         newGold,
+			"investigation_mod": totalMod,
+			"proficient":       isProficient,
+			"expertise":        isExpert,
+			"daily_results":    dailyResults,
+			"best_check":       bestRoll,
+			"findings_quality": findingsQuality,
+			"findings":         findings,
+			"message":          findings,
+			"gm_instruction":   fmt.Sprintf("The GM should provide %s-quality information about '%s' based on the research result.", findingsQuality, req.Topic),
+		})
+		
 	default:
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "unknown_activity",
-			"message": fmt.Sprintf("Unknown activity: %s. Supported: work, recuperate, train", req.Activity),
-			"available": []string{"work", "recuperate", "train"},
+			"message": fmt.Sprintf("Unknown activity: %s. Supported: work, recuperate, train, craft, research", req.Activity),
+			"available": []string{"work", "recuperate", "train", "craft", "research"},
 		})
 	}
 }
