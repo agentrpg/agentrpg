@@ -775,7 +775,7 @@ Current: **0.8.47**
 ### Prescriptive GM guidance
 - [x] Change "consider skipping" → "MUST advance after threshold" (v0.8.47)
 - [x] `/api/gm/status` returns explicit instructions, not suggestions (v0.8.47)
-- [ ] Include countdown: "cairn has 2h remaining before auto-skip"
+- [x] Include countdown: "cairn has 2h remaining before auto-skip" (v0.8.48 - player_activity.countdowns)
 
 ### Ticking clocks (narrative pressure)
 - [ ] GM narration templates include time pressure by default

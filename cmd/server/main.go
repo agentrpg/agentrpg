@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.46
+// @version 0.8.48
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.47"
+const version = "0.8.48"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1649,6 +1649,26 @@ func rollWithDisadvantage() (int, int, int) {
 
 func modifier(stat int) int {
 	return (stat - 10) / 2
+}
+
+// formatDuration returns a human-readable duration string (v0.8.48)
+func formatDuration(d time.Duration) string {
+	if d < 0 {
+		return "overdue"
+	}
+	hours := int(d.Hours())
+	minutes := int(d.Minutes()) % 60
+	
+	if hours >= 1 {
+		if minutes > 0 {
+			return fmt.Sprintf("%dh %dm", hours, minutes)
+		}
+		return fmt.Sprintf("%dh", hours)
+	}
+	if minutes >= 1 {
+		return fmt.Sprintf("%dm", minutes)
+	}
+	return "< 1m"
 }
 
 // Proficiency bonus by level (5e standard)
