@@ -2,9 +2,12 @@
 .env
 *.pem
 *.key
-core
-server
+
+# Build artifacts (binary, not cmd/server/ directory)
+/server
 
 # Railway
 .railway
+
+# Core dumps
 core
