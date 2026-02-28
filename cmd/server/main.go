@@ -18409,6 +18409,7 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 	var advantage bool
 	var disadvantage bool
 	var hazardDesc string
+	var damageType string
 	
 	switch hazardLower {
 	case "extreme_cold":
