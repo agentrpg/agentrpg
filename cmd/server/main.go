@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.50
+// @version 0.8.51
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.50"
+const version = "0.8.51"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -348,14 +348,14 @@ func main() {
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
 	http.HandleFunc("/api/characters", handleCharacters)
 	http.HandleFunc("/api/characters/", handleCharacterByID)
-	http.HandleFunc("/api/my-turn", handleMyTurn)
-	http.HandleFunc("/api/gm/status", handleGMStatus)
+	http.HandleFunc("/api/my-turn", withAPILogging(handleMyTurn))
+	http.HandleFunc("/api/gm/status", withAPILogging(handleGMStatus))
 	http.HandleFunc("/api/gm/kick-character", handleGMKickCharacter)
 	http.HandleFunc("/api/gm/restore-action", handleGMRestoreAction)
 	http.HandleFunc("/api/gm/recreate-character", handleGMRecreateCharacter)
 	http.HandleFunc("/api/gm/update-action-time", handleGMUpdateActionTime)
 	http.HandleFunc("/api/gm/update-narration-time", handleGMUpdateNarrationTime)
-	http.HandleFunc("/api/gm/narrate", handleGMNarrate)
+	http.HandleFunc("/api/gm/narrate", withAPILogging(handleGMNarrate))
 	http.HandleFunc("/api/gm/nudge", handleGMNudge)
 	http.HandleFunc("/api/gm/skill-check", handleGMSkillCheck)
 	http.HandleFunc("/api/gm/tool-check", handleGMToolCheck)
@@ -383,7 +383,7 @@ func main() {
 	http.HandleFunc("/api/characters/unequip-armor", handleCharacterUnequipArmor)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
-	http.HandleFunc("/api/action", handleAction)
+	http.HandleFunc("/api/action", withAPILogging(handleAction))
 	http.HandleFunc("/api/trigger-readied", handleTriggerReadied)
 	http.HandleFunc("/api/gm/trigger-readied", handleGMTriggerReadied)
 	http.HandleFunc("/api/gm/falling-damage", handleGMFallingDamage)
@@ -780,6 +780,14 @@ func initDB() {
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS damage_immunities TEXT DEFAULT '';
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS damage_vulnerabilities TEXT DEFAULT '';
 		ALTER TABLE monsters ADD COLUMN IF NOT EXISTS condition_immunities TEXT DEFAULT '';
+		
+		-- API Logging Enhancement (v0.8.51 - Phase 10)
+		-- Duration tracking for request profiling
+		ALTER TABLE api_logs ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
+		-- Response body for debugging (JSONB, truncated for large responses)
+		ALTER TABLE api_logs ADD COLUMN IF NOT EXISTS response_body JSONB;
+		-- Query parameters for GET requests
+		ALTER TABLE api_logs ADD COLUMN IF NOT EXISTS query_params TEXT;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2395,14 +2403,131 @@ func getAgentFromAuth(r *http.Request) (int, error) {
 	return id, nil
 }
 
-// logAPIRequest logs an API request to the database
+// logAPIRequest logs an API request to the database (legacy - use logAPIRequestAsync for new code)
 func logAPIRequest(agentID int, endpoint, method string, lobbyID, characterID int, requestBody string, responseStatus int) {
+	logAPIRequestAsync(agentID, endpoint, method, lobbyID, characterID, requestBody, "", "", responseStatus, 0)
+}
+
+// logAPIRequestAsync logs an API request asynchronously with duration tracking (v0.8.51)
+// This function returns immediately; the database insert happens in a goroutine
+func logAPIRequestAsync(agentID int, endpoint, method string, lobbyID, characterID int, requestBody, queryParams, responseBody string, responseStatus int, durationMs int) {
 	if db == nil {
 		return
 	}
-	db.Exec(`INSERT INTO api_logs (agent_id, endpoint, method, lobby_id, character_id, request_body, response_status, created_at)
-		VALUES ($1, $2, $3, NULLIF($4, 0), NULLIF($5, 0), $6, $7, NOW())`,
-		agentID, endpoint, method, lobbyID, characterID, requestBody, responseStatus)
+	
+	// Truncate response body if too large (>10KB)
+	var responseJSON interface{}
+	if responseBody != "" {
+		if len(responseBody) > 10240 {
+			responseJSON = map[string]interface{}{
+				"truncated": true,
+				"preview":   responseBody[:1000] + "...",
+				"size":      len(responseBody),
+			}
+		} else {
+			// Try to parse as JSON, fallback to string
+			var parsed interface{}
+			if json.Unmarshal([]byte(responseBody), &parsed) == nil {
+				responseJSON = parsed
+			} else {
+				responseJSON = map[string]interface{}{"text": responseBody}
+			}
+		}
+	}
+	
+	// Async insert - don't slow down request handling
+	go func() {
+		var responseBytes []byte
+		if responseJSON != nil {
+			responseBytes, _ = json.Marshal(responseJSON)
+		}
+		
+		db.Exec(`INSERT INTO api_logs (agent_id, endpoint, method, lobby_id, character_id, request_body, query_params, response_body, response_status, duration_ms, created_at)
+			VALUES ($1, $2, $3, NULLIF($4, 0), NULLIF($5, 0), $6, NULLIF($7, ''), $8, $9, NULLIF($10, 0), NOW())`,
+			agentID, endpoint, method, lobbyID, characterID, requestBody, queryParams, responseBytes, responseStatus, durationMs)
+	}()
+}
+
+// responseCapture wraps http.ResponseWriter to capture response body and status
+type responseCapture struct {
+	http.ResponseWriter
+	body       []byte
+	statusCode int
+}
+
+func (r *responseCapture) WriteHeader(statusCode int) {
+	r.statusCode = statusCode
+	r.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (r *responseCapture) Write(b []byte) (int, error) {
+	r.body = append(r.body, b...)
+	return r.ResponseWriter.Write(b)
+}
+
+// withAPILogging wraps an http handler with automatic API logging
+// Captures: method, path, query params, request body, response status, duration
+func withAPILogging(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		
+		// Read request body (need to restore it for the handler)
+		var requestBody string
+		if r.Body != nil {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			requestBody = string(bodyBytes)
+			// Restore the body so the handler can read it
+			r.Body = io.NopCloser(strings.NewReader(requestBody))
+		}
+		
+		// Capture response
+		capture := &responseCapture{ResponseWriter: w, statusCode: 200}
+		
+		// Call the actual handler
+		handler(capture, r)
+		
+		// Calculate duration
+		durationMs := int(time.Since(start).Milliseconds())
+		
+		// Extract agent ID from auth if present
+		agentID := 0
+		authHeader := r.Header.Get("Authorization")
+		if strings.HasPrefix(authHeader, "Basic ") {
+			decoded, err := base64.StdEncoding.DecodeString(authHeader[6:])
+			if err == nil {
+				parts := strings.SplitN(string(decoded), ":", 2)
+				if len(parts) == 2 {
+					agentID, _ = authenticateBasic(parts[0], parts[1])
+				}
+			}
+		}
+		
+		// Extract lobby/campaign ID from path or body
+		lobbyID := 0
+		characterID := 0
+		if strings.Contains(r.URL.Path, "/campaigns/") {
+			// Try to parse campaign ID from path
+			parts := strings.Split(r.URL.Path, "/campaigns/")
+			if len(parts) > 1 {
+				idPart := strings.Split(parts[1], "/")[0]
+				lobbyID, _ = strconv.Atoi(idPart)
+			}
+		}
+		
+		// Log asynchronously
+		logAPIRequestAsync(
+			agentID,
+			r.URL.Path,
+			r.Method,
+			lobbyID,
+			characterID,
+			requestBody,
+			r.URL.RawQuery,
+			string(capture.body),
+			capture.statusCode,
+			durationMs,
+		)
+	}
 }
 
 // updateCharacterActivity updates a character's last_active timestamp and logs activity to campaign

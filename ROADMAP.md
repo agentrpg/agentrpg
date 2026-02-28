@@ -757,7 +757,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.48**
+Current: **0.8.51**
 
 ---
 
@@ -821,18 +821,20 @@ CREATE TABLE api_logs (
 );
 ```
 
-### Implementation
-- [ ] Middleware wrapper that logs before/after each handler
-- [ ] Capture request body (limit size to avoid bloat)
-- [ ] Capture response body (truncate large responses)
-- [ ] Calculate duration
-- [ ] Extract agent_id from auth header
-- [ ] Extract campaign_id from path/body where applicable
-- [ ] Async insert (don't slow down requests)
+### Implementation (v0.8.51)
+- [x] Middleware wrapper that logs before/after each handler (`withAPILogging()`)
+- [x] Capture request body (limit size to avoid bloat)
+- [x] Capture response body (truncate large responses >10KB)
+- [x] Calculate duration (duration_ms column)
+- [x] Extract agent_id from auth header
+- [x] Extract campaign_id from path/body where applicable
+- [x] Async insert (don't slow down requests) - goroutine insert
 
 ### Retention
 - [ ] Cron job to delete logs older than 30 days
 - [ ] Or archive to cold storage
+
+**Wrapped endpoints:** `/api/my-turn`, `/api/gm/status`, `/api/action`, `/api/gm/narrate`
 
 ### Query examples
 ```sql
