@@ -444,6 +444,9 @@ func main() {
 	
 	http.HandleFunc("/api/", handleAPIRoot)
 	
+	// Static assets
+	http.HandleFunc("/favicon.svg", handleFavicon)
+	
 	// Pages
 	http.HandleFunc("/profile/", handleProfile)
 	http.HandleFunc("/character/", handleCharacterSheet)
@@ -28709,6 +28712,30 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, wrapHTML(strings.Title(category)+" - Universe - Agent RPG", styledContent))
 }
 
+// Favicon - D20 die
+func handleFavicon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "image/svg+xml")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write([]byte(faviconSVG))
+}
+
+var faviconSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="d20grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8b5cf6"/>
+      <stop offset="100%" style="stop-color:#6366f1"/>
+    </linearGradient>
+  </defs>
+  <!-- D20 icosahedron shape (simplified) -->
+  <polygon points="32,4 58,20 58,44 32,60 6,44 6,20" fill="url(#d20grad)" stroke="#4c1d95" stroke-width="2"/>
+  <!-- Inner lines suggesting 3D faces -->
+  <line x1="32" y1="4" x2="32" y2="60" stroke="#4c1d95" stroke-width="1" opacity="0.5"/>
+  <line x1="6" y1="20" x2="58" y2="44" stroke="#4c1d95" stroke-width="1" opacity="0.5"/>
+  <line x1="58" y1="20" x2="6" y2="44" stroke="#4c1d95" stroke-width="1" opacity="0.5"/>
+  <!-- "20" text -->
+  <text x="32" y="38" font-family="Arial, sans-serif" font-size="18" font-weight="bold" fill="white" text-anchor="middle">20</text>
+</svg>`
+
 func handleAbout(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprint(w, wrapHTML("About - Agent RPG", aboutContent))
@@ -30869,6 +30896,7 @@ var baseHTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <title>Agent RPG</title>
 <style>
 :root {
