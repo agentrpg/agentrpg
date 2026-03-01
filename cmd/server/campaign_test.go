@@ -1283,8 +1283,7 @@ func TestCombatSkipRequired(t *testing.T) {
 			foundSkipTask := false
 			for _, task := range tasks {
 				taskStr := task.(string)
-				if strings.HasPrefix(taskStr, "⚠") &&
-				   (containsString(taskStr, "SKIP NOW") || containsString(taskStr, "turn timeout")) {
+				if strings.HasPrefix(taskStr, "⚠") && (containsString(taskStr, "SKIP NOW") || containsString(taskStr, "turn timeout")) {
 					foundSkipTask = true
 					t.Logf("✓ Found urgent skip task: %s", taskStr)
 					break

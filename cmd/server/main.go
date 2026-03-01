@@ -13141,11 +13141,7 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 					if name, ok := action["name"].(string); ok {
 						nameLower := strings.ToLower(name)
 						// Look for melee attacks (claws, bite, slam, etc.)
-						if strings.Contains(nameLower, "claw") || 
-						   strings.Contains(nameLower, "bite") ||
-						   strings.Contains(nameLower, "slam") ||
-						   strings.Contains(nameLower, "attack") ||
-						   strings.Contains(nameLower, "sword") {
+						if strings.Contains(nameLower, "claw") || strings.Contains(nameLower, "bite") || strings.Contains(nameLower, "slam") || strings.Contains(nameLower, "attack") || strings.Contains(nameLower, "sword") {
 							weaponName = name
 							// Try to parse damage from description
 							if desc, ok := action["desc"].(string); ok {
@@ -15614,8 +15610,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		if profType == "" {
 			// Try to auto-detect based on common tool/language names
 			profLower := strings.ToLower(req.Proficiency)
-			if strings.Contains(profLower, "tools") || strings.Contains(profLower, "kit") || 
-			   strings.Contains(profLower, "supplies") || strings.Contains(profLower, "instrument") {
+			if strings.Contains(profLower, "tools") || strings.Contains(profLower, "kit") || strings.Contains(profLower, "supplies") || strings.Contains(profLower, "instrument") {
 				profType = "tool"
 			} else {
 				profType = "language" // Default to language
@@ -15806,33 +15801,23 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		if toolUsed == "" {
 			// Try to auto-detect based on item name
 			itemLower := strings.ToLower(req.Item)
-			if strings.Contains(itemLower, "sword") || strings.Contains(itemLower, "axe") || 
-			   strings.Contains(itemLower, "mace") || strings.Contains(itemLower, "armor") ||
-			   strings.Contains(itemLower, "shield") || strings.Contains(itemLower, "chain") ||
-			   strings.Contains(itemLower, "plate") || strings.Contains(itemLower, "helm") {
+			if strings.Contains(itemLower, "sword") || strings.Contains(itemLower, "axe") || strings.Contains(itemLower, "mace") || strings.Contains(itemLower, "armor") || strings.Contains(itemLower, "shield") || strings.Contains(itemLower, "chain") || strings.Contains(itemLower, "plate") || strings.Contains(itemLower, "helm") {
 				toolUsed = "smith's tools"
-			} else if strings.Contains(itemLower, "bow") || strings.Contains(itemLower, "arrow") ||
-			          strings.Contains(itemLower, "crossbow") || strings.Contains(itemLower, "bolt") {
+			} else if strings.Contains(itemLower, "bow") || strings.Contains(itemLower, "arrow") || strings.Contains(itemLower, "crossbow") || strings.Contains(itemLower, "bolt") {
 				toolUsed = "woodcarver's tools"
-			} else if strings.Contains(itemLower, "leather") || strings.Contains(itemLower, "hide") ||
-			          strings.Contains(itemLower, "boots") || strings.Contains(itemLower, "gloves") {
+			} else if strings.Contains(itemLower, "leather") || strings.Contains(itemLower, "hide") || strings.Contains(itemLower, "boots") || strings.Contains(itemLower, "gloves") {
 				toolUsed = "leatherworker's tools"
 			} else if strings.Contains(itemLower, "potion") || strings.Contains(itemLower, "antitoxin") {
 				toolUsed = "alchemist's supplies"
-			} else if strings.Contains(itemLower, "cloth") || strings.Contains(itemLower, "robe") ||
-			          strings.Contains(itemLower, "cloak") {
+			} else if strings.Contains(itemLower, "cloth") || strings.Contains(itemLower, "robe") || strings.Contains(itemLower, "cloak") {
 				toolUsed = "weaver's tools"
-			} else if strings.Contains(itemLower, "gem") || strings.Contains(itemLower, "ring") ||
-			          strings.Contains(itemLower, "amulet") || strings.Contains(itemLower, "necklace") {
+			} else if strings.Contains(itemLower, "gem") || strings.Contains(itemLower, "ring") || strings.Contains(itemLower, "amulet") || strings.Contains(itemLower, "necklace") {
 				toolUsed = "jeweler's tools"
-			} else if strings.Contains(itemLower, "glass") || strings.Contains(itemLower, "vial") ||
-			          strings.Contains(itemLower, "bottle") {
+			} else if strings.Contains(itemLower, "glass") || strings.Contains(itemLower, "vial") || strings.Contains(itemLower, "bottle") {
 				toolUsed = "glassblower's tools"
-			} else if strings.Contains(itemLower, "pot") || strings.Contains(itemLower, "jug") ||
-			          strings.Contains(itemLower, "flask") {
+			} else if strings.Contains(itemLower, "pot") || strings.Contains(itemLower, "jug") || strings.Contains(itemLower, "flask") {
 				toolUsed = "potter's tools"
-			} else if strings.Contains(itemLower, "cart") || strings.Contains(itemLower, "wagon") ||
-			          strings.Contains(itemLower, "wheel") {
+			} else if strings.Contains(itemLower, "cart") || strings.Contains(itemLower, "wagon") || strings.Contains(itemLower, "wheel") {
 				toolUsed = "carpenter's tools"
 			} else {
 				json.NewEncoder(w).Encode(map[string]interface{}{
