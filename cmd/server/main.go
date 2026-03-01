@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.85"
+const version = "0.8.86"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -13316,6 +13316,15 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		
 		if newHP == 0 {
 			resultText += fmt.Sprintf(" %s falls to 0 HP!", targetName)
+			
+			// Check for kill effects (v0.8.86: Dark One's Blessing, etc.)
+			if !req.AttackerIsMonster && req.AttackerID > 0 {
+				if killEffects := applyKillEffects(req.AttackerID); killEffects != nil {
+					if msg, ok := killEffects["message"].(string); ok {
+						resultText += " " + msg
+					}
+				}
+			}
 		} else {
 			resultText += fmt.Sprintf(" (%s: %d → %d HP)", targetName, currentHP, newHP)
 		}
@@ -13680,6 +13689,13 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 				result["hp_after"] = newHP
 				result["damage"] = damage // Update with resisted damage
 				totalDamageDealt += damage
+				
+				// Check for kill effects when target drops to 0 HP (v0.8.86)
+				if newHP == 0 && req.CasterID > 0 {
+					if killEffects := applyKillEffects(req.CasterID); killEffects != nil {
+						result["kill_effects"] = killEffects
+					}
+				}
 			} else {
 				// Monster in combat - apply monster damage resistance (v0.8.31)
 				// Get monster_key from turn_order
@@ -13732,6 +13748,13 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 							result["hp_after"] = newHP
 							result["damage"] = damage
 							totalDamageDealt += damage
+							
+							// Check for kill effects when monster drops to 0 HP (v0.8.86)
+							if newHP == 0 && req.CasterID > 0 {
+								if killEffects := applyKillEffects(req.CasterID); killEffects != nil {
+									result["kill_effects"] = killEffects
+								}
+							}
 							break
 						}
 					}
@@ -21988,6 +22011,56 @@ func isPreparedCaster(class string) bool {
 	default:
 		return false
 	}
+}
+
+// applyKillEffects checks for subclass features triggered by killing a creature (v0.8.86)
+// Currently implements:
+// - Fiend Warlock's Dark One's Blessing: gain temp HP = CHA mod + warlock level (min 1)
+// Returns a map with any effects applied, or nil if no effects triggered
+func applyKillEffects(killerCharID int) map[string]interface{} {
+	// Get character info
+	var class, subclass string
+	var level, cha, currentTempHP int
+	err := db.QueryRow(`
+		SELECT class, COALESCE(subclass, ''), level, cha, COALESCE(temp_hp, 0)
+		FROM characters WHERE id = $1
+	`, killerCharID).Scan(&class, &subclass, &level, &cha, &currentTempHP)
+	if err != nil || subclass == "" {
+		return nil
+	}
+	
+	// Check for Fiend Warlock's Dark One's Blessing
+	if strings.ToLower(class) == "warlock" && strings.ToLower(subclass) == "fiend" {
+		if _, hasDarkOnesBlessing := getSubclassMechanic("fiend", level, "dark_ones_blessing"); hasDarkOnesBlessing {
+			// Calculate temp HP: CHA mod + warlock level (min 1)
+			chaMod := modifier(cha)
+			tempHP := chaMod + level
+			if tempHP < 1 {
+				tempHP = 1
+			}
+			
+			// Only update if new temp HP is higher than current (temp HP doesn't stack)
+			if tempHP > currentTempHP {
+				db.Exec("UPDATE characters SET temp_hp = $1 WHERE id = $2", tempHP, killerCharID)
+				return map[string]interface{}{
+					"feature":        "Dark One's Blessing",
+					"temp_hp_gained": tempHP,
+					"cha_modifier":   chaMod,
+					"warlock_level":  level,
+					"message":        fmt.Sprintf("🔥 Dark One's Blessing: gained %d temporary HP (CHA %+d + warlock level %d)", tempHP, chaMod, level),
+				}
+			} else {
+				return map[string]interface{}{
+					"feature":          "Dark One's Blessing",
+					"temp_hp_available": tempHP,
+					"current_temp_hp":   currentTempHP,
+					"message":           fmt.Sprintf("🔥 Dark One's Blessing would grant %d temp HP, but you already have %d (temp HP doesn't stack)", tempHP, currentTempHP),
+				}
+			}
+		}
+	}
+	
+	return nil
 }
 
 // isKnownCaster returns true if the class has fixed known spells (Bard, Ranger, Sorcerer, Warlock)

@@ -577,6 +577,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Evocation Wizard features (v0.8.81)
     - [x] Sculpt Spells: protect 1+spell_level allies from evocation AoE (auto-succeed, no damage)
     - [x] Empowered Evocation: add INT mod to evocation spell damage (level 10+)
+  - [x] Fiend Warlock features (v0.8.86)
+    - [x] Dark One's Blessing: gain temp HP (CHA mod + warlock level, min 1) when reducing hostile creature to 0 HP
+    - [x] Triggers on AoE spell kills and opportunity attack kills
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
