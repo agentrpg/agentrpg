@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.72
+// @version 0.8.73
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.72"
+const version = "0.8.73"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -866,6 +866,12 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_resources JSONB DEFAULT '{}';
 		-- Tracks resources used since last rest: {"ki": 2, "rage": 1}
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_resources_used JSONB DEFAULT '{}';
+		
+		-- Prepared Spells (v0.8.73 - Phase 8 Spell System)
+		-- JSONB array of spell slugs the character has prepared for the day
+		-- Used by prepared casters (Cleric, Druid, Paladin, Wizard)
+		-- Known casters (Bard, Ranger, Sorcerer, Warlock) use known_spells instead
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS prepared_spells JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -6271,6 +6277,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		case "spells":
 			handleCharacterSpells(w, r, charID)
 			return
+		case "prepare":
+			handlePrepareSpells(w, r, charID)
+			return
 		case "feat":
 			handleCharacterFeat(w, r, charID)
 			return
@@ -6286,7 +6295,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
 	var hitDiceSpent, exhaustionLevel int
 	var isStable, isDead, hasInspiration bool
-	var conditionsJSON, slotsUsedJSON, knownSpellsJSON, featsJSON []byte
+	var conditionsJSON, slotsUsedJSON, knownSpellsJSON, preparedSpellsJSON, featsJSON []byte
 	var concentratingOn string
 	var gold, copper, silver, electrum, platinum int
 	var inventoryJSON []byte
@@ -6317,7 +6326,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(expertise, ''), COALESCE(language_proficiencies, ''),
 			equipped_armor, COALESCE(equipped_shield, false),
 			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0),
-			COALESCE(known_spells, '[]'), COALESCE(feats, '[]')
+			COALESCE(known_spells, '[]'), COALESCE(prepared_spells, '[]'), COALESCE(feats, '[]')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &subclassRaw, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
@@ -6326,7 +6335,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
-		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON, &featsJSON)
+		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON, &preparedSpellsJSON, &featsJSON)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -6670,6 +6679,39 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			response["domain_spells"] = domainSpells
 			response["domain_spells_note"] = "These spells are always prepared and don't count against your prepared spell limit."
 		}
+	}
+	
+	// Prepared Spells (v0.8.73) - for prepared casters (Cleric, Druid, Paladin, Wizard)
+	if isPreparedCaster(class) {
+		var preparedSpells []string
+		json.Unmarshal(preparedSpellsJSON, &preparedSpells)
+		
+		preparedSpellsInfo := []map[string]interface{}{}
+		for _, slug := range preparedSpells {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				preparedSpellsInfo = append(preparedSpellsInfo, map[string]interface{}{
+					"slug":   slug,
+					"name":   spell.Name,
+					"level":  spell.Level,
+					"school": spell.School,
+				})
+			} else {
+				preparedSpellsInfo = append(preparedSpellsInfo, map[string]interface{}{
+					"slug": slug,
+					"name": slug, // fallback
+				})
+			}
+		}
+		
+		maxPrepared := getMaxPreparedSpells(class, level, intl, wis, cha)
+		response["prepared_spells"] = preparedSpellsInfo
+		response["prepared_count"] = len(preparedSpells)
+		response["max_prepared"] = maxPrepared
+		response["slots_remaining"] = maxPrepared - len(preparedSpells)
+		response["caster_type"] = "prepared"
+		response["prepared_spells_tip"] = fmt.Sprintf("Use POST /api/characters/%d/prepare to change prepared spells after a long rest.", charID)
+	} else if isKnownCaster(class) {
+		response["caster_type"] = "known"
 	}
 	
 	// Feats
@@ -7224,6 +7266,37 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		if len(domainSpells) > 0 {
 			characterInfo["domain_spells"] = domainSpells
 		}
+	}
+	
+	// Add prepared spells for prepared casters (v0.8.73)
+	if isPreparedCaster(class) {
+		var preparedSpellsJSON []byte
+		var myTurnIntl, myTurnWis, myTurnCha int
+		db.QueryRow("SELECT COALESCE(prepared_spells, '[]'), intl, wis, cha FROM characters WHERE id = $1", charID).Scan(&preparedSpellsJSON, &myTurnIntl, &myTurnWis, &myTurnCha)
+		var preparedSpells []string
+		json.Unmarshal(preparedSpellsJSON, &preparedSpells)
+		
+		preparedInfo := []map[string]interface{}{}
+		for _, slug := range preparedSpells {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				preparedInfo = append(preparedInfo, map[string]interface{}{
+					"slug":         slug,
+					"name":         spell.Name,
+					"level":        spell.Level,
+					"casting_time": spell.CastingTime,
+					"components":   spell.Components,
+					"is_ritual":    spell.IsRitual,
+				})
+			}
+		}
+		
+		maxPrepared := getMaxPreparedSpells(class, level, myTurnIntl, myTurnWis, myTurnCha)
+		characterInfo["prepared_spells"] = preparedInfo
+		characterInfo["max_prepared"] = maxPrepared
+		characterInfo["caster_type"] = "prepared"
+		characterInfo["prepared_tip"] = "Use POST /api/characters/{id}/prepare to change prepared spells after a long rest."
+	} else if isKnownCaster(class) {
+		characterInfo["caster_type"] = "known"
 	}
 	
 	// Add feats (v0.8.66)
@@ -21221,6 +21294,84 @@ func getDomainSpellsWithInfo(subclassSlug string, level int) []map[string]interf
 	return result
 }
 
+// isPreparedCaster returns true if the class prepares spells daily (Cleric, Druid, Paladin, Wizard)
+// Known casters (Bard, Ranger, Sorcerer, Warlock) use known_spells instead
+func isPreparedCaster(class string) bool {
+	switch strings.ToLower(class) {
+	case "cleric", "druid", "paladin", "wizard":
+		return true
+	default:
+		return false
+	}
+}
+
+// isKnownCaster returns true if the class has fixed known spells (Bard, Ranger, Sorcerer, Warlock)
+func isKnownCaster(class string) bool {
+	switch strings.ToLower(class) {
+	case "bard", "ranger", "sorcerer", "warlock":
+		return true
+	default:
+		return false
+	}
+}
+
+// getSpellcastingAbilityMod returns the spellcasting ability modifier for a class
+func getSpellcastingAbilityMod(class string, intl, wis, cha int) int {
+	switch strings.ToLower(class) {
+	case "wizard":
+		return modifier(intl)
+	case "cleric", "druid", "ranger":
+		return modifier(wis)
+	case "bard", "paladin", "sorcerer", "warlock":
+		return modifier(cha)
+	default:
+		return 0
+	}
+}
+
+// getMaxPreparedSpells returns the maximum number of spells a prepared caster can prepare
+// Formula: level + spellcasting modifier (minimum 1)
+// Paladins and Rangers use half level (rounded down, minimum 1) + modifier
+func getMaxPreparedSpells(class string, level, intl, wis, cha int) int {
+	if !isPreparedCaster(class) {
+		return 0
+	}
+	
+	mod := getSpellcastingAbilityMod(class, intl, wis, cha)
+	classLower := strings.ToLower(class)
+	
+	var preparedCount int
+	switch classLower {
+	case "paladin":
+		// Paladins prepare: paladin level / 2 (round down) + CHA modifier
+		halfLevel := level / 2
+		if halfLevel < 1 {
+			halfLevel = 1
+		}
+		preparedCount = halfLevel + mod
+	case "cleric", "druid", "wizard":
+		// Full casters prepare: class level + spellcasting modifier
+		preparedCount = level + mod
+	default:
+		preparedCount = level + mod
+	}
+	
+	if preparedCount < 1 {
+		preparedCount = 1
+	}
+	return preparedCount
+}
+
+// getClassSpellList returns all spell slugs available to a class
+// NOTE: Currently returns nil as class spell lists aren't seeded from SRD
+// Validation against class spell list is skipped - any SRD spell can be prepared
+// TODO: Seed class spell lists from https://www.dnd5eapi.co/api/classes/{class}/spells
+func getClassSpellList(class string) []string {
+	// For now, return nil - prepared spell validation only checks SRD exists
+	// Future: fetch from seeded class_spells table
+	return nil
+}
+
 // getCritRange returns the critical hit range for a character (default 20, can be 19 or 18 for Champions)
 func getCritRange(subclassSlug string, level int) int {
 	if subclassSlug == "champion" {
@@ -25957,6 +26108,264 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	}
 	
 	http.Error(w, "Method not allowed. Use GET or PUT.", http.StatusMethodNotAllowed)
+}
+
+// handlePrepareSpells godoc
+// @Summary Prepare spells for the day (prepared casters only)
+// @Description Clerics, Druids, Paladins, and Wizards can change their prepared spells after a long rest.
+// @Description GET: View currently prepared spells and preparation limits.
+// @Description POST: Set prepared spell list for the day. Validates against limit (level + spellcasting modifier).
+// @Description Domain/subclass spells are always prepared and don't count against the limit.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{spells=[]string} false "Spell slugs to prepare (POST only)"
+// @Success 200 {object} map[string]interface{} "Prepared spells info"
+// @Failure 400 {object} map[string]interface{} "Not a prepared caster or exceeds limit"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not your character"
+// @Router /characters/{id}/prepare [get]
+// @Router /characters/{id}/prepare [post]
+func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var preparedSpellsJSON []byte
+	var className string
+	var subclassRaw sql.NullString
+	var level, intl, wis, cha int
+	err = db.QueryRow(`
+		SELECT agent_id, COALESCE(prepared_spells, '[]'), class, subclass, level, intl, wis, cha
+		FROM characters WHERE id = $1
+	`, charID).Scan(&ownerID, &preparedSpellsJSON, &className, &subclassRaw, &level, &intl, &wis, &cha)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	subclassSlug := ""
+	if subclassRaw.Valid {
+		subclassSlug = subclassRaw.String
+	}
+	
+	// Check if this class is a prepared caster
+	if !isPreparedCaster(className) {
+		// Known casters (Bard, Ranger, Sorcerer, Warlock) use /api/characters/{id}/spells instead
+		if isKnownCaster(className) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "not_prepared_caster",
+				"message": fmt.Sprintf("%ss are known-spell casters. Use PUT /api/characters/%d/spells to update your known spells.", className, charID),
+				"caster_type": "known",
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "not_spellcaster",
+				"message": fmt.Sprintf("%ss are not spellcasters.", className),
+			})
+		}
+		return
+	}
+	
+	var preparedSpells []string
+	json.Unmarshal(preparedSpellsJSON, &preparedSpells)
+	
+	// Calculate limits
+	maxPrepared := getMaxPreparedSpells(className, level, intl, wis, cha)
+	spellAbility := ""
+	switch strings.ToLower(className) {
+	case "wizard":
+		spellAbility = "INT"
+	case "cleric", "druid":
+		spellAbility = "WIS"
+	case "paladin":
+		spellAbility = "CHA"
+	}
+	
+	// Get domain/subclass spells (always prepared)
+	domainSpells := getDomainSpells(subclassSlug, level)
+	
+	if r.Method == "GET" {
+		// Return current prepared spells with enriched info
+		preparedInfo := []map[string]interface{}{}
+		for _, slug := range preparedSpells {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				preparedInfo = append(preparedInfo, map[string]interface{}{
+					"slug":         slug,
+					"name":         spell.Name,
+					"level":        spell.Level,
+					"school":       spell.School,
+					"casting_time": spell.CastingTime,
+					"components":   spell.Components,
+					"is_ritual":    spell.IsRitual,
+				})
+			} else {
+				preparedInfo = append(preparedInfo, map[string]interface{}{
+					"slug": slug,
+					"name": slug,
+				})
+			}
+		}
+		
+		// Enriched domain spells
+		domainSpellsInfo := getDomainSpellsWithInfo(subclassSlug, level)
+		
+		response := map[string]interface{}{
+			"character_id":       charID,
+			"class":              className,
+			"level":              level,
+			"caster_type":        "prepared",
+			"spellcasting_ability": spellAbility,
+			"prepared_spells":    preparedInfo,
+			"prepared_count":     len(preparedSpells),
+			"max_prepared":       maxPrepared,
+			"slots_remaining":    maxPrepared - len(preparedSpells),
+		}
+		
+		if len(domainSpellsInfo) > 0 {
+			response["domain_spells"] = domainSpellsInfo
+			response["domain_spells_note"] = "Always prepared, don't count against your limit"
+		}
+		
+		response["tip"] = fmt.Sprintf("POST to this endpoint with {\"spells\": [...]} to change prepared spells. You can prepare up to %d spells.", maxPrepared)
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	if r.Method == "POST" {
+		var req struct {
+			Spells []string `json:"spells"` // Spell slugs to prepare
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+			return
+		}
+		
+		// Validate each spell slug and build the prepared list
+		newPrepared := []string{}
+		for _, spellSlug := range req.Spells {
+			slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
+			slugDashed := strings.ReplaceAll(slugLower, " ", "-")
+			
+			// Check SRD
+			validSlug := ""
+			if _, ok := srdSpellsMemory[slugLower]; ok {
+				validSlug = slugLower
+			} else if _, ok := srdSpellsMemory[slugDashed]; ok {
+				validSlug = slugDashed
+			}
+			
+			if validSlug == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "unknown_spell",
+					"message": fmt.Sprintf("Spell '%s' not found in SRD. Check /api/universe/spells for valid spell slugs.", spellSlug),
+				})
+				return
+			}
+			
+			// Check spell level isn't too high for this character's slots
+			spell := srdSpellsMemory[validSlug]
+			slots := getSpellSlots(className, level)
+			if spell.Level > 0 {
+				if _, hasSlot := slots[spell.Level]; !hasSlot {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":   "spell_too_high",
+						"message": fmt.Sprintf("Cannot prepare %s (level %d) - you don't have level %d spell slots yet.", spell.Name, spell.Level, spell.Level),
+					})
+					return
+				}
+			}
+			
+			// Don't duplicate
+			isDuplicate := false
+			for _, existing := range newPrepared {
+				if existing == validSlug {
+					isDuplicate = true
+					break
+				}
+			}
+			// Also check if it's a domain spell (auto-prepared)
+			for _, ds := range domainSpells {
+				if ds == validSlug {
+					isDuplicate = true
+					break
+				}
+			}
+			if !isDuplicate {
+				newPrepared = append(newPrepared, validSlug)
+			}
+		}
+		
+		// Check against limit
+		if len(newPrepared) > maxPrepared {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":       "exceeds_limit",
+				"message":     fmt.Sprintf("Cannot prepare %d spells - your maximum is %d (level %d + %s modifier).", len(newPrepared), maxPrepared, level, spellAbility),
+				"max":         maxPrepared,
+				"requested":   len(newPrepared),
+			})
+			return
+		}
+		
+		// Save to database
+		newPreparedJSON, _ := json.Marshal(newPrepared)
+		_, err = db.Exec(`UPDATE characters SET prepared_spells = $1 WHERE id = $2`, newPreparedJSON, charID)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "detail": err.Error()})
+			return
+		}
+		
+		// Return updated prepared list
+		preparedInfo := []map[string]interface{}{}
+		for _, slug := range newPrepared {
+			if spell, ok := srdSpellsMemory[slug]; ok {
+				preparedInfo = append(preparedInfo, map[string]interface{}{
+					"slug":   slug,
+					"name":   spell.Name,
+					"level":  spell.Level,
+					"school": spell.School,
+				})
+			}
+		}
+		
+		domainSpellsInfo := getDomainSpellsWithInfo(subclassSlug, level)
+		
+		response := map[string]interface{}{
+			"success":          true,
+			"prepared_spells":  preparedInfo,
+			"prepared_count":   len(newPrepared),
+			"max_prepared":     maxPrepared,
+			"slots_remaining":  maxPrepared - len(newPrepared),
+			"message":          fmt.Sprintf("Prepared %d spells for the day.", len(newPrepared)),
+		}
+		
+		if len(domainSpellsInfo) > 0 {
+			response["domain_spells"] = domainSpellsInfo
+			response["domain_spells_note"] = "Always prepared, don't count against your limit"
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	http.Error(w, "Method not allowed. Use GET or POST.", http.StatusMethodNotAllowed)
 }
 
 // handleUseResource godoc

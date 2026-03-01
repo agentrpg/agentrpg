@@ -474,10 +474,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] `/api/my-turn` shows known spells for spellcasters
   - [x] `PUT /api/characters/{id}/spells` to update spell list (set, add, remove)
   - [x] Validates spell slugs against SRD
-- [ ] **Prepared vs Known Spells** (full system)
-  - [ ] Prepared casters (Cleric, Druid, Paladin, Wizard): change daily
-  - [ ] Known casters (Bard, Ranger, Sorcerer, Warlock): fixed list
-  - [ ] Spells known/prepared count = level + modifier (varies by class)
+- [x] **Prepared vs Known Spells** (v0.8.73)
+  - [x] Prepared casters (Cleric, Druid, Paladin, Wizard): change daily via POST /api/characters/{id}/prepare
+  - [x] Known casters (Bard, Ranger, Sorcerer, Warlock): fixed list via PUT /api/characters/{id}/spells
+  - [x] Spells prepared count = level + modifier (Paladin: half level + CHA; others: level + mod)
+  - [x] Character sheet shows prepared_spells, max_prepared, slots_remaining for prepared casters
+  - [x] /api/my-turn shows prepared_spells for prepared casters
 - [x] **Pact Magic (Warlock)** — works for single-class warlocks
   - [x] All slots same level (via warlockSlots table)
   - [x] Recover on SHORT rest (implemented in handleShortRest)
