@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.73"
+const version = "0.8.74"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -7925,15 +7925,25 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			needsAttention = true
 			whatToDoNext = map[string]interface{}{
 				"instruction":        fmt.Sprintf("It's %s's turn. Run the monster's action.", currentTurnName),
-				"narrative_suggestion": "Describe the monster's action dramatically before resolving mechanics.",
+				"narrative_suggestion": "The enemy doesn't hesitate. Describe the attack with visceral urgency—the threat is immediate and the party feels the pressure.",
 				"next_in_initiative":   currentTurnName,
+				"time_pressure_tips": []string{
+					"Monsters act decisively; the clock is ticking",
+					"Describe what's at stake if the party doesn't respond",
+					"Environmental hazards worsen each round",
+				},
 			}
 		} else if lastAction != nil {
 			needsAttention = true
 			whatToDoNext = map[string]interface{}{
 				"instruction":        fmt.Sprintf("Narrate %s's action, then check if it's a monster's turn.", lastCharName),
-				"narrative_suggestion": "Make the result feel impactful. Describe the environment reacting.",
+				"narrative_suggestion": "Show consequences immediately. The world reacts in real time—what changes? What new threat emerges?",
 				"next_in_initiative":   currentTurnName,
+				"time_pressure_tips": []string{
+					"Every action costs something (time, resources, attention)",
+					"Success should reveal new complications",
+					"Failure creates urgency—something worse is coming",
+				},
 			}
 			waitingFor = &currentTurnName
 		}
@@ -7943,12 +7953,24 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			needsAttention = true
 			whatToDoNext = map[string]interface{}{
 				"instruction":        fmt.Sprintf("Narrate the result of %s's action.", lastCharName),
-				"narrative_suggestion": "Advance the scene. What do they discover? What happens next?",
+				"narrative_suggestion": "Time passes as they act. What complication builds in the background? Something is always counting down.",
+				"time_pressure_tips": []string{
+					"Hint at approaching danger or closing windows",
+					"Resources deplete; torches dim, air runs thin",
+					"NPCs and threats have their own timelines",
+					"Each choice forecloses other options",
+				},
 			}
 		} else {
 			whatToDoNext = map[string]interface{}{
 				"instruction":        "Set the scene. Describe what the party sees.",
-				"narrative_suggestion": "Engage the senses: sight, sound, smell. Give them something to interact with.",
+				"narrative_suggestion": "Establish stakes immediately. Something is urgent: a pursuit, a timer, a deteriorating situation. Give them a reason to act NOW.",
+				"time_pressure_tips": []string{
+					"Start with a hook that demands response",
+					"Mention something time-sensitive in the environment",
+					"The status quo is unstable—standing still has cost",
+					"Hint at what will happen if they delay",
+				},
 			}
 		}
 		

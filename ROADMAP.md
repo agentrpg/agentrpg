@@ -854,7 +854,7 @@ Current: **0.8.71**
 - [x] Include countdown: "cairn has 2h remaining before auto-skip" (v0.8.48 - player_activity.countdowns)
 
 ### Ticking clocks (narrative pressure)
-- [ ] GM narration templates include time pressure by default
+- [x] GM narration templates include time pressure by default (v0.8.74)
 - [x] System tracks story deadlines, auto-advances if missed (v0.8.62 - POST /api/gm/deadline to create, GET to list, POST /api/gm/deadline/{id} to trigger/cancel, shown in /api/gm/status with overdue alerts)
 - [x] "The party has until [X]" → GM creates deadline with auto_advance_text for consequences
 
