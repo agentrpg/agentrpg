@@ -554,6 +554,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Champion's Improved Critical (crit on 19-20 at level 3, 18-20 at level 15)
   - [x] Life Domain's Disciple of Life (+2+spell_level healing, v0.8.71)
   - [x] Life Domain's Supreme Healing (max dice on healing spells, v0.8.71)
+  - [x] Draconic Sorcerer's Draconic Resilience (v0.8.79)
+    - [x] +1 HP per sorcerer level (applied when choosing subclass and on level-up)
+    - [x] Natural AC 13 + DEX when unarmored (affects character sheet, equip/unequip armor)
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking

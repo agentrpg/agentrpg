@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.78
+// @version 0.8.79
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.78"
+const version = "0.8.79"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2140,13 +2140,19 @@ func getArmorInfo(armorSlug string) (*ArmorInfo, error) {
 
 // calculateArmorAC calculates AC based on equipped armor, shield, and DEX modifier
 // Rules:
-// - Unarmored: 10 + DEX mod
+// - Unarmored: naturalACBase + DEX mod (default naturalACBase is 10)
 // - Light armor: Armor AC + full DEX mod
 // - Medium armor: Armor AC + DEX mod (max +2)
 // - Heavy armor: Armor AC (no DEX mod)
 // - Shield: +2 AC
 func calculateArmorAC(dexMod int, equippedArmor string, equippedShield bool) int {
-	baseAC := 10 + dexMod // Unarmored
+	return calculateArmorACWithNatural(dexMod, equippedArmor, equippedShield, 10)
+}
+
+// calculateArmorACWithNatural is like calculateArmorAC but allows specifying natural AC base
+// for features like Draconic Resilience (13 + DEX) or Unarmored Defense
+func calculateArmorACWithNatural(dexMod int, equippedArmor string, equippedShield bool, naturalACBase int) int {
+	baseAC := naturalACBase + dexMod // Unarmored with natural AC
 	
 	if equippedArmor != "" {
 		armor, err := getArmorInfo(equippedArmor)
@@ -2171,6 +2177,27 @@ func calculateArmorAC(dexMod int, equippedArmor string, equippedShield bool) int
 	}
 	
 	return baseAC
+}
+
+// getNaturalACBase returns the unarmored AC base for a character based on subclass features (v0.8.79)
+// Draconic Sorcerers get 13 (from Draconic Resilience)
+// Default is 10 for most characters
+func getNaturalACBase(subclass string, level int) int {
+	if subclass == "" {
+		return 10
+	}
+	// Check for natural_ac mechanic (e.g., Draconic Resilience gives "13+dex")
+	if acStr, ok := getSubclassMechanic(subclass, level, "natural_ac"); ok {
+		// Parse the base AC from strings like "13+dex"
+		parts := strings.Split(acStr, "+")
+		if len(parts) >= 1 {
+			base, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+			if err == nil {
+				return base
+			}
+		}
+	}
+	return 10
 }
 
 // getArmorStealthDisadvantage checks if equipped armor causes stealth disadvantage
@@ -7140,7 +7167,12 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Recalculate AC based on equipped armor (in case stored AC is out of sync)
-	calculatedAC := calculateArmorAC(modifier(dex), equippedArmor.String, equippedShield)
+	// Use natural AC base from subclass features (e.g., Draconic Resilience gives 13 + DEX) (v0.8.79)
+	naturalACBase := 10
+	if subclassRaw.Valid && subclassRaw.String != "" {
+		naturalACBase = getNaturalACBase(subclassRaw.String, level)
+	}
+	calculatedAC := calculateArmorACWithNatural(modifier(dex), equippedArmor.String, equippedShield, naturalACBase)
 	if calculatedAC != ac {
 		response["ac"] = calculatedAC
 		response["effective_ac"] = calculatedAC + coverBonus
@@ -12390,12 +12422,13 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 	levelUps := []map[string]interface{}{}
 	
 	for _, charID := range req.CharacterIDs {
-		// Get current XP and level
+		// Get current XP, level, and subclass
 		var name string
 		var currentXP, currentLevel int
+		var subclass sql.NullString
 		err = db.QueryRow(`
-			SELECT name, COALESCE(xp, 0), level FROM characters WHERE id = $1
-		`, charID).Scan(&name, &currentXP, &currentLevel)
+			SELECT name, COALESCE(xp, 0), level, subclass FROM characters WHERE id = $1
+		`, charID).Scan(&name, &currentXP, &currentLevel, &subclass)
 		
 		if err != nil {
 			continue
@@ -12428,9 +12461,26 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			
-			// Update level and pending ASI
-			if asiEarned > 0 {
+			// Check for Draconic Resilience HP bonus (v0.8.79)
+			// Draconic sorcerers gain +1 HP per level gained
+			levelsGained := newLevel - currentLevel
+			var hpBonus int
+			if subclass.Valid && subclass.String != "" {
+				if bonusStr, ok := getSubclassMechanic(subclass.String, newLevel, "bonus_hp_per_level"); ok {
+					bonus, err := strconv.Atoi(bonusStr)
+					if err == nil && bonus > 0 {
+						hpBonus = bonus * levelsGained
+					}
+				}
+			}
+			
+			// Update level, pending ASI, and HP bonus
+			if asiEarned > 0 && hpBonus > 0 {
+				_, err = db.Exec(`UPDATE characters SET level = $1, pending_asi = pending_asi + $2, hp = hp + $3, max_hp = max_hp + $3 WHERE id = $4`, newLevel, asiEarned, hpBonus, charID)
+			} else if asiEarned > 0 {
 				_, err = db.Exec(`UPDATE characters SET level = $1, pending_asi = pending_asi + $2 WHERE id = $3`, newLevel, asiEarned, charID)
+			} else if hpBonus > 0 {
+				_, err = db.Exec(`UPDATE characters SET level = $1, hp = hp + $2, max_hp = max_hp + $2 WHERE id = $3`, newLevel, hpBonus, charID)
 			} else {
 				_, err = db.Exec(`UPDATE characters SET level = $1 WHERE id = $2`, newLevel, charID)
 			}
@@ -12443,12 +12493,18 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 					result["asi_earned"] = asiEarned
 					result["asi_message"] = fmt.Sprintf("You earned %d ability score improvement points! Use POST /api/characters/{id}/asi to apply them.", asiEarned)
 				}
+				// Include Draconic Resilience HP bonus (v0.8.79)
+				if hpBonus > 0 {
+					result["hp_bonus"] = hpBonus
+					result["hp_bonus_reason"] = "Draconic Resilience: +1 HP per level gained"
+				}
 				
 				levelUps = append(levelUps, map[string]interface{}{
 					"character_name": name,
 					"old_level":      currentLevel,
 					"new_level":      newLevel,
 					"asi_earned":     asiEarned,
+					"hp_bonus":       hpBonus,
 				})
 			}
 		} else {
@@ -14939,12 +14995,12 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 	
 	// Verify character belongs to agent
 	var charName string
-	var ownerID, charStr, charDex int
+	var ownerID, charStr, charDex, charLevel int
 	var armorProfs string
-	var currentArmor sql.NullString
+	var currentArmor, charSubclass sql.NullString
 	var currentShield bool
-	err = db.QueryRow(`SELECT name, agent_id, str, dex, armor_proficiencies, equipped_armor, COALESCE(equipped_shield, false) 
-		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &charStr, &charDex, &armorProfs, &currentArmor, &currentShield)
+	err = db.QueryRow(`SELECT name, agent_id, str, dex, armor_proficiencies, equipped_armor, COALESCE(equipped_shield, false), level, subclass 
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &charStr, &charDex, &armorProfs, &currentArmor, &currentShield, &charLevel, &charSubclass)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -15008,9 +15064,13 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Calculate new AC
+	// Calculate new AC with natural AC base from subclass (v0.8.79)
 	dexMod := modifier(charDex)
-	newAC := calculateArmorAC(dexMod, newArmor, newShield)
+	naturalACBase := 10
+	if charSubclass.Valid && charSubclass.String != "" {
+		naturalACBase = getNaturalACBase(charSubclass.String, charLevel)
+	}
+	newAC := calculateArmorACWithNatural(dexMod, newArmor, newShield, naturalACBase)
 	
 	// Update stored AC
 	db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, newAC, req.CharacterID)
@@ -15076,11 +15136,11 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 	
 	// Verify character belongs to agent
 	var charName string
-	var ownerID, charDex int
-	var currentArmor sql.NullString
+	var ownerID, charDex, charLevel int
+	var currentArmor, charSubclass sql.NullString
 	var currentShield bool
-	err = db.QueryRow(`SELECT name, agent_id, dex, equipped_armor, COALESCE(equipped_shield, false) 
-		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &charDex, &currentArmor, &currentShield)
+	err = db.QueryRow(`SELECT name, agent_id, dex, equipped_armor, COALESCE(equipped_shield, false), level, subclass 
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &charDex, &currentArmor, &currentShield, &charLevel, &charSubclass)
 	if err != nil {
 		w.WriteHeader(http.StatusNotFound)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -15114,9 +15174,13 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Calculate new AC
+	// Calculate new AC with natural AC base from subclass (v0.8.79)
 	dexMod := modifier(charDex)
-	newAC := calculateArmorAC(dexMod, newArmor, newShield)
+	naturalACBase := 10
+	if charSubclass.Valid && charSubclass.String != "" {
+		naturalACBase = getNaturalACBase(charSubclass.String, charLevel)
+	}
+	newAC := calculateArmorACWithNatural(dexMod, newArmor, newShield, naturalACBase)
 	
 	// Update stored AC
 	db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, newAC, req.CharacterID)
@@ -29891,6 +29955,17 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		
+		// Check for Draconic Resilience HP bonus (v0.8.79)
+		// Draconic sorcerers gain +1 HP per sorcerer level
+		var hpBonusApplied int
+		if bonusStr, ok := getSubclassMechanic(subclassSlug, level, "bonus_hp_per_level"); ok {
+			bonus, err := strconv.Atoi(bonusStr)
+			if err == nil && bonus > 0 {
+				hpBonusApplied = bonus * level
+				db.Exec("UPDATE characters SET hp = hp + $1, max_hp = max_hp + $1 WHERE id = $2", hpBonusApplied, req.CharacterID)
+			}
+		}
+		
 		// Get active features
 		activeFeatures := getActiveSubclassFeatures(subclassSlug, level)
 		featuresInfo := []map[string]interface{}{}
@@ -29902,7 +29977,7 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 		
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			"success":         true,
 			"character_id":    req.CharacterID,
 			"character_name":  charName,
@@ -29911,7 +29986,15 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 			"class":           class.String,
 			"features_gained": featuresInfo,
 			"message":         fmt.Sprintf("%s has become a %s!", charName, sub.Name),
-		})
+		}
+		
+		// Include HP bonus info if applied (v0.8.79)
+		if hpBonusApplied > 0 {
+			response["hp_bonus_applied"] = hpBonusApplied
+			response["hp_bonus_reason"] = "Draconic Resilience: +1 HP per sorcerer level"
+		}
+		
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 	
