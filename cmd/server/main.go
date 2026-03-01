@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.80
+// @version 0.8.81
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.80"
+const version = "0.8.81"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -13386,12 +13386,13 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		SpellSlug  string `json:"spell_slug"`
-		CasterID   int    `json:"caster_id"`
-		TargetIDs  []int  `json:"target_ids"`
-		DC         int    `json:"dc"`
-		Ritual     bool   `json:"ritual"`
-		SlotLevel  int    `json:"slot_level"` // For upcasting
+		SpellSlug     string `json:"spell_slug"`
+		CasterID      int    `json:"caster_id"`
+		TargetIDs     []int  `json:"target_ids"`
+		DC            int    `json:"dc"`
+		Ritual        bool   `json:"ritual"`
+		SlotLevel     int    `json:"slot_level"`     // For upcasting
+		SculptTargets []int  `json:"sculpt_targets"` // Evocation Wizard's Sculpt Spells - allies to protect (v0.8.81)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -13410,16 +13411,17 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	// Get spell info
-	var spellName, damageDice, damageType, savingThrow, description string
+	// Get spell info (v0.8.81: added school for Sculpt Spells/Empowered Evocation)
+	var spellName, damageDice, damageType, savingThrow, description, spellSchool string
 	var damageAtSlotLevelJSON []byte
 	var spellLevel int
 	var isRitual bool
 	err = db.QueryRow(`
 		SELECT name, COALESCE(damage_dice, ''), COALESCE(damage_type, ''), COALESCE(saving_throw, ''), 
-		       COALESCE(description, ''), level, COALESCE(is_ritual, false), COALESCE(damage_at_slot_level, '{}')
+		       COALESCE(description, ''), level, COALESCE(is_ritual, false), COALESCE(damage_at_slot_level, '{}'),
+		       COALESCE(school, '')
 		FROM spells WHERE slug = $1
-	`, req.SpellSlug).Scan(&spellName, &damageDice, &damageType, &savingThrow, &description, &spellLevel, &isRitual, &damageAtSlotLevelJSON)
+	`, req.SpellSlug).Scan(&spellName, &damageDice, &damageType, &savingThrow, &description, &spellLevel, &isRitual, &damageAtSlotLevelJSON, &spellSchool)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "spell_not_found", "slug": req.SpellSlug})
 		return
@@ -13521,6 +13523,47 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		baseDamage = rollDamage(actualDamageDice, false)
 	}
 	
+	// Evocation Wizard features (v0.8.81)
+	// Check if caster has Empowered Evocation and spell is evocation school
+	empoweredEvocationBonus := 0
+	hasSculptSpells := false
+	maxSculptTargets := 0
+	isEvocationSpell := strings.ToLower(spellSchool) == "evocation"
+	
+	if req.CasterID > 0 && isEvocationSpell {
+		// Get caster's subclass and level
+		var subclass sql.NullString
+		var casterLevel, casterInt int
+		db.QueryRow(`SELECT COALESCE(subclass, ''), level, intl FROM characters WHERE id = $1`, req.CasterID).Scan(&subclass, &casterLevel, &casterInt)
+		
+		if subclass.Valid && subclass.String != "" {
+			// Check for Empowered Evocation (level 10 Evocation Wizard feature)
+			if hasSubclassFeature(subclass.String, casterLevel, "empowered_evocation") {
+				empoweredEvocationBonus = modifier(casterInt)
+				baseDamage += empoweredEvocationBonus
+			}
+			
+			// Check for Sculpt Spells (level 2 Evocation Wizard feature)
+			if hasSubclassFeature(subclass.String, casterLevel, "sculpt_spells") {
+				hasSculptSpells = true
+				maxSculptTargets = 1 + actualSlotLevel // 1 + spell's level
+			}
+		}
+	}
+	
+	// Validate sculpt targets if provided
+	sculptTargetSet := make(map[int]bool)
+	if hasSculptSpells && len(req.SculptTargets) > 0 {
+		// Limit to max allowed sculpt targets
+		allowedCount := maxSculptTargets
+		if len(req.SculptTargets) < allowedCount {
+			allowedCount = len(req.SculptTargets)
+		}
+		for i := 0; i < allowedCount; i++ {
+			sculptTargetSet[req.SculptTargets[i]] = true
+		}
+	}
+	
 	// Process each target
 	results := []map[string]interface{}{}
 	totalDamageDealt := 0
@@ -13578,11 +13621,22 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		saveRoll := rollDie(20)
 		saveTotal := saveRoll + saveMod
 		saved := saveTotal >= dc
+		sculptSpellsApplied := false
+		
+		// Sculpt Spells (v0.8.81): Protected targets auto-succeed and take no damage
+		if sculptTargetSet[targetID] {
+			saved = true
+			sculptSpellsApplied = true
+		}
 		
 		// Calculate damage (half on save for most AoE spells)
 		damage := baseDamage
 		if saved {
-			damage = baseDamage / 2
+			if sculptSpellsApplied {
+				damage = 0 // Sculpt Spells: no damage on auto-succeed
+			} else {
+				damage = baseDamage / 2
+			}
 		}
 		
 		result := map[string]interface{}{
@@ -13594,6 +13648,12 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			"dc":          dc,
 			"saved":       saved,
 			"damage":      damage,
+		}
+		
+		// Add Sculpt Spells info to result (v0.8.81)
+		if sculptSpellsApplied {
+			result["sculpt_spells"] = true
+			result["sculpt_spells_info"] = "Protected by Sculpt Spells - automatically succeeded and took no damage"
 		}
 		
 		// Apply damage to characters or monsters
@@ -13699,9 +13759,10 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'aoe_cast', $3, $4)`,
 		campaignID, req.CasterID, actionDesc, resultStr)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":      true,
 		"spell":        spellName,
+		"spell_school": spellSchool,
 		"cast_type":    castType,
 		"used_slot":    usedSlot,
 		"base_damage":  baseDamage,
@@ -13710,7 +13771,30 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		"dc":           dc,
 		"targets":      results,
 		"total_damage": totalDamageDealt,
-	})
+	}
+	
+	// Add Evocation Wizard feature info (v0.8.81)
+	if empoweredEvocationBonus > 0 {
+		response["empowered_evocation"] = map[string]interface{}{
+			"applied":    true,
+			"int_bonus":  empoweredEvocationBonus,
+			"info":       "Added Intelligence modifier to damage (Empowered Evocation)",
+		}
+	}
+	if hasSculptSpells && len(sculptTargetSet) > 0 {
+		sculptedIDs := make([]int, 0, len(sculptTargetSet))
+		for id := range sculptTargetSet {
+			sculptedIDs = append(sculptedIDs, id)
+		}
+		response["sculpt_spells"] = map[string]interface{}{
+			"available":          true,
+			"max_targets":        maxSculptTargets,
+			"protected_targets":  sculptedIDs,
+			"info":               "Protected targets automatically succeeded on saves and took no damage",
+		}
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleGMInspiration godoc

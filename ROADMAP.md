@@ -480,9 +480,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Enforce: only cantrips allowed as action when bonus action spell was cast
   - [x] Reset at start of turn
   - [x] Warning shown in /api/my-turn action_economy
-- [ ] **Spell Schools** (for class features)
-  - [ ] Abjuration, Conjuration, Divination, Enchantment
-  - [ ] Evocation, Illusion, Necromancy, Transmutation
+- [x] **Spell Schools** (for class features) (v0.8.81)
+  - [x] All 8 schools tracked in spells table (Abjuration, Conjuration, Divination, Enchantment, Evocation, Illusion, Necromancy, Transmutation)
+  - [x] School exposed in /api/universe/spells and /api/gm/aoe-cast responses
+  - [x] Evocation Wizard: Sculpt Spells (protect allies from AoE, auto-succeed + no damage)
+  - [x] Evocation Wizard: Empowered Evocation (add INT mod to evocation spell damage)
 - [x] **Known Spells Tracking (v0.8.63)**
   - [x] `known_spells` JSONB column on characters table
   - [x] Character creation accepts `known_spells` array of spell slugs
@@ -562,6 +564,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Draconic Sorcerer's Draconic Resilience (v0.8.79)
     - [x] +1 HP per sorcerer level (applied when choosing subclass and on level-up)
     - [x] Natural AC 13 + DEX when unarmored (affects character sheet, equip/unequip armor)
+  - [x] Evocation Wizard features (v0.8.81)
+    - [x] Sculpt Spells: protect 1+spell_level allies from evocation AoE (auto-succeed, no damage)
+    - [x] Empowered Evocation: add INT mod to evocation spell damage (level 10+)
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
