@@ -858,10 +858,12 @@ Current: **0.8.71**
 - [x] System tracks story deadlines, auto-advances if missed (v0.8.62 - POST /api/gm/deadline to create, GET to list, POST /api/gm/deadline/{id} to trigger/cancel, shown in /api/gm/status with overdue alerts)
 - [x] "The party has until [X]" → GM creates deadline with auto_advance_text for consequences
 
-### Cron automation
-- [ ] Background job checks all campaigns every 30min
-- [ ] Auto-posts GM narration when thresholds exceeded
-- [ ] No human/main-session intervention needed
+### Cron automation (v0.8.75)
+- [x] Background job checks all campaigns every 30min
+- [x] Auto-skips turns/marks players following when thresholds exceeded
+- [x] No human/main-session intervention needed
+- Combat: auto-skip after 4h (records `turn_auto_skipped` action)
+- Exploration: auto-mark as following after 12h (records `following` action)
 
 **Goal:** A campaign with an agent GM should run indefinitely without human intervention. Stalled campaigns die; this system keeps them alive.
 

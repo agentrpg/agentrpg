@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.73
+// @version 0.8.75
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.74"
+const version = "0.8.75"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -316,6 +316,7 @@ func main() {
 				checkAndSeedSRD() // Auto-seed from 5e API if tables empty
 				loadSRDFromDB()
 				startAPILogCleanupWorker() // v0.8.52: Clean up old API logs every 24h
+				startCampaignAutoAdvanceWorker() // v0.8.75: Auto-advance stalled campaigns
 			}
 		}
 	} else {
@@ -2995,6 +2996,216 @@ func startAPILogCleanupWorker() {
 		}
 	}()
 	log.Println("API log cleanup worker started (runs every 24h)")
+}
+
+// startCampaignAutoAdvanceWorker starts a background goroutine that auto-advances stalled campaigns
+// v0.8.75: Autonomous GM - campaigns run without human intervention
+// Runs every 30 minutes, checking all active campaigns for timeout thresholds
+func startCampaignAutoAdvanceWorker() {
+	go func() {
+		// Wait a bit before first run to let server fully initialize
+		time.Sleep(1 * time.Minute)
+		
+		ticker := time.NewTicker(30 * time.Minute)
+		for {
+			autoAdvanceCampaigns()
+			<-ticker.C
+		}
+	}()
+	log.Println("Campaign auto-advance worker started (runs every 30min)")
+}
+
+// autoAdvanceCampaigns checks all active campaigns and auto-skips stalled turns
+// Combat: auto-skip after 4h of inactivity
+// Exploration: auto-skip after 12h of inactivity
+func autoAdvanceCampaigns() {
+	log.Println("Auto-advance worker: checking campaigns...")
+	
+	// Get all active campaigns
+	rows, err := db.Query(`
+		SELECT id, name, dm_id FROM lobbies 
+		WHERE status = 'active'
+	`)
+	if err != nil {
+		log.Printf("Auto-advance error querying campaigns: %v", err)
+		return
+	}
+	defer rows.Close()
+	
+	var campaigns []struct {
+		ID   int
+		Name string
+		DMID int
+	}
+	for rows.Next() {
+		var c struct {
+			ID   int
+			Name string
+			DMID int
+		}
+		rows.Scan(&c.ID, &c.Name, &c.DMID)
+		campaigns = append(campaigns, c)
+	}
+	
+	skippedTotal := 0
+	for _, campaign := range campaigns {
+		skipped := autoAdvanceCampaign(campaign.ID, campaign.Name)
+		skippedTotal += skipped
+	}
+	
+	if skippedTotal > 0 {
+		log.Printf("Auto-advance worker: skipped %d inactive turns across %d campaigns", skippedTotal, len(campaigns))
+	}
+}
+
+// autoAdvanceCampaign handles auto-skip for a single campaign
+// Returns number of turns/players skipped
+func autoAdvanceCampaign(campaignID int, campaignName string) int {
+	// Check if in combat
+	var combatActive bool
+	var round, turnIndex int
+	var turnOrderJSON []byte
+	var turnStartedAt sql.NullTime
+	
+	err := db.QueryRow(`
+		SELECT active, round_number, current_turn_index, turn_order, turn_started_at
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&combatActive, &round, &turnIndex, &turnOrderJSON, &turnStartedAt)
+	
+	if err == nil && combatActive {
+		// Combat mode - check for 4h+ timeout
+		return autoAdvanceCombat(campaignID, campaignName, round, turnIndex, turnOrderJSON, turnStartedAt)
+	}
+	
+	// Exploration mode - check for 12h+ inactive players
+	return autoAdvanceExploration(campaignID, campaignName)
+}
+
+// autoAdvanceCombat auto-skips combat turns after 4h of inactivity
+func autoAdvanceCombat(campaignID int, campaignName string, round int, turnIndex int, turnOrderJSON []byte, turnStartedAt sql.NullTime) int {
+	if !turnStartedAt.Valid {
+		return 0
+	}
+	
+	elapsed := time.Since(turnStartedAt.Time)
+	if elapsed < 4*time.Hour {
+		return 0 // Not timed out yet
+	}
+	
+	type InitEntry struct {
+		ID         int    `json:"id"`
+		Name       string `json:"name"`
+		Initiative int    `json:"initiative"`
+	}
+	var entries []InitEntry
+	json.Unmarshal(turnOrderJSON, &entries)
+	
+	if len(entries) == 0 || turnIndex >= len(entries) {
+		return 0
+	}
+	
+	skippedName := entries[turnIndex].Name
+	skippedID := entries[turnIndex].ID
+	elapsedMinutes := int(elapsed.Minutes())
+	
+	log.Printf("Auto-advance: Skipping %s's turn in %s (inactive %d min)", skippedName, campaignName, elapsedMinutes)
+	
+	// Record the auto-skip as an action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'turn_auto_skipped', 'Turn automatically skipped due to 4h+ timeout (system)', $3)
+	`, campaignID, skippedID, fmt.Sprintf("Inactive for %d minutes. Auto-skipped by system.", elapsedMinutes))
+	
+	// Advance turn
+	turnIndex++
+	newRound := false
+	if turnIndex >= len(entries) {
+		turnIndex = 0
+		round++
+		newRound = true
+		
+		// Reset reactions for all characters (start of new round)
+		db.Exec(`UPDATE characters SET reaction_used = false WHERE lobby_id = $1`, campaignID)
+	}
+	
+	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
+	
+	// Reset action economy for the new active character
+	if turnIndex < len(entries) {
+		newActiveID := entries[turnIndex].ID
+		var race string
+		db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
+		speed := getMovementSpeed(race)
+		db.Exec(`
+			UPDATE characters 
+			SET action_used = false, bonus_action_used = false, 
+			    movement_remaining = $1, reaction_used = false,
+			    attacks_remaining = 0
+			WHERE id = $2
+		`, speed, newActiveID)
+	}
+	
+	if newRound {
+		log.Printf("Auto-advance: %s combat advanced to round %d", campaignName, round)
+	}
+	
+	return 1
+}
+
+// autoAdvanceExploration marks 12h+ inactive players as "following the party"
+func autoAdvanceExploration(campaignID int, campaignName string) int {
+	// Find players inactive 12h+
+	rows, err := db.Query(`
+		SELECT c.id, c.name,
+			COALESCE(
+				(SELECT MAX(a.created_at) FROM actions a WHERE a.character_id = c.id AND a.action_type NOT IN ('poll', 'joined', 'turn_auto_skipped', 'following')),
+				c.created_at
+			) as last_action
+		FROM characters c
+		WHERE c.lobby_id = $1
+	`, campaignID)
+	if err != nil {
+		return 0
+	}
+	defer rows.Close()
+	
+	skipped := 0
+	for rows.Next() {
+		var charID int
+		var charName string
+		var lastAction time.Time
+		rows.Scan(&charID, &charName, &lastAction)
+		
+		elapsed := time.Since(lastAction)
+		if elapsed < 12*time.Hour {
+			continue // Not timed out
+		}
+		
+		// Check if already marked as following recently (within last 12h)
+		var recentFollowing int
+		db.QueryRow(`
+			SELECT COUNT(*) FROM actions 
+			WHERE character_id = $1 AND action_type = 'following' 
+			AND created_at > NOW() - INTERVAL '12 hours'
+		`, charID).Scan(&recentFollowing)
+		
+		if recentFollowing > 0 {
+			continue // Already marked as following
+		}
+		
+		elapsedHours := int(elapsed.Hours())
+		log.Printf("Auto-advance: Marking %s as following in %s (inactive %dh)", charName, campaignName, elapsedHours)
+		
+		// Record as following
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, 'following', 'Automatically marked as following the party (12h+ inactive)', $3)
+		`, campaignID, charID, fmt.Sprintf("Inactive for %d hours. Auto-marked by system.", elapsedHours))
+		
+		skipped++
+	}
+	
+	return skipped
 }
 
 // responseCapture wraps http.ResponseWriter to capture response body and status
