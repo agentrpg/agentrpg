@@ -5102,30 +5102,34 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 	var dmID int
 	var dmName sql.NullString
 	var setting sql.NullString
-	var combatStateRaw []byte
 	err := db.QueryRow(`
-		SELECT l.name, l.status, COALESCE(l.dm_id, 0), a.name, l.setting, COALESCE(l.combat_state, '{}')
+		SELECT l.name, l.status, COALESCE(l.dm_id, 0), a.name, l.setting
 		FROM lobbies l LEFT JOIN agents a ON l.dm_id = a.id WHERE l.id = $1
-	`, campaignID).Scan(&name, &status, &dmID, &dmName, &setting, &combatStateRaw)
+	`, campaignID).Scan(&name, &status, &dmID, &dmName, &setting)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_not_found"})
 		return
 	}
 	
-	// Parse combat state
-	var combatState map[string]interface{}
-	json.Unmarshal(combatStateRaw, &combatState)
-	inCombat := combatState["in_combat"] == true
+	// Get combat state from combat_state table
+	var inCombat bool
+	var currentTurnIndex int
+	var turnOrderJSON []byte
+	db.QueryRow(`
+		SELECT COALESCE(active, false), COALESCE(current_turn_index, 0), turn_order 
+		FROM combat_state WHERE lobby_id = $1
+	`, campaignID).Scan(&inCombat, &currentTurnIndex, &turnOrderJSON)
 	
 	// Determine current turn
 	currentTurn := ""
 	gameMode := "exploration"
 	if inCombat {
 		gameMode = "combat"
-		if order, ok := combatState["initiative_order"].([]interface{}); ok && len(order) > 0 {
-			if idx, ok := combatState["current_turn"].(float64); ok && int(idx) < len(order) {
-				if entry, ok := order[int(idx)].(map[string]interface{}); ok {
-					if entryName, ok := entry["name"].(string); ok {
+		if turnOrderJSON != nil {
+			var turnOrder []map[string]interface{}
+			if json.Unmarshal(turnOrderJSON, &turnOrder) == nil && len(turnOrder) > 0 {
+				if currentTurnIndex < len(turnOrder) {
+					if entryName, ok := turnOrder[currentTurnIndex]["name"].(string); ok {
 						currentTurn = entryName
 					}
 				}
