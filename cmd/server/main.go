@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.65
+// @version 0.8.67
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.66"
+const version = "0.8.67"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -434,6 +434,9 @@ func main() {
 	http.HandleFunc("/api/universe/backgrounds/", handleUniverseBackground)
 	http.HandleFunc("/api/universe/feats", handleUniverseFeats)
 	http.HandleFunc("/api/universe/feats/", handleUniverseFeat)
+	http.HandleFunc("/api/universe/subclasses", handleUniverseSubclasses)
+	http.HandleFunc("/api/universe/subclasses/", handleUniverseSubclass)
+	http.HandleFunc("/api/characters/subclass", handleCharacterSubclass)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
 	http.HandleFunc("/api/", handleAPIRoot)
@@ -847,6 +850,10 @@ func initDB() {
 		-- Feats: array of feat slugs the character has taken
 		-- Each feat costs 2 ASI points (one "ASI slot")
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS feats JSONB DEFAULT '[]';
+		
+		-- Subclass: the character's chosen subclass (v0.8.67)
+		-- Set at the appropriate level for the class (usually 3, but 1-2 for some)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS subclass VARCHAR(50);
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -5916,6 +5923,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var name, class, race, background string
+	var subclassRaw sql.NullString
 	var level, hp, maxHP, ac, str, dex, con, intl, wis, cha int
 	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
 	var hitDiceSpent, exhaustionLevel int
@@ -5935,7 +5943,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var darkvisionRange, blindsightRange, truesightRange int
 	
 	err = db.QueryRow(`
-		SELECT name, class, race, COALESCE(background, ''), level, hp, max_hp, ac, 
+		SELECT name, class, race, COALESCE(background, ''), COALESCE(subclass, ''), level, hp, max_hp, ac, 
 			str, dex, con, intl, wis, cha,
 			COALESCE(temp_hp, 0), COALESCE(death_save_successes, 0), COALESCE(death_save_failures, 0),
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
@@ -5953,7 +5961,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0),
 			COALESCE(known_spells, '[]'), COALESCE(feats, '[]')
 		FROM characters WHERE id = $1
-	`, charID).Scan(&name, &class, &race, &background, &level, &hp, &maxHP, &ac,
+	`, charID).Scan(&name, &class, &race, &background, &subclassRaw, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
 		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
@@ -6005,8 +6013,35 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	
 	effectiveAC := ac + coverBonus
 	xpToNextLevel := getXPForNextLevel(level)
+	
+	// Build subclass info (v0.8.67)
+	var subclassInfo interface{}
+	subclassSlug := ""
+	if subclassRaw.Valid && subclassRaw.String != "" {
+		subclassSlug = subclassRaw.String
+		if sub, ok := availableSubclasses[subclassSlug]; ok {
+			activeFeatures := getActiveSubclassFeatures(subclassSlug, level)
+			featuresInfo := []map[string]interface{}{}
+			for _, f := range activeFeatures {
+				featuresInfo = append(featuresInfo, map[string]interface{}{
+					"name":        f.Name,
+					"level":       f.Level,
+					"description": f.Description,
+				})
+			}
+			subclassInfo = map[string]interface{}{
+				"slug":            subclassSlug,
+				"name":            sub.Name,
+				"active_features": featuresInfo,
+			}
+		} else {
+			subclassInfo = subclassSlug
+		}
+	}
+	
 	response := map[string]interface{}{
 		"id": charID, "name": name, "class": class, "race": race,
+		"subclass": subclassInfo,
 		"background": background, "level": level,
 		"hp": hp, "max_hp": maxHP, "temp_hp": tempHP, 
 		"ac": ac, "effective_ac": effectiveAC,
@@ -6341,6 +6376,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var charCopper, charSilver, charElectrum, charPlatinum int
 	var str, dex, con, intl, wis, cha int
 	var charName, class, race, lobbyName, setting, lobbyStatus string
+	var charSubclass sql.NullString
 	var conditionsJSON, slotsUsedJSON, campaignDocRaw []byte
 	var concentratingOn string
 	var deathSuccesses, deathFailures, pendingASI, movementRemaining int
@@ -6348,7 +6384,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var mountedOnCreature sql.NullString
 	var mountIsControlled sql.NullBool
 	err = db.QueryRow(`
-		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
+		SELECT c.id, c.name, c.class, c.race, COALESCE(c.subclass, ''), c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
 			l.id, l.name, COALESCE(l.setting, ''), l.status,
 			COALESCE(c.temp_hp, 0), COALESCE(c.conditions, '[]'), COALESCE(c.spell_slots_used, '{}'),
@@ -6364,7 +6400,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
 		LIMIT 1
-	`, agentID).Scan(&charID, &charName, &class, &race, &level, &hp, &maxHP, &ac,
+	`, agentID).Scan(&charID, &charName, &class, &race, &charSubclass, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&lobbyID, &lobbyName, &setting, &lobbyStatus,
 		&tempHP, &conditionsJSON, &slotsUsedJSON, &concentratingOn,
@@ -6596,10 +6632,35 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	
 	// Build character info
 	xpToNext := getXPForNextLevel(level) - charXP
+	
+	// Build subclass info for my-turn (v0.8.67)
+	var myTurnSubclassInfo interface{}
+	if charSubclass.Valid && charSubclass.String != "" {
+		subSlug := charSubclass.String
+		if sub, ok := availableSubclasses[subSlug]; ok {
+			activeFeatures := getActiveSubclassFeatures(subSlug, level)
+			featuresInfo := []map[string]interface{}{}
+			for _, f := range activeFeatures {
+				featuresInfo = append(featuresInfo, map[string]interface{}{
+					"name":        f.Name,
+					"description": f.Description,
+				})
+			}
+			myTurnSubclassInfo = map[string]interface{}{
+				"slug":            subSlug,
+				"name":            sub.Name,
+				"active_features": featuresInfo,
+			}
+		} else {
+			myTurnSubclassInfo = subSlug
+		}
+	}
+	
 	characterInfo := map[string]interface{}{
 		"id":                charID,
 		"name":              charName,
 		"class":             class,
+		"subclass":          myTurnSubclassInfo,
 		"race":              race,
 		"level":             level,
 		"hp":                hp,
@@ -6632,6 +6693,24 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		characterInfo["asi_available"] = true
 		characterInfo["asi_message"] = fmt.Sprintf("You have %d ability score improvement points to spend! POST /api/characters/%d/asi OR take a feat (costs 2 points): POST /api/characters/%d/feat", pendingASI, charID, charID)
 		characterInfo["feat_option"] = fmt.Sprintf("GET /api/characters/%d/feat for available feats", charID)
+	}
+	
+	// Add subclass prompt if eligible but hasn't chosen (v0.8.67)
+	if myTurnSubclassInfo == nil {
+		// Check if eligible for subclass
+		availableSubs := getSubclassesForClass(class)
+		if len(availableSubs) > 0 {
+			// Get the subclass level for this class (from first available subclass)
+			subclassLevel := 3
+			for _, sub := range availableSubs {
+				subclassLevel = sub.SubclassLevel
+				break
+			}
+			if level >= subclassLevel {
+				characterInfo["subclass_available"] = true
+				characterInfo["subclass_message"] = fmt.Sprintf("You can choose a subclass! GET /api/characters/subclass?character_id=%d to see options.", charID)
+			}
+		}
 	}
 	
 	// Add concentration if active
@@ -16131,9 +16210,10 @@ func resolveAction(action, description string, charID int) string {
 	// Get character stats for modifiers (including weapon proficiencies for attack checks)
 	var str, dex, intl, wis, cha, level int
 	var class string
+	var subclass sql.NullString
 	var conditionsJSON []byte
 	var weaponProfsStr string
-	db.QueryRow("SELECT str, dex, intl, wis, cha, level, class, COALESCE(conditions, '[]'), COALESCE(weapon_proficiencies, '') FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &level, &class, &conditionsJSON, &weaponProfsStr)
+	db.QueryRow("SELECT str, dex, intl, wis, cha, level, class, COALESCE(subclass, ''), COALESCE(conditions, '[]'), COALESCE(weapon_proficiencies, '') FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &level, &class, &subclass, &conditionsJSON, &weaponProfsStr)
 	
 	var conditions []string
 	json.Unmarshal(conditionsJSON, &conditions)
@@ -16268,7 +16348,13 @@ func resolveAction(action, description string, charID int) string {
 				weaponName, totalAttack, autoCritReason, rollInfo, dmg)
 		}
 		
-		if attackRoll == 20 {
+		// Get crit range for this character (Champion subclass can lower it)
+		critRange := 20
+		if subclass.Valid && subclass.String != "" {
+			critRange = getCritRange(subclass.String, level)
+		}
+		
+		if attackRoll >= critRange {
 			// Critical hit - double damage dice
 			damageDice := "1d6"
 			if hasWeapon {
@@ -16279,7 +16365,11 @@ func resolveAction(action, description string, charID int) string {
 			if hasWeapon {
 				weaponName = weapon.Name
 			}
-			return fmt.Sprintf("Attack with %s: %d (nat 20 CRITICAL!)%s Damage: %d", weaponName, totalAttack, rollInfo, dmg)
+			critLabel := "nat 20 CRITICAL!"
+			if critRange < 20 && attackRoll < 20 {
+				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
+			}
+			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d", weaponName, totalAttack, critLabel, rollInfo, dmg)
 		} else if attackRoll == 1 {
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
@@ -19638,6 +19728,638 @@ var availableFeats = map[string]Feat{
 			"reroll_melee_damage": "true",
 		},
 	},
+}
+
+// SubclassFeature represents a feature granted by a subclass at a specific level
+type SubclassFeature struct {
+	Name        string            `json:"name"`
+	Level       int               `json:"level"`
+	Description string            `json:"description"`
+	Mechanics   map[string]string `json:"mechanics,omitempty"` // Mechanical effects to track
+}
+
+// Subclass represents a character subclass from the SRD
+type Subclass struct {
+	Name          string            `json:"name"`
+	Class         string            `json:"class"`         // Parent class (fighter, rogue, etc.)
+	SubclassLevel int               `json:"subclass_level"` // Level when subclass is chosen (3 for most, 1-2 for some)
+	Description   string            `json:"description"`
+	Features      []SubclassFeature `json:"features"`
+}
+
+// Available subclasses - all 12 from the SRD
+var availableSubclasses = map[string]Subclass{
+	"berserker": {
+		Name:          "Berserker",
+		Class:         "barbarian",
+		SubclassLevel: 3,
+		Description:   "For some barbarians, rage is a means to an end—that end being violence. The Path of the Berserker is a path of untrammeled fury, slick with blood.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Frenzy",
+				Level:       3,
+				Description: "You can go into a frenzy when you rage. If you do so, for the duration of your rage you can make a single melee weapon attack as a bonus action on each of your turns after this one. When your rage ends, you suffer one level of exhaustion.",
+				Mechanics: map[string]string{
+					"frenzy_bonus_attack": "true",
+					"frenzy_exhaustion":   "true",
+				},
+			},
+			{
+				Name:        "Mindless Rage",
+				Level:       6,
+				Description: "You can't be charmed or frightened while raging. If you are charmed or frightened when you enter your rage, the effect is suspended for the duration of the rage.",
+				Mechanics: map[string]string{
+					"rage_immune_charm":     "true",
+					"rage_immune_frightened": "true",
+				},
+			},
+			{
+				Name:        "Intimidating Presence",
+				Level:       10,
+				Description: "You can use your action to frighten someone with your menacing presence. Choose one creature that you can see within 30 feet. The creature must succeed on a Wisdom saving throw (DC = 8 + prof + CHA mod) or be frightened of you until the end of your next turn.",
+				Mechanics: map[string]string{
+					"intimidating_presence": "true",
+				},
+			},
+			{
+				Name:        "Retaliation",
+				Level:       14,
+				Description: "When you take damage from a creature that is within 5 feet of you, you can use your reaction to make a melee weapon attack against that creature.",
+				Mechanics: map[string]string{
+					"retaliation_attack": "true",
+				},
+			},
+		},
+	},
+	"champion": {
+		Name:          "Champion",
+		Class:         "fighter",
+		SubclassLevel: 3,
+		Description:   "The archetypal Champion focuses on the development of raw physical power honed to deadly perfection. Those who model themselves on this archetype combine rigorous training with physical excellence to deal devastating blows.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Improved Critical",
+				Level:       3,
+				Description: "Your weapon attacks score a critical hit on a roll of 19 or 20.",
+				Mechanics: map[string]string{
+					"crit_range": "19", // Crits on 19-20
+				},
+			},
+			{
+				Name:        "Remarkable Athlete",
+				Level:       7,
+				Description: "You can add half your proficiency bonus (round up) to any Strength, Dexterity, or Constitution check you make that doesn't already use your proficiency bonus. In addition, when you make a running long jump, the distance you can cover increases by a number of feet equal to your Strength modifier.",
+				Mechanics: map[string]string{
+					"half_prof_athletics": "true",
+					"jump_bonus":          "str_mod",
+				},
+			},
+			{
+				Name:        "Additional Fighting Style",
+				Level:       10,
+				Description: "You can choose a second option from the Fighting Style class feature.",
+				Mechanics: map[string]string{
+					"extra_fighting_style": "true",
+				},
+			},
+			{
+				Name:        "Superior Critical",
+				Level:       15,
+				Description: "Your weapon attacks score a critical hit on a roll of 18-20.",
+				Mechanics: map[string]string{
+					"crit_range": "18", // Crits on 18-20
+				},
+			},
+			{
+				Name:        "Survivor",
+				Level:       18,
+				Description: "At the start of each of your turns, you regain hit points equal to 5 + your Constitution modifier if you have no more than half of your hit points left. You don't gain this benefit if you have 0 hit points.",
+				Mechanics: map[string]string{
+					"survivor_regen": "true",
+				},
+			},
+		},
+	},
+	"thief": {
+		Name:          "Thief",
+		Class:         "rogue",
+		SubclassLevel: 3,
+		Description:   "You hone your skills in the larcenous arts. Burglars, bandits, cutpurses, and other criminals typically follow this archetype, but so do rogues who prefer to think of themselves as professional treasure seekers, explorers, delvers, and investigators.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Fast Hands",
+				Level:       3,
+				Description: "You can use the bonus action granted by your Cunning Action to make a Dexterity (Sleight of Hand) check, use your thieves' tools to disarm a trap or open a lock, or take the Use an Object action.",
+				Mechanics: map[string]string{
+					"fast_hands": "true",
+				},
+			},
+			{
+				Name:        "Second-Story Work",
+				Level:       3,
+				Description: "You gain the ability to climb faster than normal; climbing no longer costs you extra movement. In addition, when you make a running jump, the distance you cover increases by a number of feet equal to your Dexterity modifier.",
+				Mechanics: map[string]string{
+					"climb_speed": "full", // No extra movement cost
+					"jump_bonus":  "dex_mod",
+				},
+			},
+			{
+				Name:        "Supreme Sneak",
+				Level:       9,
+				Description: "You have advantage on a Dexterity (Stealth) check if you move no more than half your speed on the same turn.",
+				Mechanics: map[string]string{
+					"supreme_sneak": "true",
+				},
+			},
+			{
+				Name:        "Use Magic Device",
+				Level:       13,
+				Description: "You have learned enough about the workings of magic that you can improvise the use of items even when they are not intended for you. You ignore all class, race, and level requirements on the use of magic items.",
+				Mechanics: map[string]string{
+					"ignore_magic_item_requirements": "true",
+				},
+			},
+			{
+				Name:        "Thief's Reflexes",
+				Level:       17,
+				Description: "You have become adept at laying ambushes and quickly escaping danger. You can take two turns during the first round of any combat. You take your first turn at your normal initiative and your second turn at your initiative minus 10.",
+				Mechanics: map[string]string{
+					"extra_first_round_turn": "true",
+				},
+			},
+		},
+	},
+	"devotion": {
+		Name:          "Devotion",
+		Class:         "paladin",
+		SubclassLevel: 3,
+		Description:   "The Oath of Devotion binds a paladin to the loftiest ideals of justice, virtue, and order. Sometimes called cavaliers, white knights, or holy warriors, these paladins meet the ideal of the knight in shining armor.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Sacred Weapon",
+				Level:       3,
+				Description: "As an action, you can imbue one weapon that you are holding with positive energy. For 1 minute, you add your Charisma modifier to attack rolls made with that weapon (minimum bonus of +1). The weapon also emits bright light in a 20-foot radius and dim light 20 feet beyond that.",
+				Mechanics: map[string]string{
+					"sacred_weapon": "true",
+				},
+			},
+			{
+				Name:        "Turn the Unholy",
+				Level:       3,
+				Description: "As an action, you present your holy symbol and speak a prayer censuring fiends and undead. Each fiend or undead that can see or hear you within 30 feet must make a Wisdom saving throw.",
+				Mechanics: map[string]string{
+					"turn_unholy": "true",
+				},
+			},
+			{
+				Name:        "Aura of Devotion",
+				Level:       7,
+				Description: "You and friendly creatures within 10 feet of you can't be charmed while you are conscious. At 18th level, the range of this aura increases to 30 feet.",
+				Mechanics: map[string]string{
+					"aura_charm_immunity": "10ft",
+				},
+			},
+			{
+				Name:        "Purity of Spirit",
+				Level:       15,
+				Description: "You are always under the effects of a protection from evil and good spell.",
+				Mechanics: map[string]string{
+					"purity_of_spirit": "true",
+				},
+			},
+			{
+				Name:        "Holy Nimbus",
+				Level:       20,
+				Description: "As an action, you can emanate an aura of sunlight. For 1 minute, bright light shines from you in a 30-foot radius, and dim light shines 30 feet beyond that. Whenever an enemy creature starts its turn in the bright light, the creature takes 10 radiant damage.",
+				Mechanics: map[string]string{
+					"holy_nimbus": "true",
+				},
+			},
+		},
+	},
+	"hunter": {
+		Name:          "Hunter",
+		Class:         "ranger",
+		SubclassLevel: 3,
+		Description:   "Emulating the Hunter archetype means accepting your place as a bulwark between civilization and the terrors of the wilderness.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Hunter's Prey",
+				Level:       3,
+				Description: "Choose one of the following options: Colossus Slayer (extra 1d8 damage once per turn against wounded targets), Giant Killer (reaction attack against Large+ creatures that miss you), or Horde Breaker (attack a second creature within 5ft of the first).",
+				Mechanics: map[string]string{
+					"hunters_prey": "choice", // Player chooses which option
+				},
+			},
+			{
+				Name:        "Defensive Tactics",
+				Level:       7,
+				Description: "Choose one: Escape the Horde (opportunity attacks against you have disadvantage), Multiattack Defense (+4 AC after being hit by a creature), or Steel Will (advantage on saves vs. frightened).",
+				Mechanics: map[string]string{
+					"defensive_tactics": "choice",
+				},
+			},
+			{
+				Name:        "Multiattack",
+				Level:       11,
+				Description: "Choose one: Volley (attack any number of creatures within 10ft of a point in range) or Whirlwind Attack (melee attack against all creatures within 5ft).",
+				Mechanics: map[string]string{
+					"multiattack": "choice",
+				},
+			},
+			{
+				Name:        "Superior Hunter's Defense",
+				Level:       15,
+				Description: "Choose one: Evasion (DEX saves for half damage become no damage on success), Stand Against the Tide (force missed melee attacks to hit another creature), or Uncanny Dodge (halve damage from an attack you can see).",
+				Mechanics: map[string]string{
+					"superior_defense": "choice",
+				},
+			},
+		},
+	},
+	"lore": {
+		Name:          "Lore",
+		Class:         "bard",
+		SubclassLevel: 3,
+		Description:   "Bards of the College of Lore know something about most things, collecting bits of knowledge from sources as diverse as scholarly tomes and peasant tales.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Bonus Proficiencies",
+				Level:       3,
+				Description: "You gain proficiency with three skills of your choice.",
+				Mechanics: map[string]string{
+					"bonus_skill_proficiencies": "3",
+				},
+			},
+			{
+				Name:        "Cutting Words",
+				Level:       3,
+				Description: "You can use your wit to distract, confuse, and otherwise sap the confidence and competence of others. When a creature that you can see within 60 feet makes an attack roll, ability check, or damage roll, you can use your reaction to expend one of your uses of Bardic Inspiration, rolling a Bardic Inspiration die and subtracting the number rolled from the creature's roll.",
+				Mechanics: map[string]string{
+					"cutting_words": "true",
+				},
+			},
+			{
+				Name:        "Additional Magical Secrets",
+				Level:       6,
+				Description: "You learn two spells of your choice from any class. A spell you choose must be of a level you can cast.",
+				Mechanics: map[string]string{
+					"additional_magical_secrets": "2",
+				},
+			},
+			{
+				Name:        "Peerless Skill",
+				Level:       14,
+				Description: "When you make an ability check, you can expend one use of Bardic Inspiration. Roll a Bardic Inspiration die and add the number rolled to your ability check.",
+				Mechanics: map[string]string{
+					"peerless_skill": "true",
+				},
+			},
+		},
+	},
+	"life": {
+		Name:          "Life",
+		Class:         "cleric",
+		SubclassLevel: 1,
+		Description:   "The Life domain focuses on the vibrant positive energy—one of the fundamental forces of the universe—that sustains all life.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Bonus Proficiency",
+				Level:       1,
+				Description: "You gain proficiency with heavy armor.",
+				Mechanics: map[string]string{
+					"heavy_armor_proficiency": "true",
+				},
+			},
+			{
+				Name:        "Disciple of Life",
+				Level:       1,
+				Description: "Your healing spells are more effective. Whenever you use a spell of 1st level or higher to restore hit points to a creature, the creature regains additional hit points equal to 2 + the spell's level.",
+				Mechanics: map[string]string{
+					"bonus_healing": "2+spell_level",
+				},
+			},
+			{
+				Name:        "Channel Divinity: Preserve Life",
+				Level:       2,
+				Description: "You can use your Channel Divinity to heal the badly injured. As an action, you present your holy symbol and evoke healing energy that can restore a number of hit points equal to five times your cleric level. Choose any creatures within 30 feet of you, and divide those hit points among them.",
+				Mechanics: map[string]string{
+					"preserve_life": "true",
+				},
+			},
+			{
+				Name:        "Blessed Healer",
+				Level:       6,
+				Description: "The healing spells you cast on others heal you as well. When you cast a spell of 1st level or higher that restores hit points to a creature other than you, you regain hit points equal to 2 + the spell's level.",
+				Mechanics: map[string]string{
+					"blessed_healer": "true",
+				},
+			},
+			{
+				Name:        "Divine Strike",
+				Level:       8,
+				Description: "You gain the ability to infuse your weapon strikes with divine energy. Once on each of your turns when you hit a creature with a weapon attack, you can cause the attack to deal an extra 1d8 radiant damage to the target. When you reach 14th level, the extra damage increases to 2d8.",
+				Mechanics: map[string]string{
+					"divine_strike": "1d8",
+				},
+			},
+			{
+				Name:        "Supreme Healing",
+				Level:       17,
+				Description: "When you would normally roll one or more dice to restore hit points with a spell, you instead use the highest number possible for each die.",
+				Mechanics: map[string]string{
+					"supreme_healing": "true",
+				},
+			},
+		},
+	},
+	"land": {
+		Name:          "Land",
+		Class:         "druid",
+		SubclassLevel: 2,
+		Description:   "The Circle of the Land is made up of mystics and sages who safeguard ancient knowledge and rites through a vast oral tradition.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Bonus Cantrip",
+				Level:       2,
+				Description: "You learn one additional druid cantrip of your choice.",
+				Mechanics: map[string]string{
+					"bonus_cantrip": "1",
+				},
+			},
+			{
+				Name:        "Natural Recovery",
+				Level:       2,
+				Description: "During a short rest, you can choose expended spell slots to recover. The spell slots can have a combined level that is equal to or less than half your druid level (rounded up), and none of the slots can be 6th level or higher.",
+				Mechanics: map[string]string{
+					"natural_recovery": "true",
+				},
+			},
+			{
+				Name:        "Land's Stride",
+				Level:       6,
+				Description: "Moving through nonmagical difficult terrain costs you no extra movement. You can also pass through nonmagical plants without being slowed by them and without taking damage from them if they have thorns, spines, or a similar hazard.",
+				Mechanics: map[string]string{
+					"lands_stride": "true",
+				},
+			},
+			{
+				Name:        "Nature's Ward",
+				Level:       10,
+				Description: "You can't be charmed or frightened by elementals or fey, and you are immune to poison and disease.",
+				Mechanics: map[string]string{
+					"natures_ward": "true",
+				},
+			},
+			{
+				Name:        "Nature's Sanctuary",
+				Level:       14,
+				Description: "Creatures of the natural world sense your connection to nature and become hesitant to attack you. When a beast or plant creature attacks you, that creature must make a Wisdom saving throw against your druid spell save DC. On a failed save, the creature must choose a different target, or the attack automatically misses.",
+				Mechanics: map[string]string{
+					"natures_sanctuary": "true",
+				},
+			},
+		},
+	},
+	"open-hand": {
+		Name:          "Open Hand",
+		Class:         "monk",
+		SubclassLevel: 3,
+		Description:   "Monks of the Way of the Open Hand are the ultimate masters of martial arts combat, whether armed or unarmed.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Open Hand Technique",
+				Level:       3,
+				Description: "Whenever you hit a creature with one of the attacks granted by your Flurry of Blows, you can impose one of the following effects: it must succeed on a DEX save or be knocked prone, make a STR save or be pushed up to 15 feet away, or it can't take reactions until the end of your next turn.",
+				Mechanics: map[string]string{
+					"open_hand_technique": "true",
+				},
+			},
+			{
+				Name:        "Wholeness of Body",
+				Level:       6,
+				Description: "You can use your action to regain hit points equal to three times your monk level. You must finish a long rest before you can use this feature again.",
+				Mechanics: map[string]string{
+					"wholeness_of_body": "true",
+				},
+			},
+			{
+				Name:        "Tranquility",
+				Level:       11,
+				Description: "At the end of a long rest, you gain the effect of a sanctuary spell that lasts until the start of your next long rest (the spell can end early as normal).",
+				Mechanics: map[string]string{
+					"tranquility": "true",
+				},
+			},
+			{
+				Name:        "Quivering Palm",
+				Level:       17,
+				Description: "You gain the ability to set up lethal vibrations in someone's body. When you hit a creature with an unarmed strike, you can spend 3 ki points to start these imperceptible vibrations, which last for a number of days equal to your monk level. You can then use your action to end the vibrations, forcing the target to make a CON save. If it fails, it is reduced to 0 hit points. If it succeeds, it takes 10d10 necrotic damage.",
+				Mechanics: map[string]string{
+					"quivering_palm": "true",
+				},
+			},
+		},
+	},
+	"draconic": {
+		Name:          "Draconic",
+		Class:         "sorcerer",
+		SubclassLevel: 1,
+		Description:   "Your innate magic comes from draconic magic that was mingled with your blood or that of your ancestors.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Dragon Ancestor",
+				Level:       1,
+				Description: "You choose one type of dragon as your ancestor. The damage type associated with each dragon is used by features you gain later. You can speak, read, and write Draconic. Additionally, whenever you make a Charisma check when interacting with dragons, your proficiency bonus is doubled if it applies to the check.",
+				Mechanics: map[string]string{
+					"dragon_ancestor": "choice", // Player chooses dragon type
+				},
+			},
+			{
+				Name:        "Draconic Resilience",
+				Level:       1,
+				Description: "Your hit point maximum increases by 1, and it increases by 1 again whenever you gain a level in this class. Additionally, parts of your skin are covered by a thin sheen of dragon-like scales. When you aren't wearing armor, your AC equals 13 + your Dexterity modifier.",
+				Mechanics: map[string]string{
+					"bonus_hp_per_level": "1",
+					"natural_ac":         "13+dex",
+				},
+			},
+			{
+				Name:        "Elemental Affinity",
+				Level:       6,
+				Description: "When you cast a spell that deals damage of the type associated with your draconic ancestry, add your Charisma modifier to that damage. At the same time, you can spend 1 sorcery point to gain resistance to that damage type for 1 hour.",
+				Mechanics: map[string]string{
+					"elemental_affinity": "true",
+				},
+			},
+			{
+				Name:        "Dragon Wings",
+				Level:       14,
+				Description: "You gain the ability to sprout a pair of dragon wings from your back, gaining a flying speed equal to your current speed.",
+				Mechanics: map[string]string{
+					"dragon_wings": "true",
+				},
+			},
+			{
+				Name:        "Draconic Presence",
+				Level:       18,
+				Description: "As an action, you can spend 5 sorcery points to draw on this power and exude an aura of awe or fear (your choice) to a distance of 60 feet. Each hostile creature in that area must succeed on a WIS save or be charmed (if you chose awe) or frightened (if you chose fear) for 1 minute.",
+				Mechanics: map[string]string{
+					"draconic_presence": "true",
+				},
+			},
+		},
+	},
+	"fiend": {
+		Name:          "Fiend",
+		Class:         "warlock",
+		SubclassLevel: 1,
+		Description:   "You have made a pact with a fiend from the lower planes of existence, a being whose aims are evil, even if you strive against those aims.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Dark One's Blessing",
+				Level:       1,
+				Description: "When you reduce a hostile creature to 0 hit points, you gain temporary hit points equal to your Charisma modifier + your warlock level (minimum of 1).",
+				Mechanics: map[string]string{
+					"dark_ones_blessing": "true",
+				},
+			},
+			{
+				Name:        "Dark One's Own Luck",
+				Level:       6,
+				Description: "You can call on your patron to alter fate in your favor. When you make an ability check or a saving throw, you can use this feature to add a d10 to your roll. You can do so after seeing the initial roll but before any of the roll's effects occur. Once you use this feature, you can't use it again until you finish a short or long rest.",
+				Mechanics: map[string]string{
+					"dark_ones_luck": "true",
+				},
+			},
+			{
+				Name:        "Fiendish Resilience",
+				Level:       10,
+				Description: "You can choose one damage type when you finish a short or long rest. You gain resistance to that damage type until you choose a different one with this feature.",
+				Mechanics: map[string]string{
+					"fiendish_resilience": "true",
+				},
+			},
+			{
+				Name:        "Hurl Through Hell",
+				Level:       14,
+				Description: "When you hit a creature with an attack, you can use this feature to instantly transport the target through the lower planes. The creature disappears and hurtles through a nightmare landscape. At the end of your next turn, the target returns to the space it previously occupied, or the nearest unoccupied space. If the target is not a fiend, it takes 10d10 psychic damage as it reels from its horrific experience. Once you use this feature, you can't use it again until you finish a long rest.",
+				Mechanics: map[string]string{
+					"hurl_through_hell": "true",
+				},
+			},
+		},
+	},
+	"evocation": {
+		Name:          "Evocation",
+		Class:         "wizard",
+		SubclassLevel: 2,
+		Description:   "You focus your study on magic that creates powerful elemental effects such as bitter cold, searing flame, rolling thunder, crackling lightning, and burning acid.",
+		Features: []SubclassFeature{
+			{
+				Name:        "Evocation Savant",
+				Level:       2,
+				Description: "The gold and time you must spend to copy an evocation spell into your spellbook is halved.",
+				Mechanics: map[string]string{
+					"evocation_savant": "true",
+				},
+			},
+			{
+				Name:        "Sculpt Spells",
+				Level:       2,
+				Description: "When you cast an evocation spell that affects other creatures that you can see, you can choose a number of them equal to 1 + the spell's level. The chosen creatures automatically succeed on their saving throws against the spell, and they take no damage if they would normally take half damage on a successful save.",
+				Mechanics: map[string]string{
+					"sculpt_spells": "true",
+				},
+			},
+			{
+				Name:        "Potent Cantrip",
+				Level:       6,
+				Description: "Your damaging cantrips affect even creatures that avoid the brunt of the effect. When a creature succeeds on a saving throw against your cantrip, the creature takes half the cantrip's damage (if any) but suffers no additional effect from the cantrip.",
+				Mechanics: map[string]string{
+					"potent_cantrip": "true",
+				},
+			},
+			{
+				Name:        "Empowered Evocation",
+				Level:       10,
+				Description: "You can add your Intelligence modifier to one damage roll of any wizard evocation spell you cast.",
+				Mechanics: map[string]string{
+					"empowered_evocation": "true",
+				},
+			},
+			{
+				Name:        "Overchannel",
+				Level:       14,
+				Description: "When you cast a wizard spell of 1st through 5th level that deals damage, you can deal maximum damage with that spell. The first time you do so, you suffer no adverse effect. If you use this feature again before you finish a long rest, you take 2d12 necrotic damage for each level of the spell, immediately after you cast it.",
+				Mechanics: map[string]string{
+					"overchannel": "true",
+				},
+			},
+		},
+	},
+}
+
+// getSubclassForClass returns all available subclasses for a given class
+func getSubclassesForClass(class string) map[string]Subclass {
+	result := make(map[string]Subclass)
+	classLower := strings.ToLower(class)
+	for slug, sub := range availableSubclasses {
+		if strings.ToLower(sub.Class) == classLower {
+			result[slug] = sub
+		}
+	}
+	return result
+}
+
+// getActiveSubclassFeatures returns the features a character has unlocked based on their level
+func getActiveSubclassFeatures(subclassSlug string, level int) []SubclassFeature {
+	sub, ok := availableSubclasses[subclassSlug]
+	if !ok {
+		return nil
+	}
+	
+	var active []SubclassFeature
+	for _, feature := range sub.Features {
+		if level >= feature.Level {
+			active = append(active, feature)
+		}
+	}
+	return active
+}
+
+// hasSubclassFeature checks if a character has a specific subclass mechanic
+func hasSubclassFeature(subclassSlug string, level int, mechanic string) bool {
+	features := getActiveSubclassFeatures(subclassSlug, level)
+	for _, f := range features {
+		if _, ok := f.Mechanics[mechanic]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// getSubclassMechanic returns the value of a specific subclass mechanic if present
+func getSubclassMechanic(subclassSlug string, level int, mechanic string) (string, bool) {
+	features := getActiveSubclassFeatures(subclassSlug, level)
+	for _, f := range features {
+		if val, ok := f.Mechanics[mechanic]; ok {
+			return val, true
+		}
+	}
+	return "", false
+}
+
+// getCritRange returns the critical hit range for a character (default 20, can be 19 or 18 for Champions)
+func getCritRange(subclassSlug string, level int) int {
+	if subclassSlug == "champion" {
+		if level >= 15 {
+			return 18 // Superior Critical: 18-20
+		} else if level >= 3 {
+			return 19 // Improved Critical: 19-20
+		}
+	}
+	return 20 // Standard: only 20 crits
 }
 
 // handleGMApplyPoison godoc
@@ -26857,6 +27579,377 @@ func handleUniverseFeat(w http.ResponseWriter, r *http.Request) {
 		"cost":          "2 ASI points",
 		"how_to_take":   fmt.Sprintf("POST /api/characters/{id}/feat with {\"feat\": \"%s\"}", slug),
 	})
+}
+
+// ============================================================================
+// Subclass Handlers (v0.8.67)
+// ============================================================================
+
+// handleUniverseSubclasses godoc
+// @Summary List all subclasses
+// @Description Returns all available subclasses from the SRD, optionally filtered by class
+// @Tags Universe
+// @Produce json
+// @Param class query string false "Filter by parent class (e.g., fighter, rogue)"
+// @Success 200 {object} map[string]interface{} "List of subclasses"
+// @Router /universe/subclasses [get]
+func handleUniverseSubclasses(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	classFilter := strings.ToLower(r.URL.Query().Get("class"))
+	
+	subclassList := []map[string]interface{}{}
+	for slug, sub := range availableSubclasses {
+		if classFilter != "" && strings.ToLower(sub.Class) != classFilter {
+			continue
+		}
+		subclassList = append(subclassList, map[string]interface{}{
+			"slug":           slug,
+			"name":           sub.Name,
+			"class":          sub.Class,
+			"subclass_level": sub.SubclassLevel,
+			"description":    sub.Description,
+		})
+	}
+	
+	// Sort by class then name for consistent output
+	sort.Slice(subclassList, func(i, j int) bool {
+		if subclassList[i]["class"].(string) != subclassList[j]["class"].(string) {
+			return subclassList[i]["class"].(string) < subclassList[j]["class"].(string)
+		}
+		return subclassList[i]["name"].(string) < subclassList[j]["name"].(string)
+	})
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"subclasses":     subclassList,
+		"count":          len(subclassList),
+		"how_to_choose":  "POST /api/characters/{id}/subclass with {\"subclass\": \"slug\"}",
+		"note":           "Subclasses are chosen at a specific level depending on the class (usually 3, but 1-2 for clerics, sorcerers, warlocks, druids, and wizards).",
+	})
+}
+
+// handleUniverseSubclass godoc
+// @Summary Get subclass details
+// @Description Returns full subclass information including all features and mechanical effects
+// @Tags Universe
+// @Produce json
+// @Param slug path string true "Subclass slug (e.g., champion, thief, life)"
+// @Success 200 {object} map[string]interface{} "Subclass details"
+// @Failure 404 {object} map[string]interface{} "Subclass not found"
+// @Router /universe/subclasses/{slug} [get]
+func handleUniverseSubclass(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	slug := strings.TrimPrefix(r.URL.Path, "/api/universe/subclasses/")
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	
+	sub, ok := availableSubclasses[slug]
+	if !ok {
+		// List available subclasses
+		subSlugs := []string{}
+		for s := range availableSubclasses {
+			subSlugs = append(subSlugs, s)
+		}
+		sort.Strings(subSlugs)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":                "subclass_not_found",
+			"message":              fmt.Sprintf("Subclass '%s' not found", slug),
+			"available_subclasses": subSlugs,
+		})
+		return
+	}
+	
+	// Format features for display
+	featuresInfo := []map[string]interface{}{}
+	for _, f := range sub.Features {
+		featuresInfo = append(featuresInfo, map[string]interface{}{
+			"name":        f.Name,
+			"level":       f.Level,
+			"description": f.Description,
+			"mechanics":   f.Mechanics,
+		})
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"slug":           slug,
+		"name":           sub.Name,
+		"class":          sub.Class,
+		"subclass_level": sub.SubclassLevel,
+		"description":    sub.Description,
+		"features":       featuresInfo,
+		"how_to_choose":  fmt.Sprintf("POST /api/characters/{id}/subclass with {\"subclass\": \"%s\"}", slug),
+	})
+}
+
+// handleCharacterSubclass godoc
+// @Summary Choose or view character subclass
+// @Description GET to see available subclasses and current selection. POST to choose a subclass at the appropriate level.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param character_id query int true "Character ID (for GET)"
+// @Param request body object{character_id=integer,subclass=string} false "Subclass selection (for POST)"
+// @Success 200 {object} map[string]interface{} "Subclass info or confirmation"
+// @Failure 400 {object} map[string]interface{} "Invalid request or not eligible"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Router /characters/subclass [get]
+// @Router /characters/subclass [post]
+func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Auth
+	agentID, err := authenticateRequest(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	if r.Method == "GET" {
+		// View available subclasses for a character
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_character_id",
+				"message": "Provide character_id query parameter",
+			})
+			return
+		}
+		
+		// Get character info
+		var ownerID int
+		var class, currentSubclass sql.NullString
+		var level int
+		err = db.QueryRow(`
+			SELECT agent_id, class, level, subclass 
+			FROM characters WHERE id = $1
+		`, charID).Scan(&ownerID, &class, &level, &currentSubclass)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if ownerID != agentID {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_your_character",
+				"message": "You can only view subclass options for your own characters",
+			})
+			return
+		}
+		
+		if !class.Valid || class.String == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_class",
+				"message": "Character has no class set",
+			})
+			return
+		}
+		
+		// Get available subclasses for this class
+		availableSubs := getSubclassesForClass(class.String)
+		subOptions := []map[string]interface{}{}
+		subclassLevel := 3 // Default
+		
+		for slug, sub := range availableSubs {
+			subclassLevel = sub.SubclassLevel
+			subOptions = append(subOptions, map[string]interface{}{
+				"slug":        slug,
+				"name":        sub.Name,
+				"description": sub.Description,
+			})
+		}
+		
+		response := map[string]interface{}{
+			"character_id":   charID,
+			"class":          class.String,
+			"level":          level,
+			"subclass_level": subclassLevel,
+		}
+		
+		if currentSubclass.Valid && currentSubclass.String != "" {
+			// Already has a subclass
+			sub := availableSubclasses[currentSubclass.String]
+			activeFeatures := getActiveSubclassFeatures(currentSubclass.String, level)
+			featuresInfo := []map[string]interface{}{}
+			for _, f := range activeFeatures {
+				featuresInfo = append(featuresInfo, map[string]interface{}{
+					"name":        f.Name,
+					"level":       f.Level,
+					"description": f.Description,
+					"mechanics":   f.Mechanics,
+				})
+			}
+			
+			response["current_subclass"] = map[string]interface{}{
+				"slug":            currentSubclass.String,
+				"name":            sub.Name,
+				"description":     sub.Description,
+				"active_features": featuresInfo,
+			}
+			response["can_change"] = false
+			response["message"] = "Subclass already chosen. Subclasses cannot be changed once selected."
+		} else if level < subclassLevel {
+			response["current_subclass"] = nil
+			response["can_choose"] = false
+			response["message"] = fmt.Sprintf("You can choose a subclass at level %d. Current level: %d", subclassLevel, level)
+			response["available_subclasses"] = subOptions
+		} else {
+			response["current_subclass"] = nil
+			response["can_choose"] = true
+			response["available_subclasses"] = subOptions
+			response["how_to_choose"] = fmt.Sprintf("POST /api/characters/subclass with {\"character_id\": %d, \"subclass\": \"slug\"}", charID)
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	if r.Method == "POST" {
+		// Choose a subclass
+		var req struct {
+			CharacterID int    `json:"character_id"`
+			Subclass    string `json:"subclass"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_json",
+				"message": err.Error(),
+			})
+			return
+		}
+		
+		if req.CharacterID == 0 || req.Subclass == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "missing_fields",
+				"message": "Provide character_id and subclass",
+			})
+			return
+		}
+		
+		// Get character info
+		var ownerID int
+		var class, currentSubclass sql.NullString
+		var level int
+		var charName string
+		err = db.QueryRow(`
+			SELECT agent_id, name, class, level, subclass 
+			FROM characters WHERE id = $1
+		`, req.CharacterID).Scan(&ownerID, &charName, &class, &level, &currentSubclass)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+			})
+			return
+		}
+		
+		if ownerID != agentID {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_your_character",
+				"message": "You can only choose a subclass for your own characters",
+			})
+			return
+		}
+		
+		// Check if already has a subclass
+		if currentSubclass.Valid && currentSubclass.String != "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "already_has_subclass",
+				"current_subclass": currentSubclass.String,
+				"message":          "This character already has a subclass. Subclasses cannot be changed once selected.",
+			})
+			return
+		}
+		
+		// Validate the subclass exists and is for this class
+		subclassSlug := strings.ToLower(strings.TrimSpace(req.Subclass))
+		sub, ok := availableSubclasses[subclassSlug]
+		if !ok {
+			// List valid options
+			validOptions := []string{}
+			for slug, s := range availableSubclasses {
+				if strings.ToLower(s.Class) == strings.ToLower(class.String) {
+					validOptions = append(validOptions, slug)
+				}
+			}
+			sort.Strings(validOptions)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":              "invalid_subclass",
+				"message":            fmt.Sprintf("Subclass '%s' not found", req.Subclass),
+				"valid_for_%s":       validOptions,
+			})
+			return
+		}
+		
+		// Check class matches
+		if strings.ToLower(sub.Class) != strings.ToLower(class.String) {
+			validOptions := []string{}
+			for slug, s := range availableSubclasses {
+				if strings.ToLower(s.Class) == strings.ToLower(class.String) {
+					validOptions = append(validOptions, slug)
+				}
+			}
+			sort.Strings(validOptions)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":        "class_mismatch",
+				"message":      fmt.Sprintf("Subclass '%s' is for %s, not %s", sub.Name, sub.Class, class.String),
+				"valid_options": validOptions,
+			})
+			return
+		}
+		
+		// Check level requirement
+		if level < sub.SubclassLevel {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          "level_too_low",
+				"required_level": sub.SubclassLevel,
+				"current_level":  level,
+				"message":        fmt.Sprintf("You must be level %d to choose the %s subclass. Current level: %d", sub.SubclassLevel, sub.Name, level),
+			})
+			return
+		}
+		
+		// Apply the subclass
+		_, err = db.Exec("UPDATE characters SET subclass = $1 WHERE id = $2", subclassSlug, req.CharacterID)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "database_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		
+		// Get active features
+		activeFeatures := getActiveSubclassFeatures(subclassSlug, level)
+		featuresInfo := []map[string]interface{}{}
+		for _, f := range activeFeatures {
+			featuresInfo = append(featuresInfo, map[string]interface{}{
+				"name":        f.Name,
+				"level":       f.Level,
+				"description": f.Description,
+			})
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":         true,
+			"character_id":    req.CharacterID,
+			"character_name":  charName,
+			"subclass":        subclassSlug,
+			"subclass_name":   sub.Name,
+			"class":           class.String,
+			"features_gained": featuresInfo,
+			"message":         fmt.Sprintf("%s has become a %s!", charName, sub.Name),
+		})
+		return
+	}
+	
+	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 }
 
 // ============================================================================

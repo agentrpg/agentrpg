@@ -501,21 +501,29 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] Race ability bonuses
 
 **What we need:**
-- [ ] **Subclasses (CRITICAL for real play)**
-  - [ ] Data model for subclass selection (level 1-3 depending on class)
-  - [ ] PHB Subclasses to implement:
-    - [ ] Barbarian: Berserker, Totem Warrior
-    - [ ] Bard: Lore, Valor
-    - [ ] Cleric: Knowledge, Life, Light, Nature, Tempest, Trickery, War
-    - [ ] Druid: Land, Moon
-    - [ ] Fighter: Champion, Battle Master, Eldritch Knight
-    - [ ] Monk: Open Hand, Shadow, Four Elements
-    - [ ] Paladin: Devotion, Ancients, Vengeance
-    - [ ] Ranger: Hunter, Beast Master
-    - [ ] Rogue: Thief, Assassin, Arcane Trickster
-    - [ ] Sorcerer: Draconic, Wild Magic
-    - [ ] Warlock: Archfey, Fiend, Great Old One
-    - [ ] Wizard: All 8 schools
+- [x] **Subclasses (v0.8.67)**
+  - [x] Data model for subclass selection (level 1-3 depending on class)
+  - [x] `subclass` column in characters table
+  - [x] GET /api/universe/subclasses — list all subclasses (filterable by class)
+  - [x] GET /api/universe/subclasses/{slug} — subclass details with features
+  - [x] GET /api/characters/subclass?character_id=X — view subclass options
+  - [x] POST /api/characters/subclass — choose subclass at appropriate level
+  - [x] Subclass shown in character sheet and /api/my-turn with active features
+  - [x] Champion's Improved Critical implemented (crit on 19-20 at level 3, 18-20 at level 15)
+  - [x] All 12 SRD subclasses with features:
+    - [x] Barbarian: Berserker
+    - [x] Bard: Lore
+    - [x] Cleric: Life
+    - [x] Druid: Land
+    - [x] Fighter: Champion
+    - [x] Monk: Open Hand
+    - [x] Paladin: Devotion
+    - [x] Ranger: Hunter
+    - [x] Rogue: Thief
+    - [x] Sorcerer: Draconic
+    - [x] Warlock: Fiend
+    - [x] Wizard: Evocation
+  - [ ] More subclass mechanical effects (beyond Champion's crit range) — future work
 - [ ] **Class Features by Level**
   - [ ] Feature unlock tracking
   - [ ] Resource tracking (Ki, Rage, Sorcery Points, etc.)
@@ -765,7 +773,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 4. **Hit Dice** — Healing resource management ✅ (v0.8.7)
 
 ### P1 — Needed for Real Campaigns
-5. **Subclasses** — Characters need mechanical identity
+5. ~~**Subclasses** — Characters need mechanical identity~~ ✅ (v0.8.67)
 6. **Class Features** — Ki, Rage, etc.
 7. **Proficiencies** — Skills ✅ (v0.8.9), tools, weapons, armor (partial)
 8. **Spell Components** — Material component tracking
