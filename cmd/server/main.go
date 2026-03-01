@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.82
+// @version 0.8.88
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.87"
+const version = "0.8.88"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -25892,6 +25892,52 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 				"conditions": conditions,
 			})
 			return
+		}
+	}
+	
+	// v0.8.88: Check for Paladin aura immunities before applying charm/frightened
+	if baseCondition == "charmed" || baseCondition == "frightened" {
+		var class string
+		var level int
+		var subclass sql.NullString
+		err := db.QueryRow(`
+			SELECT COALESCE(class, ''), COALESCE(level, 1), subclass 
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &subclass)
+		
+		if err == nil {
+			classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+			charName := getCharacterName(charID)
+			
+			// Aura of Devotion: Devotion Paladin level 7+ immune to charmed
+			if baseCondition == "charmed" && classKey == "paladin" && level >= 7 {
+				if subclass.Valid && subclass.String == "devotion" {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success":         true,
+						"immune":          true,
+						"immunity_source": "Aura of Devotion (Oath of Devotion Paladin level 7+)",
+						"character":       charName,
+						"character_id":    charID,
+						"condition":       condition,
+						"message":         fmt.Sprintf("🛡️ %s is immune to being charmed through their Aura of Devotion! The charm effect has no effect.", charName),
+					})
+					return
+				}
+			}
+			
+			// Aura of Courage: Any Paladin level 10+ immune to frightened
+			if baseCondition == "frightened" && classKey == "paladin" && level >= 10 {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"success":         true,
+					"immune":          true,
+					"immunity_source": "Aura of Courage (Paladin level 10+)",
+					"character":       charName,
+					"character_id":    charID,
+					"condition":       condition,
+					"message":         fmt.Sprintf("🛡️ %s is immune to being frightened through their Aura of Courage! The fear effect has no effect.", charName),
+				})
+				return
+			}
 		}
 	}
 	
