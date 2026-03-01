@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.86"
+const version = "0.8.87"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -22303,13 +22303,14 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get character info for the save
-	var charName string
-	var con, currentHP, maxHP int
+	var charName, class string
+	var con, currentHP, maxHP, level int
 	var conditionsStr string
+	var subclass sql.NullString
 	err = db.QueryRow(`
-		SELECT name, con, hp, max_hp, COALESCE(conditions, '') 
+		SELECT name, class, level, COALESCE(subclass, ''), con, hp, max_hp, COALESCE(conditions, '') 
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &con, &currentHP, &maxHP, &conditionsStr)
+	`, req.CharacterID).Scan(&charName, &class, &level, &subclass, &con, &currentHP, &maxHP, &conditionsStr)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -22317,6 +22318,20 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	conMod := modifier(con)
+	
+	// v0.8.87: Check for Land Druid's Nature's Ward (level 10+) — immune to poison and disease
+	if subclass.Valid && subclass.String == "land" && level >= 10 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":         true,
+			"immune":          true,
+			"immunity_source": "Nature's Ward (Circle of the Land Druid level 10+)",
+			"character":       charName,
+			"character_id":    req.CharacterID,
+			"poison":          poison.Name,
+			"message":         fmt.Sprintf("🛡️ %s is immune to poison through Nature's Ward! The %s has no effect.", charName, poison.Name),
+		})
+		return
+	}
 	
 	// Check if character is immune to poison (could be race, condition, or item)
 	// Petrified creatures are immune to poison and disease (PHB)
@@ -22675,13 +22690,14 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get character info for the save
-	var charName string
-	var con, currentHP, maxHP, exhaustionLevel int
+	var charName, class string
+	var con, currentHP, maxHP, exhaustionLevel, level int
 	var conditionsStr string
+	var subclass sql.NullString
 	err = db.QueryRow(`
-		SELECT name, con, hp, max_hp, COALESCE(conditions, ''), COALESCE(exhaustion_level, 0)
+		SELECT name, class, level, COALESCE(subclass, ''), con, hp, max_hp, COALESCE(conditions, ''), COALESCE(exhaustion_level, 0)
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &con, &currentHP, &maxHP, &conditionsStr, &exhaustionLevel)
+	`, req.CharacterID).Scan(&charName, &class, &level, &subclass, &con, &currentHP, &maxHP, &conditionsStr, &exhaustionLevel)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -22689,6 +22705,35 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conMod := modifier(con)
+
+	// v0.8.87: Check for Paladin's Divine Health (level 3+) — immune to disease
+	classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+	if classKey == "paladin" && level >= 3 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":         true,
+			"immune":          true,
+			"immunity_source": "Divine Health (Paladin level 3+)",
+			"character":       charName,
+			"character_id":    req.CharacterID,
+			"disease":         disease.Name,
+			"message":         fmt.Sprintf("🛡️ %s is immune to disease through Divine Health! The %s has no effect.", charName, disease.Name),
+		})
+		return
+	}
+
+	// v0.8.87: Check for Land Druid's Nature's Ward (level 10+) — immune to poison and disease
+	if subclass.Valid && subclass.String == "land" && level >= 10 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":         true,
+			"immune":          true,
+			"immunity_source": "Nature's Ward (Circle of the Land Druid level 10+)",
+			"character":       charName,
+			"character_id":    req.CharacterID,
+			"disease":         disease.Name,
+			"message":         fmt.Sprintf("🛡️ %s is immune to disease through Nature's Ward! The %s has no effect.", charName, disease.Name),
+		})
+		return
+	}
 
 	// Check if character is already diseased with this disease
 	condList := strings.Split(conditionsStr, ",")
@@ -22708,7 +22753,7 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		// Check for disease immunity (e.g., paladins at high level, petrified creatures)
+		// Check for disease immunity (e.g., petrified creatures)
 		// Petrified creatures are immune to poison and disease (PHB)
 		if c == "immunity:disease" || c == "immune:disease" || c == "petrified" {
 			immunitySource := "disease immunity"

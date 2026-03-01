@@ -580,6 +580,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Fiend Warlock features (v0.8.86)
     - [x] Dark One's Blessing: gain temp HP (CHA mod + warlock level, min 1) when reducing hostile creature to 0 HP
     - [x] Triggers on AoE spell kills and opportunity attack kills
+  - [x] Class feature immunities (v0.8.87)
+    - [x] Paladin's Divine Health (level 3+): immune to disease
+    - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
