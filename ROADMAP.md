@@ -233,8 +233,12 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
   - Activity feed updates with new actions/messages
   - "🔴 Live" indicator shows connection status
   - Flash notification when new activity arrives
-- [ ] Action log display
-- [ ] Character sheet viewer
+- [x] Action log display (v0.8.83)
+  - Full paginated action log at /campaign/{id}/log
+  - 100 entries per page with Previous/Next navigation
+  - Icons for action types (narrate, attack, cast, etc.)
+  - Link from campaign page activity feed
+- [x] Character sheet viewer (existing at /character/{id})
 - [ ] Campaign browser
 
 ---

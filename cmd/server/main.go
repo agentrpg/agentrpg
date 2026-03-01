@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.82"
+const version = "0.8.83"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -27528,11 +27528,23 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	
-	idStr := strings.TrimPrefix(r.URL.Path, "/campaign/")
+	path := strings.TrimPrefix(r.URL.Path, "/campaign/")
+	parts := strings.SplitN(path, "/", 2)
+	idStr := parts[0]
+	
 	campaignID, err := strconv.Atoi(idStr)
 	if err != nil {
 		http.Error(w, "Invalid campaign ID", http.StatusBadRequest)
 		return
+	}
+	
+	// Check for subpaths
+	if len(parts) > 1 {
+		switch parts[1] {
+		case "log":
+			handleCampaignLog(w, r, campaignID)
+			return
+		}
 	}
 	
 	// Get campaign details
@@ -27967,15 +27979,183 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
   <div class="section">
     <h2>📋 Activity Feed</h2>
     %s
+    <p class="muted"><a href="/campaign/%d/log">View full action log →</a></p>
   </div>
 </div>
 
 <p class="muted"><a href="/api/campaigns/%d">View raw API data →</a> | 🔄 Auto-refresh: 30s</p>
 <script>setTimeout(function(){location.reload()},30000);</script>
 `, name, statusBadge, dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("January 2, 2006"),
-		partyBoxesHTML, setting, obsHTML, actionsHTML, campaignID)
+		partyBoxesHTML, setting, obsHTML, actionsHTML, campaignID, campaignID)
 	
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
+}
+
+// handleCampaignLog shows the full action log for a campaign with pagination
+func handleCampaignLog(w http.ResponseWriter, r *http.Request, campaignID int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	
+	// Get campaign name
+	var campaignName string
+	err := db.QueryRow(`SELECT name FROM lobbies WHERE id = $1`, campaignID).Scan(&campaignName)
+	if err != nil {
+		http.Error(w, "Campaign not found", http.StatusNotFound)
+		return
+	}
+	
+	// Pagination
+	page := 1
+	limit := 100
+	if p := r.URL.Query().Get("page"); p != "" {
+		if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+			page = parsed
+		}
+	}
+	offset := (page - 1) * limit
+	
+	// Get total count
+	var totalActions int
+	db.QueryRow(`SELECT COUNT(*) FROM actions WHERE lobby_id = $1`, campaignID).Scan(&totalActions)
+	
+	totalPages := (totalActions + limit - 1) / limit
+	if totalPages == 0 {
+		totalPages = 1
+	}
+	
+	// Get combined activity (actions + messages)
+	type LogEntry struct {
+		Time        time.Time
+		Type        string
+		Actor       string
+		Description string
+		Result      string
+	}
+	var entries []LogEntry
+	
+	// Get actions
+	actionRows, _ := db.Query(`
+		SELECT a.action_type, a.description, COALESCE(a.result, ''), 
+			COALESCE(c.name, (SELECT ag.name FROM agents ag WHERE ag.id = l.dm_id)), a.created_at
+		FROM actions a
+		LEFT JOIN characters c ON a.character_id = c.id
+		LEFT JOIN lobbies l ON a.lobby_id = l.id
+		WHERE a.lobby_id = $1
+		ORDER BY a.created_at DESC
+		LIMIT $2 OFFSET $3
+	`, campaignID, limit, offset)
+	if actionRows != nil {
+		for actionRows.Next() {
+			var entry LogEntry
+			actionRows.Scan(&entry.Type, &entry.Description, &entry.Result, &entry.Actor, &entry.Time)
+			entries = append(entries, entry)
+		}
+		actionRows.Close()
+	}
+	
+	// Build log HTML
+	var logHTML strings.Builder
+	if len(entries) == 0 {
+		logHTML.WriteString(`<p class="muted">No actions recorded yet.</p>`)
+	} else {
+		for _, entry := range entries {
+			timeStr := entry.Time.In(getPacificLocation()).Format("Jan 2, 15:04 PT")
+			resultHTML := ""
+			if entry.Result != "" && !strings.HasPrefix(entry.Result, "Action:") {
+				resultHTML = fmt.Sprintf(`<div class="result">→ %s</div>`, entry.Result)
+			}
+			
+			typeIcon := "⚔️"
+			typeClass := "action"
+			switch entry.Type {
+			case "narrate":
+				typeIcon = "📖"
+				typeClass = "narrate"
+			case "message":
+				typeIcon = "💬"
+				typeClass = "message"
+			case "poll":
+				typeIcon = "📡"
+				typeClass = "poll"
+			case "attack":
+				typeIcon = "⚔️"
+			case "cast":
+				typeIcon = "✨"
+			case "move":
+				typeIcon = "🏃"
+			case "help":
+				typeIcon = "🤝"
+			case "dodge":
+				typeIcon = "🛡️"
+			}
+			
+			logHTML.WriteString(fmt.Sprintf(`
+<div class="log-entry %s">
+  <div class="entry-header">
+    <span class="time">%s</span>
+    <strong class="actor">%s</strong>
+    <span class="type">%s %s</span>
+  </div>
+  <div class="entry-body">
+    <p>%s</p>
+    %s
+  </div>
+</div>`, typeClass, timeStr, entry.Actor, typeIcon, entry.Type, entry.Description, resultHTML))
+		}
+	}
+	
+	// Pagination controls
+	var paginationHTML strings.Builder
+	if totalPages > 1 {
+		paginationHTML.WriteString(`<div class="pagination">`)
+		if page > 1 {
+			paginationHTML.WriteString(fmt.Sprintf(`<a href="?page=%d" class="page-link">← Previous</a>`, page-1))
+		}
+		paginationHTML.WriteString(fmt.Sprintf(`<span class="page-info">Page %d of %d</span>`, page, totalPages))
+		if page < totalPages {
+			paginationHTML.WriteString(fmt.Sprintf(`<a href="?page=%d" class="page-link">Next →</a>`, page+1))
+		}
+		paginationHTML.WriteString(`</div>`)
+	}
+	
+	content := fmt.Sprintf(`
+<style>
+.log-header{margin-bottom:1em}
+.log-header h1{margin-bottom:0.2em}
+.log-entry{padding:0.8em 1em;margin:0.5em 0;background:var(--note-bg);border-radius:6px;border-left:3px solid var(--border)}
+.log-entry.narrate{border-left-color:#9b59b6}
+.log-entry.action{border-left-color:#28a745}
+.log-entry.message{border-left-color:var(--link)}
+.log-entry.poll{border-left-color:#95a5a6}
+.entry-header{display:flex;gap:0.8em;align-items:center;margin-bottom:0.3em;flex-wrap:wrap}
+.entry-header .time{color:var(--muted);font-size:0.85em}
+.entry-header .actor{color:var(--text)}
+.entry-header .type{color:var(--muted);font-size:0.9em}
+.entry-body p{margin:0.2em 0}
+.entry-body .result{color:var(--muted);font-style:italic;margin-top:0.3em}
+.pagination{display:flex;justify-content:center;gap:1.5em;align-items:center;margin:1.5em 0}
+.page-link{padding:0.4em 0.8em;background:var(--note-bg);border-radius:4px;text-decoration:none}
+.page-link:hover{background:var(--border)}
+.page-info{color:var(--muted)}
+.stats{color:var(--muted);font-size:0.9em;margin-bottom:1em}
+</style>
+
+<div class="log-header">
+  <h1>📋 Action Log: %s</h1>
+  <p><a href="/campaign/%d">← Back to campaign</a></p>
+</div>
+
+<div class="stats">
+  Total actions: %d | Showing: %d-%d
+</div>
+
+%s
+
+%s
+`, campaignName, campaignID, totalActions, 
+		min(offset+1, totalActions), min(offset+limit, totalActions),
+		paginationHTML.String(), logHTML.String())
+	
+	fmt.Fprint(w, wrapHTML(fmt.Sprintf("Action Log: %s - Agent RPG", campaignName), content))
 }
 
 func handleCharacterSheet(w http.ResponseWriter, r *http.Request) {
