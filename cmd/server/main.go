@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.67"
+const version = "0.8.68"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -697,6 +697,11 @@ func initDB() {
 		
 		-- Magic item attunement (max 3 attuned items per character)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attuned_items JSONB DEFAULT '[]';
+		
+		-- Extra Attack tracking (v0.8.68)
+		-- Tracks remaining attacks in current Attack action. NULL = no attack action started yet.
+		-- Reset to NULL at start of turn. When > 0, character can continue attacking as part of same action.
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attacks_remaining INTEGER DEFAULT NULL;
 		
 		-- Hit Dice tracking (Short/Long Rest - Phase 8 P0)
 		-- hit_dice_spent tracks how many dice have been used (recovers half on long rest)
@@ -1793,6 +1798,33 @@ func proficiencyBonus(level int) int {
 	return 6
 }
 
+// getExtraAttackCount returns the number of attacks a character can make with a single Attack action
+// Based on class and level per 5e PHB:
+// - Fighter 5: 2 attacks, Fighter 11: 3 attacks, Fighter 20: 4 attacks
+// - Barbarian, Monk, Paladin, Ranger 5+: 2 attacks
+// - Everyone else: 1 attack
+func getExtraAttackCount(class string, level int) int {
+	classLower := strings.ToLower(class)
+	
+	switch classLower {
+	case "fighter":
+		if level >= 20 {
+			return 4
+		} else if level >= 11 {
+			return 3
+		} else if level >= 5 {
+			return 2
+		}
+	case "barbarian", "monk", "paladin", "ranger":
+		if level >= 5 {
+			return 2
+		}
+	}
+	
+	// All other classes and lower levels get 1 attack
+	return 1
+}
+
 // Calculate spell save DC: 8 + proficiency bonus + spellcasting modifier
 func spellSaveDC(level int, spellcastingMod int) int {
 	return 8 + proficiencyBonus(level) + spellcastingMod
@@ -2055,6 +2087,51 @@ func conditionListHas(conditions []string, condition string) bool {
 
 // buildMovementInfo returns movement info with prone status (v0.8.41)
 // Shows crawling penalty and stand action when prone
+// buildActionEconomy constructs the action economy info for /api/my-turn response
+// Includes Extra Attack tracking (v0.8.68)
+func buildActionEconomy(class string, level int, actionUsed, bonusActionUsed, reactionUsed bool,
+	movementRemaining int, race string, bonusActionSpellCast bool, cantripsOnlyWarning string,
+	conditions []string, actionStatus, bonusActionStatus, reactionStatus string,
+	attacksRemaining sql.NullInt32) map[string]interface{} {
+	
+	result := map[string]interface{}{
+		"action":                  !actionUsed,
+		"action_status":           actionStatus,
+		"bonus_action":            !bonusActionUsed,
+		"bonus_action_status":     bonusActionStatus,
+		"reaction":                !reactionUsed,
+		"reaction_status":         reactionStatus,
+		"movement_remaining_ft":   movementRemaining,
+		"movement_speed_ft":       getMovementSpeed(race),
+		"bonus_action_spell_cast": bonusActionSpellCast,
+		"cantrips_only_warning":   cantripsOnlyWarning,
+		"is_prone":                conditionListHas(conditions, "prone"),
+	}
+	
+	// Extra Attack info (v0.8.68)
+	totalAttacks := getExtraAttackCount(class, level)
+	if totalAttacks > 1 {
+		result["extra_attack"] = true
+		result["total_attacks_per_action"] = totalAttacks
+		
+		if attacksRemaining.Valid && attacksRemaining.Int32 > 0 {
+			// In the middle of an Attack action
+			result["attacks_remaining"] = attacksRemaining.Int32
+			result["action_status"] = fmt.Sprintf("IN PROGRESS: Attack action (%d of %d attacks remaining)", attacksRemaining.Int32, totalAttacks)
+			result["action"] = true // Can still attack
+		} else if !actionUsed {
+			// Haven't started attacking yet
+			result["attacks_remaining"] = totalAttacks
+			result["extra_attack_note"] = fmt.Sprintf("Extra Attack: You can make %d attacks when you take the Attack action.", totalAttacks)
+		} else {
+			// Action fully consumed
+			result["attacks_remaining"] = 0
+		}
+	}
+	
+	return result
+}
+
 func buildMovementInfo(race string, movementRemaining int, conditions []string) string {
 	isProne := conditionListHas(conditions, "prone")
 	baseSpeed := getMovementSpeed(race)
@@ -6383,6 +6460,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed, bonusActionSpellCast bool
 	var mountedOnCreature sql.NullString
 	var mountIsControlled sql.NullBool
+	var attacksRemaining sql.NullInt32
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, COALESCE(c.subclass, ''), c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
@@ -6395,7 +6473,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.action_used, false), COALESCE(c.bonus_action_used, false), COALESCE(c.movement_remaining, 30),
 			COALESCE(c.bonus_action_spell_cast, false),
 			COALESCE(l.campaign_document, '{}'),
-			c.mounted_on_creature, c.mount_is_controlled
+			c.mounted_on_creature, c.mount_is_controlled,
+			c.attacks_remaining
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -6407,7 +6486,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &charCopper, &charSilver,
 		&charElectrum, &charPlatinum, &pendingASI,
 		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw,
-		&mountedOnCreature, &mountIsControlled)
+		&mountedOnCreature, &mountIsControlled, &attacksRemaining)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -6856,19 +6935,9 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"bonus_actions": buildBonusActions(classKey, actionUsed, bonusActionUsed),
 			"movement":      buildMovementInfo(race, movementRemaining, conditions),
 			"reaction":      reactionStatus,
-			"action_economy": map[string]interface{}{
-				"action":            !actionUsed,
-				"action_status":     actionStatus,
-				"bonus_action":      !bonusActionUsed,
-				"bonus_action_status": bonusActionStatus,
-				"reaction":          !reactionUsed,
-				"reaction_status":   reactionStatus,
-				"movement_remaining_ft": movementRemaining,
-				"movement_speed_ft": getMovementSpeed(race),
-				"bonus_action_spell_cast": bonusActionSpellCast,
-				"cantrips_only_warning": cantripsOnlyWarning,
-				"is_prone": conditionListHas(conditions, "prone"),
-			},
+			"action_economy": buildActionEconomy(class, level, actionUsed, bonusActionUsed, reactionUsed,
+				movementRemaining, race, bonusActionSpellCast, cantripsOnlyWarning, conditions,
+				actionStatus, bonusActionStatus, reactionStatus, attacksRemaining),
 		},
 		"tactical_suggestions": suggestions,
 		"rules_reminder":       rulesReminder,
@@ -15790,11 +15859,13 @@ func checkActionEconomy(charID int, actionType string, movementCost int) (bool, 
 	var actionUsed, bonusActionUsed, reactionUsed bool
 	var movementRemaining int
 	var race string
+	var attacksRemaining sql.NullInt32
 	err := db.QueryRow(`
 		SELECT COALESCE(action_used, false), COALESCE(bonus_action_used, false), 
-		       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30), COALESCE(race, 'human')
+		       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30), COALESCE(race, 'human'),
+		       attacks_remaining
 		FROM characters WHERE id = $1
-	`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining, &race)
+	`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining, &race, &attacksRemaining)
 	
 	if err != nil {
 		return false, resourceType, "Failed to check action economy"
@@ -15802,6 +15873,12 @@ func checkActionEconomy(charID int, actionType string, movementCost int) (bool, 
 	
 	switch resourceType {
 	case "action":
+		// Special handling for Extra Attack (v0.8.68)
+		// If in the middle of an Attack action with attacks remaining, allow more attacks
+		if strings.ToLower(actionType) == "attack" && attacksRemaining.Valid && attacksRemaining.Int32 > 0 {
+			// Continue the attack action - attacks remaining
+			return true, resourceType, ""
+		}
 		if actionUsed {
 			return false, resourceType, "You have already used your action this turn. Available: bonus action, movement, free actions."
 		}
@@ -15874,10 +15951,16 @@ func checkActionEconomy(charID int, actionType string, movementCost int) (bool, 
 }
 
 // Consume the appropriate resource after an action
-func consumeActionResource(charID int, resourceType string, movementCost int) {
+// actionType is the original action (e.g., "attack", "cast") for Extra Attack handling
+func consumeActionResource(charID int, resourceType string, movementCost int, actionType ...string) {
 	switch resourceType {
 	case "action":
-		db.Exec("UPDATE characters SET action_used = true WHERE id = $1", charID)
+		// Special handling for Extra Attack (v0.8.68)
+		if len(actionType) > 0 && strings.ToLower(actionType[0]) == "attack" {
+			consumeAttackAction(charID)
+		} else {
+			db.Exec("UPDATE characters SET action_used = true WHERE id = $1", charID)
+		}
 	case "bonus_action":
 		db.Exec("UPDATE characters SET bonus_action_used = true WHERE id = $1", charID)
 	case "reaction":
@@ -15887,17 +15970,60 @@ func consumeActionResource(charID int, resourceType string, movementCost int) {
 	}
 }
 
+// consumeAttackAction handles Extra Attack (v0.8.68)
+// - If attacks_remaining is NULL, initialize it based on class/level
+// - Decrement attacks_remaining
+// - When attacks_remaining hits 0, mark action_used = true
+func consumeAttackAction(charID int) {
+	var attacksRemaining sql.NullInt32
+	var class string
+	var level int
+	
+	err := db.QueryRow(`
+		SELECT attacks_remaining, class, level FROM characters WHERE id = $1
+	`, charID).Scan(&attacksRemaining, &class, &level)
+	
+	if err != nil {
+		// Fallback to simple action consumption
+		db.Exec("UPDATE characters SET action_used = true WHERE id = $1", charID)
+		return
+	}
+	
+	if !attacksRemaining.Valid {
+		// Starting a new Attack action - initialize attacks based on Extra Attack
+		totalAttacks := getExtraAttackCount(class, level)
+		if totalAttacks <= 1 {
+			// No Extra Attack, just mark action as used
+			db.Exec("UPDATE characters SET action_used = true, attacks_remaining = 0 WHERE id = $1", charID)
+		} else {
+			// Has Extra Attack - set remaining attacks (minus this one)
+			db.Exec("UPDATE characters SET attacks_remaining = $1 WHERE id = $2", totalAttacks - 1, charID)
+		}
+	} else {
+		// Continuing an Attack action - decrement
+		newRemaining := attacksRemaining.Int32 - 1
+		if newRemaining <= 0 {
+			// Last attack - mark action as fully used
+			db.Exec("UPDATE characters SET action_used = true, attacks_remaining = 0 WHERE id = $1", charID)
+		} else {
+			// More attacks available
+			db.Exec("UPDATE characters SET attacks_remaining = $1 WHERE id = $2", newRemaining, charID)
+		}
+	}
+}
+
 // Reset action economy at start of turn (called when turn advances)
 func resetTurnResources(charID int, raceSpeed int) {
 	db.Exec(`
 		UPDATE characters 
 		SET action_used = false, bonus_action_used = false, movement_remaining = $1,
-		    readied_action = NULL, bonus_action_spell_cast = false
+		    readied_action = NULL, bonus_action_spell_cast = false, attacks_remaining = NULL
 		WHERE id = $2
 	`, raceSpeed, charID)
 	// Note: reaction_used resets at start of YOUR turn, not when turn advances to you
 	// Note: readied_action is also cleared - if not triggered, it's lost
 	// Note: bonus_action_spell_cast is also cleared - the cantrip-only restriction is per turn
+	// Note: attacks_remaining is cleared - Extra Attack resets each turn
 }
 
 // Reset reaction at start of character's turn
@@ -16074,7 +16200,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	
 	// Consume the resource (only in combat)
 	if inCombat && resourceUsed != "" && resourceUsed != "free" {
-		consumeActionResource(charID, resourceUsed, effectiveMovementCost)
+		consumeActionResource(charID, resourceUsed, effectiveMovementCost, req.Action)
 	}
 	
 	// Handle prone condition removal when standing up (v0.8.41)
@@ -16103,21 +16229,44 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	if inCombat {
 		response["resource_consumed"] = resourceUsed
 		
-		// Show remaining resources
+		// Show remaining resources (including Extra Attack info v0.8.68)
 		var actionUsed, bonusActionUsed, reactionUsed bool
 		var movementRemaining int
+		var attacksRemainingDB sql.NullInt32
+		var charClass string
+		var charLevel int
 		db.QueryRow(`
 			SELECT COALESCE(action_used, false), COALESCE(bonus_action_used, false),
-			       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30)
+			       COALESCE(reaction_used, false), COALESCE(movement_remaining, 30),
+			       attacks_remaining, class, level
 			FROM characters WHERE id = $1
-		`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining)
+		`, charID).Scan(&actionUsed, &bonusActionUsed, &reactionUsed, &movementRemaining,
+			&attacksRemainingDB, &charClass, &charLevel)
 		
-		response["resources_remaining"] = map[string]interface{}{
+		resources := map[string]interface{}{
 			"action":       !actionUsed,
 			"bonus_action": !bonusActionUsed,
 			"reaction":     !reactionUsed,
 			"movement_ft":  movementRemaining,
 		}
+		
+		// Extra Attack info (v0.8.68)
+		totalAttacks := getExtraAttackCount(charClass, charLevel)
+		if totalAttacks > 1 {
+			resources["extra_attack"] = true
+			resources["total_attacks_per_action"] = totalAttacks
+			
+			if attacksRemainingDB.Valid && attacksRemainingDB.Int32 > 0 {
+				resources["attacks_remaining"] = attacksRemainingDB.Int32
+				resources["attack_action_status"] = fmt.Sprintf("Attack action in progress: %d of %d attacks remaining", attacksRemainingDB.Int32, totalAttacks)
+			} else if !actionUsed {
+				resources["attacks_remaining"] = totalAttacks
+			} else {
+				resources["attacks_remaining"] = 0
+			}
+		}
+		
+		response["resources_remaining"] = resources
 	}
 	
 	json.NewEncoder(w).Encode(response)

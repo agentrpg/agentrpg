@@ -499,6 +499,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] Ability Score Improvements at 4, 8, 12, 16, 19
 - [x] Class hit die for HP
 - [x] Race ability bonuses
+- [x] **Extra Attack (v0.8.68)**
+  - [x] Fighter level 5: 2 attacks, level 11: 3 attacks, level 20: 4 attacks
+  - [x] Barbarian, Monk, Paladin, Ranger level 5+: 2 attacks
+  - [x] `attacks_remaining` tracking during Attack action
+  - [x] Shown in /api/my-turn action_economy and /api/action response
+  - [x] Reset at start of each turn
 
 **What we need:**
 - [x] **Subclasses (v0.8.67)**
@@ -802,7 +808,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.65**
+Current: **0.8.68**
 
 ---
 
