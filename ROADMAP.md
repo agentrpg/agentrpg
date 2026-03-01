@@ -424,11 +424,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Auto-fail STR/DEX saves (enforced in handleGMSavingThrow)
   - [x] Attacks have advantage (implemented in getAttackModifiers)
   - [x] Hits within 5ft are automatic crits (enforced in resolveAction)
-- [x] **Petrified** (v0.8.26)
+- [x] **Petrified** (v0.8.26, v0.8.85)
   - [ ] Weight x10
   - [x] Incapacitated, can't move/speak, unaware (enforced via isIncapacitated)
   - [x] Resistance to all damage (halved via applyDamageResistance helper)
-  - [ ] Immune to poison and disease
+  - [x] Immune to poison and disease (v0.8.85 - enforced in apply-poison and apply-disease handlers)
 - [x] **Poisoned** ✅ (v0.8.24)
   - [x] Disadvantage on attack rolls
   - [x] Disadvantage on ability checks (skill checks and tool checks)
@@ -867,7 +867,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.84**
+Current: **0.8.85**
 
 ---
 

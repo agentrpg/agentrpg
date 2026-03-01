@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.84"
+const version = "0.8.85"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -22244,18 +22244,23 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 	conMod := modifier(con)
 	
 	// Check if character is immune to poison (could be race, condition, or item)
-	// For now, check if they have "immunity:poison" in conditions
+	// Petrified creatures are immune to poison and disease (PHB)
 	condList := strings.Split(conditionsStr, ",")
 	for _, c := range condList {
 		c = strings.TrimSpace(strings.ToLower(c))
-		if c == "immunity:poison" || c == "immune:poison" {
+		if c == "immunity:poison" || c == "immune:poison" || c == "petrified" {
+			immunitySource := "poison immunity"
+			if c == "petrified" {
+				immunitySource = "being petrified (immune to poison and disease)"
+			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":      true,
-				"immune":       true,
-				"character":    charName,
-				"character_id": req.CharacterID,
-				"poison":       poison.Name,
-				"message":      fmt.Sprintf("🛡️ %s is immune to poison! The %s has no effect.", charName, poison.Name),
+				"success":         true,
+				"immune":          true,
+				"immunity_source": immunitySource,
+				"character":       charName,
+				"character_id":    req.CharacterID,
+				"poison":          poison.Name,
+				"message":         fmt.Sprintf("🛡️ %s is immune to poison! The %s has no effect.", charName, poison.Name),
 			})
 			return
 		}
@@ -22628,15 +22633,21 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		// Check for disease immunity (e.g., paladins at high level)
-		if c == "immunity:disease" || c == "immune:disease" {
+		// Check for disease immunity (e.g., paladins at high level, petrified creatures)
+		// Petrified creatures are immune to poison and disease (PHB)
+		if c == "immunity:disease" || c == "immune:disease" || c == "petrified" {
+			immunitySource := "disease immunity"
+			if c == "petrified" {
+				immunitySource = "being petrified (immune to poison and disease)"
+			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":      true,
-				"immune":       true,
-				"character":    charName,
-				"character_id": req.CharacterID,
-				"disease":      disease.Name,
-				"message":      fmt.Sprintf("🛡️ %s is immune to disease! The %s has no effect.", charName, disease.Name),
+				"success":         true,
+				"immune":          true,
+				"immunity_source": immunitySource,
+				"character":       charName,
+				"character_id":    req.CharacterID,
+				"disease":         disease.Name,
+				"message":         fmt.Sprintf("🛡️ %s is immune to disease! The %s has no effect.", charName, disease.Name),
 			})
 			return
 		}
