@@ -507,6 +507,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Reset at start of each turn
 
 **What we need:**
+- [x] **Class Features by Level (v0.8.70)**
+  - [x] ClassFeature struct with name, level, description, mechanics
+  - [x] classFeatures map with all 12 SRD classes and their level-based features
+  - [x] getActiveClassFeatures() returns features unlocked at current level
+  - [x] hasClassFeature() and getClassFeatureMechanic() helpers
+  - [x] Character sheet shows class_features array
+  - [x] /api/my-turn shows class_features for player context
 - [x] **Subclasses (v0.8.67)**
   - [x] Data model for subclass selection (level 1-3 depending on class)
   - [x] `subclass` column in characters table
@@ -530,8 +537,8 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Warlock: Fiend
     - [x] Wizard: Evocation
   - [ ] More subclass mechanical effects (beyond Champion's crit range) — future work
-- [ ] **Class Features by Level**
-  - [ ] Feature unlock tracking
+- [x] **Class Features by Level (v0.8.70)**
+  - [x] Feature unlock tracking
   - [x] Resource tracking (Ki, Rage, Sorcery Points, etc.) (v0.8.69)
     - [x] Ki Points (Monk) — equals monk level, recovers on short rest
     - [x] Rage (Barbarian) — 2-6 uses based on level, recovers on long rest
@@ -819,7 +826,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.69**
+Current: **0.8.70**
 
 ---
 
