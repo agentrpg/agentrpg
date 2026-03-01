@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.81
+// @version 0.8.82
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.81"
+const version = "0.8.82"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -5227,24 +5227,27 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 		party = append(party, member)
 	}
 	
-	// Get recent actions (last 20)
+	// Get recent actions (last 20) - include character names for display
 	actionRows, _ := db.Query(`
-		SELECT action_type, description, result, created_at 
-		FROM actions WHERE lobby_id = $1 
-		ORDER BY created_at DESC LIMIT 20
+		SELECT a.action_type, a.description, COALESCE(a.result, ''), a.created_at, COALESCE(c.name, 'System')
+		FROM actions a
+		LEFT JOIN characters c ON a.character_id = c.id
+		WHERE a.lobby_id = $1 
+		ORDER BY a.created_at DESC LIMIT 20
 	`, campaignID)
 	defer actionRows.Close()
 	
 	recentActions := []map[string]interface{}{}
 	for actionRows.Next() {
-		var actionType, description, result string
+		var actionType, description, result, actorName string
 		var createdAt time.Time
-		actionRows.Scan(&actionType, &description, &result, &createdAt)
+		actionRows.Scan(&actionType, &description, &result, &createdAt, &actorName)
 		recentActions = append(recentActions, map[string]interface{}{
-			"type":        actionType,
+			"action_type": actionType,
 			"description": description,
 			"result":      result,
-			"time":        createdAt.Format(time.RFC3339),
+			"created_at":  createdAt.Format(time.RFC3339),
+			"actor":       actorName,
 		})
 	}
 	// Reverse to chronological order
@@ -5266,9 +5269,9 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 		var createdAt time.Time
 		msgRows.Scan(&agentName, &message, &createdAt)
 		recentMessages = append(recentMessages, map[string]interface{}{
-			"from":    agentName,
-			"message": message,
-			"time":    createdAt.Format(time.RFC3339),
+			"agent_name": agentName,
+			"message":    message,
+			"created_at": createdAt.Format(time.RFC3339),
 		})
 	}
 	// Reverse to chronological order
@@ -5297,7 +5300,7 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 	}
 	
 	if dmName.Valid {
-		spectatorView["campaign"].(map[string]interface{})["dm"] = dmName.String
+		spectatorView["campaign"].(map[string]interface{})["dm_name"] = dmName.String
 	}
 	if setting.Valid {
 		spectatorView["campaign"].(map[string]interface{})["setting"] = setting.String
@@ -28015,12 +28018,29 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
         let items = [];
         if (data.recent_actions) {
           data.recent_actions.forEach(a => {
-            items.push({time: new Date(a.created_at), type: a.action_type, actor: a.character || a.actor, content: a.description, result: a.result});
+            // Null-safe: skip entries with missing timestamp or actor
+            const ts = a.created_at ? new Date(a.created_at) : null;
+            if (!ts || isNaN(ts.getTime())) return; // Skip invalid dates
+            items.push({
+              time: ts,
+              type: a.action_type || 'action',
+              actor: a.actor || 'System',
+              content: a.description || '',
+              result: a.result || ''
+            });
           });
         }
         if (data.recent_messages) {
           data.recent_messages.forEach(m => {
-            items.push({time: new Date(m.created_at), type: 'message', actor: m.agent_name, content: m.message, result: ''});
+            const ts = m.created_at ? new Date(m.created_at) : null;
+            if (!ts || isNaN(ts.getTime())) return; // Skip invalid dates
+            items.push({
+              time: ts,
+              type: 'message',
+              actor: m.agent_name || 'Unknown',
+              content: m.message || '',
+              result: ''
+            });
           });
         }
         items.sort((a,b) => b.time - a.time);
@@ -28031,11 +28051,14 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
         } else {
           items.forEach(item => {
             const timeStr = item.time.toLocaleString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+            const safeActor = item.actor || 'Unknown';
+            const safeType = item.type || 'action';
+            const safeContent = item.content || '';
             if (item.type === 'message') {
-              feedHTML += '<div class="feed-item message"><span class="time">' + timeStr + '</span> <strong>' + item.actor + '</strong> <span class="type">💬</span><p>' + item.content + '</p></div>';
+              feedHTML += '<div class="feed-item message"><span class="time">' + timeStr + '</span> <strong>' + safeActor + '</strong> <span class="type">💬</span><p>' + safeContent + '</p></div>';
             } else {
               let resultHTML = item.result && !item.result.startsWith('Action:') ? '<p class="result">→ ' + item.result + '</p>' : '';
-              feedHTML += '<div class="feed-item action"><span class="time">' + timeStr + '</span> <strong>' + item.actor + '</strong> <span class="type">[' + item.type + ']</span><p>' + item.content + '</p>' + resultHTML + '</div>';
+              feedHTML += '<div class="feed-item action"><span class="time">' + timeStr + '</span> <strong>' + safeActor + '</strong> <span class="type">[' + safeType + ']</span><p>' + safeContent + '</p>' + resultHTML + '</div>';
             }
           });
         }
