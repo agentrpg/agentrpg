@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"io"
 	"log"
 	"math/big"
@@ -39,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.83"
+const version = "0.8.84"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -27413,48 +27414,139 @@ func handleProfile(w http.ResponseWriter, r *http.Request) {
 func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	
+	// Parse filter from query params
+	statusFilter := r.URL.Query().Get("status")
+	searchQuery := strings.TrimSpace(r.URL.Query().Get("q"))
+	
 	var content strings.Builder
 	content.WriteString(`
 <style>
 .campaigns-grid{display:grid;gap:1.5em}
-.campaign-card{background:var(--note-bg);border:1px solid var(--note-border);border-radius:8px;padding:1.5em}
+.campaign-card{background:var(--note-bg);border:1px solid var(--note-border);border-radius:8px;padding:1.5em;position:relative}
 .campaign-card h3{margin:0 0 0.5em 0}
 .campaign-card .setting{color:var(--muted);font-style:italic;margin:0.5em 0;max-height:4em;overflow:hidden}
-.campaign-card .meta{color:var(--muted);font-size:0.9em}
+.campaign-card .meta{color:var(--muted);font-size:0.9em;margin-bottom:0.5em}
+.campaign-card .actions{margin-top:1em;display:flex;gap:0.5em;flex-wrap:wrap}
+.campaign-card .actions a{padding:0.4em 1em;border-radius:4px;text-decoration:none;font-size:0.9em}
+.btn-join{background:var(--link-color);color:#fff!important}
+.btn-join:hover{opacity:0.9}
+.btn-spectate{background:var(--note-border);color:var(--text-color)!important}
+.btn-spectate:hover{opacity:0.8}
 .badge{padding:0.2em 0.6em;border-radius:4px;font-size:0.8em;margin-left:0.5em}
 .badge.recruiting{background:#d4edda;color:#155724}
-.badge.active{background:#f8d7da;color:#721c24}
+.badge.active{background:#fff3cd;color:#856404}
 .badge.completed{background:#cce5ff;color:#004085}
-@media(prefers-color-scheme:dark){.badge.recruiting{background:#2a4a2a;color:#8f8}.badge.active{background:#4a2a2a;color:#f88}.badge.completed{background:#2a2a4a;color:#88f}}
+.badge.combat{background:#f8d7da;color:#721c24;margin-left:0.3em}
+.badge.exploration{background:#d1ecf1;color:#0c5460;margin-left:0.3em}
+@media(prefers-color-scheme:dark){
+.badge.recruiting{background:#2a4a2a;color:#8f8}
+.badge.active{background:#4a4a2a;color:#ff8}
+.badge.completed{background:#2a2a4a;color:#88f}
+.badge.combat{background:#4a2a2a;color:#f88}
+.badge.exploration{background:#2a4a4a;color:#8ff}
+}
 [data-theme="dark"] .badge.recruiting,[data-theme="catppuccin-mocha"] .badge.recruiting,[data-theme="tokyonight"] .badge.recruiting,[data-theme="solarized-dark"] .badge.recruiting{background:#2a4a2a;color:#8f8}
-[data-theme="dark"] .badge.active,[data-theme="catppuccin-mocha"] .badge.active,[data-theme="tokyonight"] .badge.active,[data-theme="solarized-dark"] .badge.active{background:#4a2a2a;color:#f88}
+[data-theme="dark"] .badge.active,[data-theme="catppuccin-mocha"] .badge.active,[data-theme="tokyonight"] .badge.active,[data-theme="solarized-dark"] .badge.active{background:#4a4a2a;color:#ff8}
 [data-theme="dark"] .badge.completed,[data-theme="catppuccin-mocha"] .badge.completed,[data-theme="tokyonight"] .badge.completed,[data-theme="solarized-dark"] .badge.completed{background:#2a2a4a;color:#88f}
-.filters{margin:1em 0;padding:1em;background:var(--note-bg);border-radius:8px}
+[data-theme="dark"] .badge.combat,[data-theme="catppuccin-mocha"] .badge.combat,[data-theme="tokyonight"] .badge.combat,[data-theme="solarized-dark"] .badge.combat{background:#4a2a2a;color:#f88}
+[data-theme="dark"] .badge.exploration,[data-theme="catppuccin-mocha"] .badge.exploration,[data-theme="tokyonight"] .badge.exploration,[data-theme="solarized-dark"] .badge.exploration{background:#2a4a4a;color:#8ff}
+.filters{margin:1em 0;padding:1em;background:var(--note-bg);border-radius:8px;display:flex;gap:1em;flex-wrap:wrap;align-items:center}
+.filters label{font-weight:600;margin-right:0.3em}
+.filters select,.filters input[type=text]{padding:0.4em 0.8em;border:1px solid var(--note-border);border-radius:4px;background:var(--bg-color);color:var(--text-color)}
+.filters input[type=text]{min-width:200px}
+.filter-btn{padding:0.4em 1em;background:var(--link-color);color:#fff;border:none;border-radius:4px;cursor:pointer}
+.filter-btn:hover{opacity:0.9}
+.stats-bar{display:flex;gap:2em;margin:1em 0;color:var(--muted);font-size:0.9em}
+.stats-bar span{display:flex;align-items:center;gap:0.3em}
 </style>
 
-<h1>Campaigns</h1>
-<p>Browse all campaigns — join one as a player or start your own as GM.</p>
+<h1>🎲 Campaign Browser</h1>
+<p>Find your next adventure. Join a recruiting campaign or spectate an active game.</p>
 `)
 	
 	if db == nil {
 		content.WriteString("<p>Database not available.</p>")
-		fmt.Fprint(w, wrapHTML("Campaigns - Agent RPG", content.String()))
+		fmt.Fprint(w, wrapHTML("Campaign Browser - Agent RPG", content.String()))
 		return
 	}
 	
-	// Get all campaigns
-	rows, err := db.Query(`
+	// Count campaigns by status for stats
+	var recruitingCount, activeCount, completedCount int
+	db.QueryRow(`SELECT COUNT(*) FROM lobbies WHERE status = 'recruiting'`).Scan(&recruitingCount)
+	db.QueryRow(`SELECT COUNT(*) FROM lobbies WHERE status = 'active'`).Scan(&activeCount)
+	db.QueryRow(`SELECT COUNT(*) FROM lobbies WHERE status = 'completed'`).Scan(&completedCount)
+	
+	// Stats bar
+	content.WriteString(fmt.Sprintf(`
+<div class="stats-bar">
+  <span><span class="badge recruiting">%d</span> Recruiting</span>
+  <span><span class="badge active">%d</span> Active</span>
+  <span><span class="badge completed">%d</span> Completed</span>
+</div>
+`, recruitingCount, activeCount, completedCount))
+	
+	// Filter form
+	activeAll, activeRecruiting, activeActive, activeCompleted := "", "", "", ""
+	switch statusFilter {
+	case "recruiting":
+		activeRecruiting = " selected"
+	case "active":
+		activeActive = " selected"
+	case "completed":
+		activeCompleted = " selected"
+	default:
+		activeAll = " selected"
+	}
+	
+	content.WriteString(fmt.Sprintf(`
+<form class="filters" method="get" action="/campaigns">
+  <label for="status">Status:</label>
+  <select name="status" id="status">
+    <option value=""%s>All Campaigns</option>
+    <option value="recruiting"%s>🟢 Recruiting</option>
+    <option value="active"%s>🟡 Active</option>
+    <option value="completed"%s>🔵 Completed</option>
+  </select>
+  <label for="q">Search:</label>
+  <input type="text" name="q" id="q" placeholder="Campaign name..." value="%s">
+  <button type="submit" class="filter-btn">Filter</button>
+</form>
+`, activeAll, activeRecruiting, activeActive, activeCompleted, template.HTMLEscapeString(searchQuery)))
+	
+	// Build query with filters
+	query := `
 		SELECT l.id, l.name, l.status, COALESCE(l.setting, ''), l.max_players,
 			COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
 			a.id, a.name,
 			(SELECT COUNT(*) FROM characters WHERE lobby_id = l.id) as player_count,
-			l.created_at
+			l.created_at,
+			COALESCE(l.combat_state, '{}')
 		FROM lobbies l
 		LEFT JOIN agents a ON l.dm_id = a.id
+		WHERE 1=1
+	`
+	args := []interface{}{}
+	argNum := 1
+	
+	if statusFilter != "" {
+		query += fmt.Sprintf(" AND l.status = $%d", argNum)
+		args = append(args, statusFilter)
+		argNum++
+	}
+	
+	if searchQuery != "" {
+		query += fmt.Sprintf(" AND LOWER(l.name) LIKE LOWER($%d)", argNum)
+		args = append(args, "%"+searchQuery+"%")
+		argNum++
+	}
+	
+	query += `
 		ORDER BY 
 			CASE l.status WHEN 'recruiting' THEN 1 WHEN 'active' THEN 2 ELSE 3 END,
 			l.created_at DESC
-	`)
+	`
+	
+	rows, err := db.Query(query, args...)
 	
 	if err != nil {
 		content.WriteString("<p>Error loading campaigns.</p>")
@@ -27467,10 +27559,19 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 			count++
 			var id, maxPlayers, minLevel, maxLevel, playerCount int
 			var dmID sql.NullInt64
-			var name, status, setting string
+			var name, status, setting, combatStateJSON string
 			var dmName sql.NullString
 			var createdAt time.Time
-			rows.Scan(&id, &name, &status, &setting, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName, &playerCount, &createdAt)
+			rows.Scan(&id, &name, &status, &setting, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName, &playerCount, &createdAt, &combatStateJSON)
+			
+			// Check game mode from combat_state
+			gameMode := "exploration"
+			var combatState map[string]interface{}
+			if err := json.Unmarshal([]byte(combatStateJSON), &combatState); err == nil {
+				if active, ok := combatState["active"].(bool); ok && active {
+					gameMode = "combat"
+				}
+			}
 			
 			// Truncate setting
 			settingPreview := setting
@@ -27482,11 +27583,17 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 			}
 			
 			statusBadge := ""
+			modeBadge := ""
 			switch status {
 			case "recruiting":
 				statusBadge = `<span class="badge recruiting">Recruiting</span>`
 			case "active":
 				statusBadge = `<span class="badge active">Active</span>`
+				if gameMode == "combat" {
+					modeBadge = `<span class="badge combat">⚔️ Combat</span>`
+				} else {
+					modeBadge = `<span class="badge exploration">🗺️ Exploring</span>`
+				}
 			case "completed":
 				statusBadge = `<span class="badge completed">Completed</span>`
 			}
@@ -27498,31 +27605,73 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 			
 			levelReq := formatLevelRequirement(minLevel, maxLevel)
 			
+			// Action buttons based on status
+			actions := ""
+			switch status {
+			case "recruiting":
+				spotsLeft := maxPlayers - playerCount
+				if spotsLeft > 0 {
+					actions = fmt.Sprintf(`
+<div class="actions">
+  <a href="/campaign/%d" class="btn-join">Join Campaign</a>
+  <span class="meta">%d spot%s left</span>
+</div>`, id, spotsLeft, pluralize(spotsLeft, "", "s"))
+				} else {
+					actions = `<div class="actions"><span class="meta">Campaign full</span></div>`
+				}
+			case "active":
+				actions = fmt.Sprintf(`
+<div class="actions">
+  <a href="/campaign/%d" class="btn-spectate">👁️ Watch Game</a>
+  <a href="/campaign/%d/log" class="btn-spectate">📜 Read Log</a>
+</div>`, id, id)
+			case "completed":
+				actions = fmt.Sprintf(`
+<div class="actions">
+  <a href="/campaign/%d/log" class="btn-spectate">📜 Read Story</a>
+</div>`, id)
+			}
+			
 			content.WriteString(fmt.Sprintf(`
 <div class="campaign-card">
-  <h3><a href="/campaign/%d">%s</a>%s</h3>
+  <h3><a href="/campaign/%d">%s</a>%s%s</h3>
   <p class="setting">%s</p>
   <p class="meta">
-    GM: %s | Levels %s | %d/%d players | Started %s
+    GM: %s · Levels %s · %d/%d players · %s
   </p>
-</div>`, id, name, statusBadge, settingPreview, dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("Jan 2006")))
+  %s
+</div>`, id, template.HTMLEscapeString(name), statusBadge, modeBadge, template.HTMLEscapeString(settingPreview), dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("Jan 2006"), actions))
 		}
 		content.WriteString(`</div>`)
 		
 		if count == 0 {
-			content.WriteString(`<p class="muted">No campaigns yet. Be the first to create one!</p>`)
+			if statusFilter != "" || searchQuery != "" {
+				content.WriteString(`<p class="muted">No campaigns match your filters. <a href="/campaigns">Clear filters</a></p>`)
+			} else {
+				content.WriteString(`<p class="muted">No campaigns yet. Be the first to create one!</p>`)
+			}
 		}
 	}
 	
 	content.WriteString(`
-<div style="margin-top:2em">
-  <h2>Start Your Own</h2>
+<div style="margin-top:2em;padding:1.5em;background:var(--note-bg);border-radius:8px">
+  <h2>🎭 Start Your Own Campaign</h2>
   <p>Ready to GM? Create a campaign from a template or build your own world.</p>
-  <p><a href="/api/campaign-templates">Browse campaign templates →</a></p>
+  <p style="margin-top:1em">
+    <a href="/universe/campaign-templates" style="padding:0.5em 1.5em;background:var(--link-color);color:#fff;border-radius:4px;text-decoration:none">Browse Templates →</a>
+  </p>
 </div>
 `)
 	
-	fmt.Fprint(w, wrapHTML("Campaigns - Agent RPG", content.String()))
+	fmt.Fprint(w, wrapHTML("Campaign Browser - Agent RPG", content.String()))
+}
+
+// pluralize returns singular or plural suffix based on count
+func pluralize(count int, singular, plural string) string {
+	if count == 1 {
+		return singular
+	}
+	return plural
 }
 
 func handleCampaignPage(w http.ResponseWriter, r *http.Request) {

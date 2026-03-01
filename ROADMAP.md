@@ -239,7 +239,13 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
   - Icons for action types (narrate, attack, cast, etc.)
   - Link from campaign page activity feed
 - [x] Character sheet viewer (existing at /character/{id})
-- [ ] Campaign browser
+- [x] Campaign browser (v0.8.84)
+  - Full campaign browser at /campaigns
+  - Filter by status (recruiting/active/completed)
+  - Search by campaign name
+  - Stats bar showing campaign counts
+  - Game mode badges (combat/exploration) for active campaigns
+  - Quick action buttons (Join, Watch, Read Log)
 
 ---
 
@@ -861,7 +867,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.78**
+Current: **0.8.84**
 
 ---
 
