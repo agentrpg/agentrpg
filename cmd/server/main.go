@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.68"
+const version = "0.8.69"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -859,6 +859,13 @@ func initDB() {
 		-- Subclass: the character's chosen subclass (v0.8.67)
 		-- Set at the appropriate level for the class (usually 3, but 1-2 for some)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS subclass VARCHAR(50);
+		
+		-- Class Resources (v0.8.69 - Phase 8 Class Features)
+		-- Tracks current resource values: {"ki": 4, "rage": 3, "sorcery_points": 5}
+		-- Max values are calculated dynamically based on class/level
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_resources JSONB DEFAULT '{}';
+		-- Tracks resources used since last rest: {"ki": 2, "rage": 1}
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_resources_used JSONB DEFAULT '{}';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -1828,6 +1835,277 @@ func getExtraAttackCount(class string, level int) int {
 // Calculate spell save DC: 8 + proficiency bonus + spellcasting modifier
 func spellSaveDC(level int, spellcastingMod int) int {
 	return 8 + proficiencyBonus(level) + spellcastingMod
+}
+
+// ClassResource defines a class resource and its recovery behavior
+type ClassResource struct {
+	Name          string // Display name (e.g., "Ki Points")
+	Key           string // JSON key (e.g., "ki")
+	RecoverShort  bool   // Recovers on short rest
+	RecoverLong   bool   // Recovers on long rest
+}
+
+// getClassResources returns the resource types available for a class
+// Each class may have multiple resources (e.g., Fighter has Second Wind AND Action Surge)
+func getClassResources(class string) []ClassResource {
+	classLower := strings.ToLower(class)
+	
+	switch classLower {
+	case "monk":
+		return []ClassResource{
+			{Name: "Ki Points", Key: "ki", RecoverShort: true, RecoverLong: true},
+		}
+	case "barbarian":
+		return []ClassResource{
+			{Name: "Rage", Key: "rage", RecoverShort: false, RecoverLong: true},
+		}
+	case "sorcerer":
+		return []ClassResource{
+			{Name: "Sorcery Points", Key: "sorcery_points", RecoverShort: false, RecoverLong: true},
+		}
+	case "bard":
+		return []ClassResource{
+			{Name: "Bardic Inspiration", Key: "bardic_inspiration", RecoverShort: true, RecoverLong: true}, // Short rest at 5+
+		}
+	case "cleric":
+		return []ClassResource{
+			{Name: "Channel Divinity", Key: "channel_divinity", RecoverShort: true, RecoverLong: true},
+		}
+	case "paladin":
+		return []ClassResource{
+			{Name: "Channel Divinity", Key: "channel_divinity", RecoverShort: true, RecoverLong: true},
+			{Name: "Lay on Hands", Key: "lay_on_hands", RecoverShort: false, RecoverLong: true},
+		}
+	case "fighter":
+		return []ClassResource{
+			{Name: "Second Wind", Key: "second_wind", RecoverShort: true, RecoverLong: true},
+			{Name: "Action Surge", Key: "action_surge", RecoverShort: true, RecoverLong: true},
+		}
+	case "druid":
+		return []ClassResource{
+			{Name: "Wild Shape", Key: "wild_shape", RecoverShort: true, RecoverLong: true},
+		}
+	case "wizard":
+		return []ClassResource{
+			{Name: "Arcane Recovery", Key: "arcane_recovery", RecoverShort: false, RecoverLong: true}, // Once per day
+		}
+	}
+	
+	return nil
+}
+
+// getMaxClassResource returns the maximum value for a specific resource based on class and level
+// chaMod is needed for Bard's Bardic Inspiration which scales with CHA
+func getMaxClassResource(class string, level int, resourceKey string, chaMod int) int {
+	classLower := strings.ToLower(class)
+	
+	switch resourceKey {
+	case "ki":
+		// Ki Points = Monk level (PHB p78)
+		if classLower == "monk" {
+			return level
+		}
+	case "rage":
+		// Rage uses per day (PHB p48)
+		if classLower == "barbarian" {
+			if level >= 20 {
+				return 999 // Unlimited rage at 20
+			} else if level >= 17 {
+				return 6
+			} else if level >= 12 {
+				return 5
+			} else if level >= 6 {
+				return 4
+			} else if level >= 3 {
+				return 3
+			}
+			return 2
+		}
+	case "sorcery_points":
+		// Sorcery Points = Sorcerer level (PHB p101)
+		if classLower == "sorcerer" && level >= 2 {
+			return level
+		}
+	case "bardic_inspiration":
+		// Bardic Inspiration = CHA modifier, min 1 (PHB p53)
+		if classLower == "bard" {
+			max := chaMod
+			if max < 1 {
+				max = 1
+			}
+			return max
+		}
+	case "channel_divinity":
+		// Channel Divinity uses (PHB p58 Cleric, p85 Paladin)
+		if classLower == "cleric" {
+			if level >= 18 {
+				return 3
+			} else if level >= 6 {
+				return 2
+			} else if level >= 2 {
+				return 1
+			}
+		}
+		if classLower == "paladin" {
+			if level >= 3 {
+				return 1 // Paladin only gets 1 use
+			}
+		}
+	case "lay_on_hands":
+		// Lay on Hands pool = Paladin level × 5 (PHB p84)
+		if classLower == "paladin" {
+			return level * 5
+		}
+	case "second_wind":
+		// Second Wind = 1 use (PHB p72)
+		if classLower == "fighter" {
+			return 1
+		}
+	case "action_surge":
+		// Action Surge (PHB p72)
+		if classLower == "fighter" {
+			if level >= 17 {
+				return 2
+			} else if level >= 2 {
+				return 1
+			}
+		}
+	case "wild_shape":
+		// Wild Shape = 2 uses (PHB p66)
+		if classLower == "druid" && level >= 2 {
+			return 2
+		}
+	case "arcane_recovery":
+		// Arcane Recovery = 1 use per day (PHB p115)
+		if classLower == "wizard" {
+			return 1
+		}
+	}
+	
+	return 0
+}
+
+// getAllMaxClassResources returns a map of all max resource values for a character
+func getAllMaxClassResources(class string, level int, chaMod int) map[string]int {
+	resources := make(map[string]int)
+	
+	for _, res := range getClassResources(class) {
+		max := getMaxClassResource(class, level, res.Key, chaMod)
+		if max > 0 {
+			resources[res.Key] = max
+		}
+	}
+	
+	return resources
+}
+
+// getCurrentClassResources returns current available resources (max - used)
+func getCurrentClassResources(charID int) map[string]int {
+	var class string
+	var level, cha int
+	var usedJSON []byte
+	
+	err := db.QueryRow(`
+		SELECT class, level, cha, COALESCE(class_resources_used, '{}')
+		FROM characters WHERE id = $1
+	`, charID).Scan(&class, &level, &cha, &usedJSON)
+	if err != nil {
+		return nil
+	}
+	
+	used := make(map[string]int)
+	json.Unmarshal(usedJSON, &used)
+	
+	chaMod := modifier(cha)
+	maxResources := getAllMaxClassResources(class, level, chaMod)
+	
+	current := make(map[string]int)
+	for key, max := range maxResources {
+		current[key] = max - used[key]
+		if current[key] < 0 {
+			current[key] = 0
+		}
+	}
+	
+	return current
+}
+
+// useClassResource spends a resource and returns success/error
+func useClassResource(charID int, resourceKey string, amount int) (bool, string, int) {
+	var class string
+	var level, cha int
+	var usedJSON []byte
+	
+	err := db.QueryRow(`
+		SELECT class, level, cha, COALESCE(class_resources_used, '{}')
+		FROM characters WHERE id = $1
+	`, charID).Scan(&class, &level, &cha, &usedJSON)
+	if err != nil {
+		return false, "Character not found", 0
+	}
+	
+	used := make(map[string]int)
+	json.Unmarshal(usedJSON, &used)
+	
+	chaMod := modifier(cha)
+	max := getMaxClassResource(class, level, resourceKey, chaMod)
+	
+	if max == 0 {
+		return false, fmt.Sprintf("Class %s does not have resource '%s'", class, resourceKey), 0
+	}
+	
+	current := max - used[resourceKey]
+	if current < amount {
+		return false, fmt.Sprintf("Not enough %s (have %d, need %d)", resourceKey, current, amount), current
+	}
+	
+	// Spend the resource
+	used[resourceKey] += amount
+	newUsedJSON, _ := json.Marshal(used)
+	db.Exec(`UPDATE characters SET class_resources_used = $1 WHERE id = $2`, newUsedJSON, charID)
+	
+	return true, "", current - amount
+}
+
+// recoverClassResources recovers resources on rest
+func recoverClassResources(charID int, isLongRest bool) map[string]int {
+	var class string
+	var level, cha int
+	var usedJSON []byte
+	
+	err := db.QueryRow(`
+		SELECT class, level, cha, COALESCE(class_resources_used, '{}')
+		FROM characters WHERE id = $1
+	`, charID).Scan(&class, &level, &cha, &usedJSON)
+	if err != nil {
+		return nil
+	}
+	
+	used := make(map[string]int)
+	json.Unmarshal(usedJSON, &used)
+	
+	recovered := make(map[string]int)
+	resources := getClassResources(class)
+	
+	for _, res := range resources {
+		// Check if this resource recovers on this type of rest
+		if (isLongRest && res.RecoverLong) || (!isLongRest && res.RecoverShort) {
+			// Special case: Bard's Bardic Inspiration only recovers on short rest at level 5+
+			if res.Key == "bardic_inspiration" && !isLongRest && level < 5 {
+				continue
+			}
+			
+			if used[res.Key] > 0 {
+				recovered[res.Key] = used[res.Key]
+				used[res.Key] = 0
+			}
+		}
+	}
+	
+	newUsedJSON, _ := json.Marshal(used)
+	db.Exec(`UPDATE characters SET class_resources_used = $1 WHERE id = $2`, newUsedJSON, charID)
+	
+	return recovered
 }
 
 // ArmorInfo holds armor data for AC calculation
@@ -5996,6 +6274,9 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		case "feat":
 			handleCharacterFeat(w, r, charID)
 			return
+		case "use-resource":
+			handleUseResource(w, r, charID)
+			return
 		}
 	}
 	
@@ -6398,6 +6679,31 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["concentrating_on"] = concentratingOn
 	}
 	
+	// Class Resources (v0.8.69 - Ki, Rage, Sorcery Points, etc.)
+	chaMod := modifier(cha)
+	maxResources := getAllMaxClassResources(class, level, chaMod)
+	if len(maxResources) > 0 {
+		// Get current resource usage
+		currentResources := getCurrentClassResources(charID)
+		
+		resourceList := []map[string]interface{}{}
+		for _, res := range getClassResources(class) {
+			if max, ok := maxResources[res.Key]; ok && max > 0 {
+				current := currentResources[res.Key]
+				resourceList = append(resourceList, map[string]interface{}{
+					"name":          res.Name,
+					"key":           res.Key,
+					"current":       current,
+					"max":           max,
+					"recover_short": res.RecoverShort,
+					"recover_long":  res.RecoverLong,
+				})
+			}
+		}
+		response["class_resources"] = resourceList
+		response["class_resources_tip"] = "Use POST /api/characters/{id}/use-resource to spend resources."
+	}
+	
 	// Training Progress (v0.8.59 - Downtime Activities)
 	// Shows any ongoing training toward new proficiencies
 	var trainingProgressRaw string
@@ -6765,6 +7071,27 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
 			"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
 		},
+	}
+	
+	// Add class resources (v0.8.69 - Ki, Rage, Sorcery Points, etc.)
+	myTurnChaMod := modifier(cha)
+	maxResources := getAllMaxClassResources(class, level, myTurnChaMod)
+	if len(maxResources) > 0 {
+		currentResources := getCurrentClassResources(charID)
+		resourceList := []map[string]interface{}{}
+		for _, res := range getClassResources(class) {
+			if max, ok := maxResources[res.Key]; ok && max > 0 {
+				current := currentResources[res.Key]
+				resourceList = append(resourceList, map[string]interface{}{
+					"name":          res.Name,
+					"key":           res.Key,
+					"current":       current,
+					"max":           max,
+					"recover_short": res.RecoverShort,
+				})
+			}
+		}
+		characterInfo["class_resources"] = resourceList
 	}
 	
 	// Add ASI notification if points available
@@ -24391,6 +24718,9 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		warlockRecovery = "Pact Magic spell slots recovered!"
 	}
 	
+	// Recover class resources that refresh on short rest (v0.8.69)
+	classResourcesRecovered := recoverClassResources(charID, false)
+	
 	response := map[string]interface{}{
 		"success":             true,
 		"hit_dice_spent":      req.HitDice,
@@ -24407,6 +24737,11 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	if warlockRecovery != "" {
 		response["warlock_recovery"] = warlockRecovery
+	}
+	
+	// Show recovered class resources
+	if len(classResourcesRecovered) > 0 {
+		response["class_resources_recovered"] = classResourcesRecovered
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -24488,15 +24823,20 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			bonus_action_used = false,
 			reaction_used = false,
 			movement_remaining = 30,
-			ammo_used_since_rest = 0
+			ammo_used_since_rest = 0,
+			class_resources_used = '{}'
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
 	// Get updated info for response
-	var hp, maxHP int
-	db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", charID).Scan(&hp, &maxHP)
+	var hp, maxHP, cha int
+	db.QueryRow("SELECT hp, max_hp, cha FROM characters WHERE id = $1", charID).Scan(&hp, &maxHP, &cha)
 	
 	slots := getSpellSlots(class, level)
+	
+	// Get class resources info (v0.8.69)
+	chaMod := modifier(cha)
+	maxResources := getAllMaxClassResources(class, level, chaMod)
 	
 	response := map[string]interface{}{
 		"success":              true,
@@ -24508,6 +24848,11 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 		"hit_dice_total":       level,
 		"hit_die_type":         fmt.Sprintf("d%d", getHitDie(class)),
 		"message":              "Long rest complete. HP and spell slots restored.",
+	}
+	
+	// Show class resources restored
+	if len(maxResources) > 0 {
+		response["class_resources_restored"] = maxResources
 	}
 	
 	if exhaustionLevel > 0 {
@@ -25217,6 +25562,101 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	}
 	
 	http.Error(w, "Method not allowed. Use GET or PUT.", http.StatusMethodNotAllowed)
+}
+
+// handleUseResource godoc
+// @Summary Use a class resource
+// @Description Spend a class resource (Ki, Rage, Sorcery Points, etc.)
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param id path int true "Character ID"
+// @Param request body object true "Resource to use" example({"resource": "ki", "amount": 1})
+// @Success 200 {object} map[string]interface{} "Resource usage result"
+// @Failure 400 {object} map[string]interface{} "Invalid request or not enough resources"
+// @Security BasicAuth
+// @Router /characters/{id}/use-resource [post]
+func handleUseResource(w http.ResponseWriter, r *http.Request, charID int) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed. Use POST.", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Verify ownership
+	var ownerID int
+	err = db.QueryRow(`SELECT agent_id FROM characters WHERE id = $1`, charID).Scan(&ownerID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	var req struct {
+		Resource string `json:"resource"` // Resource key: ki, rage, sorcery_points, etc.
+		Amount   int    `json:"amount"`   // Amount to spend (default 1)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.Resource == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "missing_resource",
+			"message": "Specify 'resource' (ki, rage, sorcery_points, bardic_inspiration, channel_divinity, lay_on_hands, second_wind, action_surge, wild_shape, arcane_recovery)",
+		})
+		return
+	}
+	
+	if req.Amount <= 0 {
+		req.Amount = 1
+	}
+	
+	success, errMsg, remaining := useClassResource(charID, req.Resource, req.Amount)
+	
+	if !success {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "resource_unavailable",
+			"message": errMsg,
+		})
+		return
+	}
+	
+	// Get class info for resource name lookup
+	var class string
+	db.QueryRow("SELECT class FROM characters WHERE id = $1", charID).Scan(&class)
+	
+	// Find display name for the resource
+	resourceName := req.Resource
+	for _, res := range getClassResources(class) {
+		if res.Key == req.Resource {
+			resourceName = res.Name
+			break
+		}
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"resource":      req.Resource,
+		"resource_name": resourceName,
+		"spent":         req.Amount,
+		"remaining":     remaining,
+		"message":       fmt.Sprintf("Spent %d %s. %d remaining.", req.Amount, resourceName, remaining),
+	})
 }
 
 // handleHealth godoc

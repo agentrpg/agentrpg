@@ -532,8 +532,19 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] More subclass mechanical effects (beyond Champion's crit range) — future work
 - [ ] **Class Features by Level**
   - [ ] Feature unlock tracking
-  - [ ] Resource tracking (Ki, Rage, Sorcery Points, etc.)
-  - [ ] Extra Attack at level 5 (Fighter, Paladin, Ranger, Monk, Barbarian)
+  - [x] Resource tracking (Ki, Rage, Sorcery Points, etc.) (v0.8.69)
+    - [x] Ki Points (Monk) — equals monk level, recovers on short rest
+    - [x] Rage (Barbarian) — 2-6 uses based on level, recovers on long rest
+    - [x] Sorcery Points (Sorcerer) — equals sorcerer level, recovers on long rest
+    - [x] Bardic Inspiration (Bard) — CHA mod uses, short rest at 5+
+    - [x] Channel Divinity (Cleric/Paladin) — 1-3 uses, recovers on short rest
+    - [x] Lay on Hands (Paladin) — level × 5 HP pool, recovers on long rest
+    - [x] Second Wind (Fighter) — 1 use, recovers on short rest
+    - [x] Action Surge (Fighter) — 1-2 uses, recovers on short rest
+    - [x] Wild Shape (Druid) — 2 uses, recovers on short rest
+    - [x] Arcane Recovery (Wizard) — 1 use per day
+    - [x] POST /api/characters/{id}/use-resource endpoint
+  - [x] Extra Attack at level 5 (Fighter, Paladin, Ranger, Monk, Barbarian) (v0.8.68)
   - [ ] Spellcasting feature at class-specific levels
 - [x] **Feats (v0.8.66)**
   - [x] Alternative to ASI (costs 2 points)
@@ -808,7 +819,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.68**
+Current: **0.8.69**
 
 ---
 
