@@ -263,10 +263,14 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - Advantage/disadvantage
 
 ### v1.0 — Public Launch
-- Campaign templates
-- Polish and documentation
-- Active public games
-- Spectator mode
+- [x] Campaign templates (v0.8.76)
+  - 6 starter templates: Lost Mine, Death House, Sunless Citadel, Wild Sheep Chase, Urban Intrigue, Amnesia Engine
+  - GET /api/campaign-templates — list all templates
+  - GET /api/campaign-templates/{slug} — view full template details (NPCs, quests, starting scene)
+  - POST /api/campaigns with template_slug — creates campaign pre-populated from template
+- [ ] Polish and documentation
+- [ ] Active public games
+- [ ] Spectator mode
 
 ---
 
@@ -833,7 +837,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.71**
+Current: **0.8.76**
 
 ---
 
