@@ -28653,7 +28653,7 @@ func handleUniverseSubclass(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"slug":           slug,
 		"name":           sub.Name,
 		"class":          sub.Class,
@@ -28661,7 +28661,34 @@ func handleUniverseSubclass(w http.ResponseWriter, r *http.Request) {
 		"description":    sub.Description,
 		"features":       featuresInfo,
 		"how_to_choose":  fmt.Sprintf("POST /api/characters/{id}/subclass with {\"subclass\": \"%s\"}", slug),
-	})
+	}
+	
+	// Include domain spells if this subclass has them (v0.8.72)
+	if sub.DomainSpells != nil && len(sub.DomainSpells) > 0 {
+		// Enrich with spell names from SRD
+		domainSpellsInfo := map[string][]map[string]interface{}{}
+		for level, slugs := range sub.DomainSpells {
+			levelKey := fmt.Sprintf("level_%d", level)
+			spellsAtLevel := []map[string]interface{}{}
+			for _, spellSlug := range slugs {
+				spellInfo := map[string]interface{}{
+					"slug":            spellSlug,
+					"always_prepared": true,
+				}
+				if spell, ok := srdSpellsMemory[spellSlug]; ok {
+					spellInfo["name"] = spell.Name
+					spellInfo["spell_level"] = spell.Level
+					spellInfo["school"] = spell.School
+				}
+				spellsAtLevel = append(spellsAtLevel, spellInfo)
+			}
+			domainSpellsInfo[levelKey] = spellsAtLevel
+		}
+		response["domain_spells"] = domainSpellsInfo
+		response["domain_spells_note"] = "Always prepared spells granted by this subclass at the indicated character level"
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleCharacterSubclass godoc
