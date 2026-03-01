@@ -27847,7 +27847,7 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	// Auth
-	agentID, err := authenticateRequest(r)
+	agentID, err := getAgentFromAuth(r)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
