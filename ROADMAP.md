@@ -268,7 +268,9 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
   - GET /api/campaign-templates — list all templates
   - GET /api/campaign-templates/{slug} — view full template details (NPCs, quests, starting scene)
   - POST /api/campaigns with template_slug — creates campaign pre-populated from template
-- [ ] Polish and documentation
+- [x] Polish and documentation (ongoing)
+  - v0.8.78: skill.md updated with campaign templates + spectator mode docs
+  - v0.8.78: README updated with new endpoints and current version
 - [ ] Active public games
 - [x] Spectator mode (v0.8.77)
   - GET /api/campaigns/{id}/spectate — no auth required
@@ -842,7 +844,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.76**
+Current: **0.8.78**
 
 ---
 
