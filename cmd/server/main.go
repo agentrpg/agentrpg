@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.75"
+const version = "0.8.76"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -348,6 +348,7 @@ func main() {
 	http.HandleFunc("/api/mod/update-user", handleModUpdateUser)
 	http.HandleFunc("/api/campaigns/", handleCampaignByID)
 	http.HandleFunc("/api/campaign-templates", handleCampaignTemplates)
+	http.HandleFunc("/api/campaign-templates/", handleCampaignTemplateBySlug)
 	http.HandleFunc("/api/characters", handleCharacters)
 	http.HandleFunc("/api/characters/", handleCharacterByID)
 	http.HandleFunc("/api/my-turn", withAPILogging(handleMyTurn))
@@ -4557,6 +4558,9 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 		json.NewDecoder(r.Body).Decode(&req)
 		
 		// If template_slug provided, populate from template
+		// Template data for campaign document
+		var templateDoc map[string]interface{}
+		
 		if req.TemplateSlug != "" {
 			var tName, tDesc, tSetting, tThemes, tLevels, tScene string
 			var tQuests, tNPCs string
@@ -4581,6 +4585,35 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 					req.MaxLevel = req.MinLevel
 				}
 			}
+			
+			// Build campaign document from template (v0.8.76)
+			templateDoc = make(map[string]interface{})
+			templateDoc["template_source"] = req.TemplateSlug
+			templateDoc["starting_scene"] = tScene
+			
+			// Parse and add quests
+			var questsArray []interface{}
+			if err := json.Unmarshal([]byte(tQuests), &questsArray); err == nil && len(questsArray) > 0 {
+				// Add unique IDs to each quest
+				for i, q := range questsArray {
+					if qMap, ok := q.(map[string]interface{}); ok {
+						qMap["id"] = fmt.Sprintf("quest-%d", i+1)
+					}
+				}
+				templateDoc["quests"] = questsArray
+			}
+			
+			// Parse and add NPCs
+			var npcsArray []interface{}
+			if err := json.Unmarshal([]byte(tNPCs), &npcsArray); err == nil && len(npcsArray) > 0 {
+				// Add unique IDs to each NPC
+				for i, n := range npcsArray {
+					if nMap, ok := n.(map[string]interface{}); ok {
+						nMap["id"] = fmt.Sprintf("npc-%d", i+1)
+					}
+				}
+				templateDoc["npcs"] = npcsArray
+			}
 		}
 		
 		if req.Name == "" {
@@ -4599,17 +4632,25 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 			req.MaxLevel = req.MinLevel
 		}
 		
+		// Serialize campaign document if we have one from template
+		campaignDocJSON := "{}"
+		if templateDoc != nil {
+			if docBytes, err := json.Marshal(templateDoc); err == nil {
+				campaignDocJSON = string(docBytes)
+			}
+		}
+		
 		var id int
 		err = db.QueryRow(
-			"INSERT INTO lobbies (name, dm_id, max_players, setting, min_level, max_level) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id",
-			req.Name, agentID, req.MaxPlayers, req.Setting, req.MinLevel, req.MaxLevel,
+			"INSERT INTO lobbies (name, dm_id, max_players, setting, min_level, max_level, campaign_document) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id",
+			req.Name, agentID, req.MaxPlayers, req.Setting, req.MinLevel, req.MaxLevel, campaignDocJSON,
 		).Scan(&id)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
 			return
 		}
 		levelReq := formatLevelRequirement(req.MinLevel, req.MaxLevel)
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			"success": true, 
 			"campaign_id": id,
 			"level_requirement": levelReq,
@@ -4632,7 +4673,20 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 				"4. Narrate player actions as they come in",
 				"5. When battle_recommended appears, steer toward combat!",
 			},
-		})
+		}
+		
+		// Add template info to response (v0.8.76)
+		if templateDoc != nil {
+			response["template_populated"] = map[string]interface{}{
+				"template": req.TemplateSlug,
+				"quests_added": templateDoc["quests"] != nil,
+				"npcs_added": templateDoc["npcs"] != nil,
+				"starting_scene_set": templateDoc["starting_scene"] != nil,
+				"note": "Campaign document pre-populated from template. Use GET /api/campaigns/{id}/campaign to view.",
+			}
+		}
+		
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 	
@@ -6069,6 +6123,70 @@ func handleCampaignTemplates(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// handleCampaignTemplateBySlug godoc
+// @Summary Get campaign template details
+// @Description Get full details of a campaign template including starting scene, NPCs, and quests
+// @Tags Campaigns
+// @Produce json
+// @Param slug path string true "Template slug"
+// @Success 200 {object} map[string]interface{} "Template details"
+// @Failure 404 {object} map[string]interface{} "Template not found"
+// @Router /campaign-templates/{slug} [get]
+func handleCampaignTemplateBySlug(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "GET" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Extract slug from path: /api/campaign-templates/{slug}
+	slug := strings.TrimPrefix(r.URL.Path, "/api/campaign-templates/")
+	if slug == "" {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "template slug required"})
+		return
+	}
+	
+	var name, description, setting, themes, levels, scene string
+	var questsJSON, npcsJSON string
+	var sessions int
+	err := db.QueryRow(`
+		SELECT name, description, setting, themes, recommended_levels, session_count_estimate, 
+		       starting_scene, initial_quests, initial_npcs
+		FROM campaign_templates WHERE slug = $1
+	`, slug).Scan(&name, &description, &setting, &themes, &levels, &sessions, &scene, &questsJSON, &npcsJSON)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "template_not_found", "slug": slug})
+		return
+	}
+	
+	// Parse quests and NPCs from JSON
+	var quests, npcs []interface{}
+	json.Unmarshal([]byte(questsJSON), &quests)
+	json.Unmarshal([]byte(npcsJSON), &npcs)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"slug":               slug,
+		"name":               name,
+		"description":        description,
+		"setting":            setting,
+		"themes":             themes,
+		"recommended_levels": levels,
+		"estimated_sessions": sessions,
+		"starting_scene":     scene,
+		"initial_quests":     quests,
+		"initial_npcs":       npcs,
+		"create_from_template": map[string]interface{}{
+			"endpoint": "POST /api/campaigns",
+			"body":     map[string]interface{}{"template_slug": slug},
+			"note":     "Creates a new campaign pre-populated with this template's NPCs, quests, and starting scene",
+		},
+	})
 }
 
 // handleCharacters godoc
