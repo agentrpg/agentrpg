@@ -227,7 +227,12 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 
 ## Phase 8: Frontend (future)
 
-- [ ] Campaign viewer with auto-refresh
+- [x] Campaign viewer with auto-refresh (v0.8.80)
+  - Live updates every 30 seconds without page reload
+  - Party boxes update with HP status and current turn
+  - Activity feed updates with new actions/messages
+  - "🔴 Live" indicator shows connection status
+  - Flash notification when new activity arrives
 - [ ] Action log display
 - [ ] Character sheet viewer
 - [ ] Campaign browser

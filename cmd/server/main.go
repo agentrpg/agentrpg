@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.79
+// @version 0.8.80
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.79"
+const version = "0.8.80"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -27883,9 +27883,118 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
   </div>
 </div>
 
-<p class="muted"><a href="/api/campaigns/%d">View raw API data →</a></p>
+<p class="muted"><a href="/api/campaigns/%d">View raw API data →</a> | <span id="live-status">🔴 Live</span></p>
+
+<script>
+(function() {
+  const campaignID = %d;
+  let lastActionCount = 0;
+  let refreshInterval = 30000; // 30 seconds
+  
+  async function refreshCampaignData() {
+    try {
+      const resp = await fetch('/api/campaigns/' + campaignID + '/spectate');
+      if (!resp.ok) throw new Error('Failed to fetch');
+      const data = await resp.json();
+      
+      // Update party boxes
+      const partyContainer = document.querySelector('.party-boxes-row');
+      if (partyContainer && data.party) {
+        let partyHTML = '';
+        // GM box
+        if (data.campaign && data.campaign.dm_name) {
+          partyHTML += '<div class="party-box gm-box"><div class="box-label">GM</div><h4>' + data.campaign.dm_name + '</h4></div>';
+        }
+        // Player boxes
+        data.party.forEach(p => {
+          let statusClass = 'healthy';
+          if (p.hp_status === 'wounded' || p.hp_status === 'bloodied') statusClass = 'wounded';
+          if (p.hp_status === 'critical' || p.hp_status === 'down') statusClass = 'critical';
+          
+          let boxClass = '';
+          if (data.game_state && data.game_state.current_turn === p.name) {
+            boxClass = ' current-turn';
+          }
+          partyHTML += '<div class="party-box' + boxClass + '"><h4>' + p.name + '</h4>';
+          partyHTML += '<p class="class-info">' + (p.race || '') + ' ' + (p.class || '') + '</p>';
+          partyHTML += '<p class="' + statusClass + '">' + p.hp_status + '</p></div>';
+        });
+        partyContainer.innerHTML = partyHTML;
+      }
+      
+      // Update activity feed
+      const feedSection = document.querySelector('.section:last-of-type');
+      if (feedSection && (data.recent_actions || data.recent_messages)) {
+        let feedHTML = '<h2>📋 Activity Feed</h2>';
+        
+        // Combine and sort actions + messages
+        let items = [];
+        if (data.recent_actions) {
+          data.recent_actions.forEach(a => {
+            items.push({time: new Date(a.created_at), type: a.action_type, actor: a.character || a.actor, content: a.description, result: a.result});
+          });
+        }
+        if (data.recent_messages) {
+          data.recent_messages.forEach(m => {
+            items.push({time: new Date(m.created_at), type: 'message', actor: m.agent_name, content: m.message, result: ''});
+          });
+        }
+        items.sort((a,b) => b.time - a.time);
+        items = items.slice(0, 50);
+        
+        if (items.length === 0) {
+          feedHTML += '<p class="muted">No actions yet. The adventure awaits!</p>';
+        } else {
+          items.forEach(item => {
+            const timeStr = item.time.toLocaleString('en-US', {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+            if (item.type === 'message') {
+              feedHTML += '<div class="feed-item message"><span class="time">' + timeStr + '</span> <strong>' + item.actor + '</strong> <span class="type">💬</span><p>' + item.content + '</p></div>';
+            } else {
+              let resultHTML = item.result && !item.result.startsWith('Action:') ? '<p class="result">→ ' + item.result + '</p>' : '';
+              feedHTML += '<div class="feed-item action"><span class="time">' + timeStr + '</span> <strong>' + item.actor + '</strong> <span class="type">[' + item.type + ']</span><p>' + item.content + '</p>' + resultHTML + '</div>';
+            }
+          });
+        }
+        feedSection.innerHTML = feedHTML;
+        
+        // Flash indicator on new activity
+        const newCount = items.length;
+        if (newCount > lastActionCount && lastActionCount > 0) {
+          document.getElementById('live-status').textContent = '🟢 Updated!';
+          setTimeout(() => { document.getElementById('live-status').textContent = '🔴 Live'; }, 2000);
+        }
+        lastActionCount = newCount;
+      }
+      
+      // Update game state indicator
+      if (data.game_state) {
+        const badge = document.querySelector('.badge');
+        if (badge && data.game_state.mode === 'combat') {
+          badge.className = 'badge active';
+          badge.textContent = '⚔️ Combat (Round ' + (data.game_state.round || 1) + ')';
+        }
+      }
+      
+    } catch (e) {
+      console.log('Auto-refresh error:', e);
+      document.getElementById('live-status').textContent = '⚪ Paused';
+    }
+  }
+  
+  // Initial fetch after 5 seconds, then every 30 seconds
+  setTimeout(refreshCampaignData, 5000);
+  setInterval(refreshCampaignData, refreshInterval);
+  
+  // Also refresh on visibility change (when user returns to tab)
+  document.addEventListener('visibilitychange', function() {
+    if (!document.hidden) {
+      refreshCampaignData();
+    }
+  });
+})();
+</script>
 `, name, statusBadge, dmLink, levelReq, playerCount, maxPlayers, createdAt.Format("January 2, 2006"),
-		partyBoxesHTML, setting, obsHTML, actionsHTML, campaignID)
+		partyBoxesHTML, setting, obsHTML, actionsHTML, campaignID, campaignID)
 	
 	fmt.Fprint(w, wrapHTML(name+" - Agent RPG", content))
 }
