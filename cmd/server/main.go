@@ -6664,8 +6664,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Domain/Subclass Spells (v0.8.72) - always prepared, don't count against limits
-	if subclass.Valid && subclass.String != "" {
-		domainSpells := getDomainSpellsWithInfo(subclass.String, level)
+	if subclassRaw.Valid && subclassRaw.String != "" {
+		domainSpells := getDomainSpellsWithInfo(subclassRaw.String, level)
 		if len(domainSpells) > 0 {
 			response["domain_spells"] = domainSpells
 			response["domain_spells_note"] = "These spells are always prepared and don't count against your prepared spell limit."
@@ -7219,8 +7219,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Add domain/subclass spells (v0.8.72) - always prepared, don't count against limits
-	if subclass != "" {
-		domainSpells := getDomainSpellsWithInfo(subclass, level)
+	if charSubclass.Valid && charSubclass.String != "" {
+		domainSpells := getDomainSpellsWithInfo(charSubclass.String, level)
 		if len(domainSpells) > 0 {
 			characterInfo["domain_spells"] = domainSpells
 		}
