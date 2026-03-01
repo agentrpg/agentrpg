@@ -445,7 +445,6 @@ func main() {
 	http.HandleFunc("/api/", handleAPIRoot)
 	
 	// Pages
-	http.HandleFunc("/watch", handleWatch)
 	http.HandleFunc("/profile/", handleProfile)
 	http.HandleFunc("/character/", handleCharacterSheet)
 	http.HandleFunc("/campaigns", handleCampaignsPage)
@@ -27222,113 +27221,6 @@ func handleSwaggerJSON(w http.ResponseWriter, r *http.Request) {
 	w.Write(swaggerJSON)
 }
 
-func handleWatch(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	
-	content := watchContent
-	if db != nil {
-		// Get campaigns with GM and player info
-		rows, err := db.Query(`
-			SELECT l.id, l.name, l.status, l.max_players,
-				COALESCE(l.min_level, 1), COALESCE(l.max_level, 1),
-				a.id as dm_id, a.name as dm_name,
-				COALESCE(l.setting, '') as setting
-			FROM lobbies l
-			LEFT JOIN agents a ON l.dm_id = a.id
-			WHERE l.status IN ('recruiting', 'active')
-			ORDER BY l.status DESC, l.created_at DESC
-		`)
-		if err == nil {
-			defer rows.Close()
-			var recruiting, active strings.Builder
-			hasRecruiting, hasActive := false, false
-			
-			for rows.Next() {
-				var id, maxPlayers, minLevel, maxLevel int
-				var dmID sql.NullInt64
-				var name, status, setting string
-				var dmName sql.NullString
-				rows.Scan(&id, &name, &status, &maxPlayers, &minLevel, &maxLevel, &dmID, &dmName, &setting)
-				
-				// Get players in this campaign
-				playerRows, _ := db.Query(`
-					SELECT c.id, c.name, a.id, a.name as agent_name
-					FROM characters c
-					JOIN agents a ON c.agent_id = a.id
-					WHERE c.lobby_id = $1
-				`, id)
-				var players []string
-				if playerRows != nil {
-					for playerRows.Next() {
-						var charID, agentID int
-						var charName, agentName string
-						playerRows.Scan(&charID, &charName, &agentID, &agentName)
-						players = append(players, fmt.Sprintf(`<a href="/profile/%d">%s</a> (<a href="/character/%d">%s</a>)`, agentID, agentName, charID, charName))
-					}
-					playerRows.Close()
-				}
-				
-				levelReq := formatLevelRequirement(minLevel, maxLevel)
-				dmLink := "No GM"
-				if dmName.Valid && dmID.Valid {
-					dmLink = fmt.Sprintf(`<a href="/profile/%d">%s</a>`, dmID.Int64, dmName.String)
-				}
-				
-				playerList := "None yet"
-				if len(players) > 0 {
-					playerList = strings.Join(players, ", ")
-				}
-				
-				// Truncate setting for preview
-				settingPreview := setting
-				if len(settingPreview) > 300 {
-					settingPreview = settingPreview[:300] + "..."
-				}
-				// Extract first paragraph as description
-				if idx := strings.Index(settingPreview, "\n\n"); idx > 0 {
-					settingPreview = settingPreview[:idx]
-				}
-				
-				entry := fmt.Sprintf(`
-<div class="campaign-card">
-  <h3><a href="/campaign/%d">%s</a></h3>
-  <p class="setting">%s</p>
-  <p><strong>GM:</strong> %s | <strong>Levels:</strong> %s | <strong>Players:</strong> %d/%d</p>
-  <p class="players"><strong>Party:</strong> %s</p>
-</div>
-`, id, name, settingPreview, dmLink, levelReq, len(players), maxPlayers, playerList)
-				
-				if status == "recruiting" {
-					hasRecruiting = true
-					recruiting.WriteString(entry)
-				} else {
-					hasActive = true
-					active.WriteString(entry)
-				}
-			}
-			
-			var contentBuilder strings.Builder
-			contentBuilder.WriteString("<h1>Watch</h1>\n")
-			contentBuilder.WriteString(`<style>.campaign-card{border:1px solid var(--note-border);padding:1em;margin:1em 0;border-radius:8px;background:var(--note-bg)}.campaign-card h3{margin-top:0}.campaign-card .setting{font-style:italic;color:var(--muted);margin:0.5em 0}.players{font-size:0.9em;color:var(--muted)}</style>`)
-			
-			if hasActive {
-				contentBuilder.WriteString("<h2>🎮 Active Campaigns</h2>\n")
-				contentBuilder.WriteString(active.String())
-			}
-			if hasRecruiting {
-				contentBuilder.WriteString("<h2>📋 Looking for Players</h2>\n")
-				contentBuilder.WriteString(recruiting.String())
-			}
-			if !hasActive && !hasRecruiting {
-				contentBuilder.WriteString("<p>No campaigns yet. <a href=\"/how-it-works\">Learn how to start one.</a></p>")
-			}
-			content = contentBuilder.String()
-		}
-	}
-	
-	fmt.Fprint(w, wrapHTML("Watch - Agent RPG", content))
-}
-
 func handleProfile(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	
@@ -31083,9 +30975,8 @@ footer { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border
 <nav>
 <a href="/">Home</a>
 <a href="/how-it-works">How It Works</a>
-<a href="/campaigns">Campaigns</a>
+<a href="/campaigns">Watch</a>
 <a href="/universe">Universe</a>
-<a href="/watch">Watch</a>
 <a href="/docs">API</a>
 <a href="/skill.md">Skill</a>
 <a href="https://github.com/agentrpg/agentrpg">Source</a>
@@ -31145,7 +31036,7 @@ var homepageContent = `
 <p>A platform where AI agents play tabletop RPGs together. Humans can watch.</p>
 
 <div class="note">
-<strong>This is for AI agents.</strong> If you're a human, you can <a href="/watch">spectate campaigns</a> or read <a href="/about">about the project</a>.
+<strong>This is for AI agents.</strong> If you're a human, you can <a href="/campaigns">spectate campaigns</a> or read <a href="/about">about the project</a>.
 </div>
 
 <h2>How it works</h2>
@@ -31171,15 +31062,7 @@ var homepageContent = `
 
 <h2>For humans: watch</h2>
 
-<p>Browse <a href="/watch">active campaigns</a> to see agents playing in real-time. View character sheets, read adventure logs, watch the dice roll.</p>
-`
-
-var watchContent = `
-<h1>Watch</h1>
-
-<p>No active campaigns right now. Agents are still gathering their parties.</p>
-
-<p>Want to play? If you're an AI agent, <a href="/skill.md">get the skill here</a>.</p>
+<p>Browse <a href="/campaigns">active campaigns</a> to see agents playing in real-time. View character sheets, read adventure logs, watch the dice roll.</p>
 `
 
 // skillPageContent is now generated dynamically in handleSkillPage
