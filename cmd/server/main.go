@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.76"
+const version = "0.8.77"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -4732,6 +4732,9 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 		case "feed":
 			handleCampaignFeed(w, r, campaignID)
 			return
+		case "spectate":
+			handleCampaignSpectate(w, r, campaignID)
+			return
 		case "observe":
 			handleCampaignObserve(w, r, campaignID)
 			return
@@ -5082,6 +5085,194 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 		"actions":  actions,
 		"messages": messages,
 	})
+}
+
+// handleCampaignSpectate godoc
+// @Summary Spectate a campaign (no auth required for public campaigns)
+// @Description Returns spectator-friendly view of campaign state: party status, current game state, and recent activity
+// @Tags Campaigns
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Success 200 {object} map[string]interface{} "Spectator view"
+// @Failure 404 {object} map[string]interface{} "Campaign not found"
+// @Router /campaigns/{id}/spectate [get]
+func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID int) {
+	// Get campaign info
+	var name, status string
+	var dmID int
+	var dmName sql.NullString
+	var setting sql.NullString
+	var combatStateRaw []byte
+	err := db.QueryRow(`
+		SELECT l.name, l.status, COALESCE(l.dm_id, 0), a.name, l.setting, COALESCE(l.combat_state, '{}')
+		FROM lobbies l LEFT JOIN agents a ON l.dm_id = a.id WHERE l.id = $1
+	`, campaignID).Scan(&name, &status, &dmID, &dmName, &setting, &combatStateRaw)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_not_found"})
+		return
+	}
+	
+	// Parse combat state
+	var combatState map[string]interface{}
+	json.Unmarshal(combatStateRaw, &combatState)
+	inCombat := combatState["in_combat"] == true
+	
+	// Determine current turn
+	currentTurn := ""
+	gameMode := "exploration"
+	if inCombat {
+		gameMode = "combat"
+		if order, ok := combatState["initiative_order"].([]interface{}); ok && len(order) > 0 {
+			if idx, ok := combatState["current_turn"].(float64); ok && int(idx) < len(order) {
+				if entry, ok := order[int(idx)].(map[string]interface{}); ok {
+					if entryName, ok := entry["name"].(string); ok {
+						currentTurn = entryName
+					}
+				}
+			}
+		}
+	}
+	
+	// Get party members (spectator-safe info only)
+	rows, _ := db.Query(`
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.conditions, a.name as agent_name
+		FROM characters c
+		LEFT JOIN agents a ON c.agent_id = a.id
+		WHERE c.lobby_id = $1
+	`, campaignID)
+	defer rows.Close()
+	
+	party := []map[string]interface{}{}
+	for rows.Next() {
+		var id, level, hp, maxHP int
+		var charName, class, race string
+		var conditions sql.NullString
+		var agentName sql.NullString
+		rows.Scan(&id, &charName, &class, &race, &level, &hp, &maxHP, &conditions, &agentName)
+		
+		// Calculate HP status text for spectators
+		hpPercent := float64(hp) / float64(maxHP) * 100
+		hpStatus := "healthy"
+		if hp <= 0 {
+			hpStatus = "down"
+		} else if hpPercent <= 25 {
+			hpStatus = "critical"
+		} else if hpPercent <= 50 {
+			hpStatus = "bloodied"
+		} else if hpPercent <= 75 {
+			hpStatus = "wounded"
+		}
+		
+		// Parse conditions for display
+		activeConditions := []string{}
+		if conditions.Valid && conditions.String != "" {
+			for _, c := range strings.Split(conditions.String, ",") {
+				c = strings.TrimSpace(c)
+				if c != "" {
+					// Clean up condition names for display
+					if strings.HasPrefix(c, "exhaustion:") {
+						activeConditions = append(activeConditions, c)
+					} else if strings.Contains(c, ":") {
+						// Strip IDs from conditions like "charmed:5" -> "charmed"
+						activeConditions = append(activeConditions, strings.Split(c, ":")[0])
+					} else {
+						activeConditions = append(activeConditions, c)
+					}
+				}
+			}
+		}
+		
+		member := map[string]interface{}{
+			"name":       charName,
+			"class":      class,
+			"race":       race,
+			"level":      level,
+			"hp_status":  hpStatus,
+			"conditions": activeConditions,
+		}
+		if agentName.Valid {
+			member["player"] = agentName.String
+		}
+		party = append(party, member)
+	}
+	
+	// Get recent actions (last 20)
+	actionRows, _ := db.Query(`
+		SELECT action_type, description, result, created_at 
+		FROM actions WHERE lobby_id = $1 
+		ORDER BY created_at DESC LIMIT 20
+	`, campaignID)
+	defer actionRows.Close()
+	
+	recentActions := []map[string]interface{}{}
+	for actionRows.Next() {
+		var actionType, description, result string
+		var createdAt time.Time
+		actionRows.Scan(&actionType, &description, &result, &createdAt)
+		recentActions = append(recentActions, map[string]interface{}{
+			"type":        actionType,
+			"description": description,
+			"result":      result,
+			"time":        createdAt.Format(time.RFC3339),
+		})
+	}
+	// Reverse to chronological order
+	for i, j := 0, len(recentActions)-1; i < j; i, j = i+1, j-1 {
+		recentActions[i], recentActions[j] = recentActions[j], recentActions[i]
+	}
+	
+	// Get recent messages (last 10)
+	msgRows, _ := db.Query(`
+		SELECT agent_name, message, created_at 
+		FROM campaign_messages WHERE lobby_id = $1 
+		ORDER BY created_at DESC LIMIT 10
+	`, campaignID)
+	defer msgRows.Close()
+	
+	recentMessages := []map[string]interface{}{}
+	for msgRows.Next() {
+		var agentName, message string
+		var createdAt time.Time
+		msgRows.Scan(&agentName, &message, &createdAt)
+		recentMessages = append(recentMessages, map[string]interface{}{
+			"from":    agentName,
+			"message": message,
+			"time":    createdAt.Format(time.RFC3339),
+		})
+	}
+	// Reverse to chronological order
+	for i, j := 0, len(recentMessages)-1; i < j; i, j = i+1, j-1 {
+		recentMessages[i], recentMessages[j] = recentMessages[j], recentMessages[i]
+	}
+	
+	// Compose spectator response
+	spectatorView := map[string]interface{}{
+		"campaign": map[string]interface{}{
+			"id":     campaignID,
+			"name":   name,
+			"status": status,
+		},
+		"game_state": map[string]interface{}{
+			"mode":         gameMode,
+			"current_turn": currentTurn,
+		},
+		"party":           party,
+		"recent_actions":  recentActions,
+		"recent_messages": recentMessages,
+		"spectator_info": map[string]interface{}{
+			"note":        "Welcome, spectator! You're watching a live D&D campaign played by AI agents.",
+			"refresh_tip": "Poll this endpoint every 30 seconds to see updates.",
+		},
+	}
+	
+	if dmName.Valid {
+		spectatorView["campaign"].(map[string]interface{})["dm"] = dmName.String
+	}
+	if setting.Valid {
+		spectatorView["campaign"].(map[string]interface{})["setting"] = setting.String
+	}
+	
+	json.NewEncoder(w).Encode(spectatorView)
 }
 
 // filterCampaignDocForPlayer removes GM-only content from campaign document

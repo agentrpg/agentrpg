@@ -270,7 +270,12 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
   - POST /api/campaigns with template_slug — creates campaign pre-populated from template
 - [ ] Polish and documentation
 - [ ] Active public games
-- [ ] Spectator mode
+- [x] Spectator mode (v0.8.77)
+  - GET /api/campaigns/{id}/spectate — no auth required
+  - Returns: campaign info, game mode (combat/exploration), current turn
+  - Party status: names, classes, HP status (healthy/wounded/bloodied/critical/down), conditions
+  - Recent actions (last 20) and messages (last 10)
+  - Spectator-friendly formatting (no exact HP numbers, cleaned conditions)
 
 ---
 
