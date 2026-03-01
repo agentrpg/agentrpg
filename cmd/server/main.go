@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.71
+// @version 0.8.72
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.71"
+const version = "0.8.72"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -6663,6 +6663,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["known_spells_tip"] = "Use PUT /api/characters/{id}/spells to update your known spells list."
 	}
 	
+	// Domain/Subclass Spells (v0.8.72) - always prepared, don't count against limits
+	if subclass.Valid && subclass.String != "" {
+		domainSpells := getDomainSpellsWithInfo(subclass.String, level)
+		if len(domainSpells) > 0 {
+			response["domain_spells"] = domainSpells
+			response["domain_spells_note"] = "These spells are always prepared and don't count against your prepared spell limit."
+		}
+	}
+	
 	// Feats
 	var characterFeats []string
 	json.Unmarshal(featsJSON, &characterFeats)
@@ -7207,6 +7216,14 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		characterInfo["known_spells"] = spellsAvailable
+	}
+	
+	// Add domain/subclass spells (v0.8.72) - always prepared, don't count against limits
+	if subclass != "" {
+		domainSpells := getDomainSpellsWithInfo(subclass, level)
+		if len(domainSpells) > 0 {
+			characterInfo["domain_spells"] = domainSpells
+		}
 	}
 	
 	// Add feats (v0.8.66)
@@ -20286,11 +20303,12 @@ type SubclassFeature struct {
 
 // Subclass represents a character subclass from the SRD
 type Subclass struct {
-	Name          string            `json:"name"`
-	Class         string            `json:"class"`         // Parent class (fighter, rogue, etc.)
-	SubclassLevel int               `json:"subclass_level"` // Level when subclass is chosen (3 for most, 1-2 for some)
-	Description   string            `json:"description"`
-	Features      []SubclassFeature `json:"features"`
+	Name          string              `json:"name"`
+	Class         string              `json:"class"`          // Parent class (fighter, rogue, etc.)
+	SubclassLevel int                 `json:"subclass_level"` // Level when subclass is chosen (3 for most, 1-2 for some)
+	Description   string              `json:"description"`
+	Features      []SubclassFeature   `json:"features"`
+	DomainSpells  map[int][]string    `json:"domain_spells,omitempty"` // Always-prepared spells by character level (v0.8.72)
 }
 
 // Available subclasses - all 12 from the SRD
@@ -20482,6 +20500,13 @@ var availableSubclasses = map[string]Subclass{
 				},
 			},
 		},
+		DomainSpells: map[int][]string{
+			3:  {"protection-from-evil-and-good", "sanctuary"}, // 1st-level oath spells at paladin level 3
+			5:  {"lesser-restoration", "zone-of-truth"},         // 2nd-level oath spells at paladin level 5
+			9:  {"beacon-of-hope", "dispel-magic"},              // 3rd-level oath spells at paladin level 9
+			13: {"freedom-of-movement", "guardian-of-faith"},    // 4th-level oath spells at paladin level 13
+			17: {"commune", "flame-strike"},                     // 5th-level oath spells at paladin level 17
+		},
 	},
 	"hunter": {
 		Name:          "Hunter",
@@ -20617,6 +20642,13 @@ var availableSubclasses = map[string]Subclass{
 					"supreme_healing": "true",
 				},
 			},
+		},
+		DomainSpells: map[int][]string{
+			1: {"bless", "cure-wounds"},                      // 1st-level spells at cleric level 1
+			3: {"lesser-restoration", "spiritual-weapon"},     // 2nd-level spells at cleric level 3
+			5: {"beacon-of-hope", "revivify"},                 // 3rd-level spells at cleric level 5
+			7: {"death-ward", "guardian-of-faith"},            // 4th-level spells at cleric level 7
+			9: {"mass-cure-wounds", "raise-dead"},             // 5th-level spells at cleric level 9
 		},
 	},
 	"land": {
@@ -20794,6 +20826,13 @@ var availableSubclasses = map[string]Subclass{
 					"hurl_through_hell": "true",
 				},
 			},
+		},
+		DomainSpells: map[int][]string{
+			1: {"burning-hands", "command"},           // 1st-level expanded spells at warlock level 1
+			3: {"blindness-deafness", "scorching-ray"}, // 2nd-level expanded spells at warlock level 3
+			5: {"fireball", "stinking-cloud"},          // 3rd-level expanded spells at warlock level 5
+			7: {"fire-shield", "wall-of-fire"},         // 4th-level expanded spells at warlock level 7
+			9: {"flame-strike", "hallow"},              // 5th-level expanded spells at warlock level 9
 		},
 	},
 	"evocation": {
@@ -21131,6 +21170,55 @@ func getSubclassMechanic(subclassSlug string, level int, mechanic string) (strin
 		}
 	}
 	return "", false
+}
+
+// getDomainSpells returns the always-prepared spells for a character based on subclass (v0.8.72)
+// These spells don't count against prepared spell limits and are automatically known.
+// For clerics: domain spells, for paladins: oath spells, for warlocks: expanded spell list
+func getDomainSpells(subclassSlug string, level int) []string {
+	sub, ok := availableSubclasses[subclassSlug]
+	if !ok || sub.DomainSpells == nil {
+		return nil
+	}
+	
+	var spells []string
+	// Add all domain spells for levels the character has reached
+	for spellLevel, spellList := range sub.DomainSpells {
+		if level >= spellLevel {
+			spells = append(spells, spellList...)
+		}
+	}
+	return spells
+}
+
+// getDomainSpellsWithInfo returns domain spells with enriched SRD info (v0.8.72)
+func getDomainSpellsWithInfo(subclassSlug string, level int) []map[string]interface{} {
+	slugs := getDomainSpells(subclassSlug, level)
+	if len(slugs) == 0 {
+		return nil
+	}
+	
+	var result []map[string]interface{}
+	for _, slug := range slugs {
+		if spell, ok := srdSpellsMemory[slug]; ok {
+			result = append(result, map[string]interface{}{
+				"slug":        slug,
+				"name":        spell.Name,
+				"level":       spell.Level,
+				"school":      spell.School,
+				"casting_time": spell.CastingTime,
+				"always_prepared": true,
+			})
+		} else {
+			// Spell not found in SRD, still include it
+			result = append(result, map[string]interface{}{
+				"slug":            slug,
+				"name":            slug,
+				"always_prepared": true,
+			})
+		}
+	}
+	return result
 }
 
 // getCritRange returns the critical hit range for a character (default 20, can be 19 or 18 for Champions)

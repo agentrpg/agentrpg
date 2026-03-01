@@ -482,9 +482,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] All slots same level (via warlockSlots table)
   - [x] Recover on SHORT rest (implemented in handleShortRest)
   - [ ] Separate tracking for multiclass (needs multiclassing feature)
-- [ ] **Domain/Subclass Spells**
-  - [ ] Always prepared, don't count against limit
-  - [ ] Cleric domains, Paladin oaths, etc.
+- [x] **Domain/Subclass Spells** (v0.8.72)
+  - [x] Always prepared, don't count against limit
+  - [x] Cleric Life domain, Paladin Devotion oath, Warlock Fiend patron
+  - [x] `getDomainSpells()` and `getDomainSpellsWithInfo()` helpers
+  - [x] Shown in character sheet and `/api/my-turn`
 - [x] **Upcasting (v0.8.28)**
   - [x] Use higher slot for increased effect ("cast fireball at level 5", "at 5th level", etc.)
   - [x] Damage scaling from SRD data (damage_at_slot_level)
