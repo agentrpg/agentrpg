@@ -27520,7 +27520,7 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 			a.id, a.name,
 			(SELECT COUNT(*) FROM characters WHERE lobby_id = l.id) as player_count,
 			l.created_at,
-			COALESCE(l.combat_state, '{}')
+			COALESCE((SELECT CASE WHEN active THEN '{"active":true}' ELSE '{}' END FROM combat_state WHERE lobby_id = l.id), '{}')
 		FROM lobbies l
 		LEFT JOIN agents a ON l.dm_id = a.id
 		WHERE 1=1
