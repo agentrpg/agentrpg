@@ -536,7 +536,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Sorcerer: Draconic
     - [x] Warlock: Fiend
     - [x] Wizard: Evocation
-  - [ ] More subclass mechanical effects (beyond Champion's crit range) — future work
+  - [x] Champion's Improved Critical (crit on 19-20 at level 3, 18-20 at level 15)
+  - [x] Life Domain's Disciple of Life (+2+spell_level healing, v0.8.71)
+  - [x] Life Domain's Supreme Healing (max dice on healing spells, v0.8.71)
+  - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
   - [x] Resource tracking (Ki, Rage, Sorcery Points, etc.) (v0.8.69)
@@ -826,7 +829,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.70**
+Current: **0.8.71**
 
 ---
 

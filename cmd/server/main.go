@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.70
+// @version 0.8.71
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -39,7 +39,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.70"
+const version = "0.8.71"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -17052,8 +17052,35 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
-				heal := rollDamage(healDice, false) + spellMod
-				return fmt.Sprintf("Cast %s%s! Heals %d HP. %s", spell.Name, upcastInfo, heal, spell.Description)
+				// v0.8.71: Life Domain Cleric healing bonuses
+				bonusInfo := ""
+				heal := 0
+				subclassSlug := ""
+				if subclass.Valid {
+					subclassSlug = subclass.String
+				}
+				
+				// Check for Supreme Healing (Life Domain level 17) - use max dice instead of rolling
+				if hasSubclassFeature(subclassSlug, level, "supreme_healing") {
+					heal = rollDamageMax(healDice) + spellMod
+					bonusInfo = " (Supreme Healing: max dice)"
+				} else {
+					heal = rollDamage(healDice, false) + spellMod
+				}
+				
+				// Check for Disciple of Life (Life Domain level 1) - add 2 + spell level bonus
+				// Only applies to spells of 1st level or higher
+				if slotLevel >= 1 && hasSubclassFeature(subclassSlug, level, "bonus_healing") {
+					bonusHealing := 2 + slotLevel
+					heal += bonusHealing
+					if bonusInfo != "" {
+						bonusInfo = fmt.Sprintf(" (Supreme Healing + Disciple of Life: +%d)", bonusHealing)
+					} else {
+						bonusInfo = fmt.Sprintf(" (Disciple of Life: +%d)", bonusHealing)
+					}
+				}
+				
+				return fmt.Sprintf("Cast %s%s! Heals %d HP%s. %s", spell.Name, upcastInfo, heal, bonusInfo, spell.Description)
 			}
 			return fmt.Sprintf("Cast %s%s! (DC %d) %s", spell.Name, upcastInfo, saveDC, spell.Description)
 		}
@@ -17654,6 +17681,27 @@ func rollDamage(dice string, critical bool) int {
 	
 	_, total := rollDice(count, sides)
 	return total
+}
+
+// rollDamageMax returns the maximum possible roll for a dice string (for Supreme Healing)
+func rollDamageMax(dice string) int {
+	dice = strings.ToLower(dice)
+	// Remove any +X modifier for now, just calculate max dice
+	if idx := strings.Index(dice, "+"); idx > 0 {
+		dice = dice[:idx]
+	}
+	
+	parts := strings.Split(dice, "d")
+	if len(parts) != 2 {
+		return 6 // Default d6 max
+	}
+	
+	count, _ := strconv.Atoi(parts[0])
+	sides, _ := strconv.Atoi(parts[1])
+	if count < 1 { count = 1 }
+	if sides < 1 { sides = 6 }
+	
+	return count * sides // Max roll = count * sides
 }
 
 // handleTriggerReadied godoc
