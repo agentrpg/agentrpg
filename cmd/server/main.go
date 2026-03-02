@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.91"
+const version = "0.8.92"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -7949,7 +7949,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		},
 		"your_options": map[string]interface{}{
 			"actions":       actions,
-			"bonus_actions": buildBonusActions(classKey, actionUsed, bonusActionUsed),
+			"bonus_actions": buildBonusActions(classKey, actionUsed, bonusActionUsed, conditions, charSubclass.String, level),
 			"movement":      buildMovementInfo(race, movementRemaining, conditions),
 			"reaction":      reactionStatus,
 			"action_economy": buildActionEconomy(class, level, actionUsed, bonusActionUsed, reactionUsed,
@@ -8113,13 +8113,26 @@ func parseStorySoFar(campaignDocRaw []byte) string {
 }
 
 // buildBonusActions returns available bonus actions based on class and current state
-func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool) []map[string]interface{} {
+// v0.8.92: Added conditions, subclass, level params for frenzy support
+func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool, conditions []string, subclass string, level int) []map[string]interface{} {
 	bonusActions := []map[string]interface{}{}
-	
+
 	if bonusActionUsed {
 		return bonusActions // Already used bonus action
 	}
-	
+
+	// Check conditions for raging/frenzying
+	isRaging := false
+	isFrenzying := false
+	for _, c := range conditions {
+		if c == "raging" {
+			isRaging = true
+		}
+		if c == "frenzying" {
+			isFrenzying = true
+		}
+	}
+
 	// Two-Weapon Fighting: available after using Attack action
 	if actionUsed {
 		bonusActions = append(bonusActions, map[string]interface{}{
@@ -8135,7 +8148,7 @@ func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool) []map[
 			"available":   false,
 		})
 	}
-	
+
 	// Class-specific bonus actions
 	switch classKey {
 	case "rogue":
@@ -8144,10 +8157,30 @@ func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool) []map[
 			"description": "Dash, Disengage, or Hide as a bonus action.",
 		})
 	case "barbarian":
-		bonusActions = append(bonusActions, map[string]interface{}{
-			"name":        "rage",
-			"description": "Enter a rage (if not already raging). Gain resistance to bludgeoning, piercing, and slashing damage, +2 damage on melee attacks. Berserkers gain Mindless Rage (immune to charm/frighten) at level 6.",
-		})
+		// Show rage if not already raging
+		if !isRaging {
+			bonusActions = append(bonusActions, map[string]interface{}{
+				"name":        "rage",
+				"description": "Enter a rage. Gain resistance to bludgeoning, piercing, and slashing damage, +2 damage on melee attacks. Berserkers gain Mindless Rage (immune to charm/frighten) at level 6.",
+			})
+		}
+		// v0.8.92: Berserker frenzy attack - available while frenzying
+		if subclass == "berserker" && level >= 3 {
+			if isFrenzying {
+				bonusActions = append(bonusActions, map[string]interface{}{
+					"name":        "frenzy_attack",
+					"description": "🔥 Frenzied melee attack! Make a melee weapon attack as a bonus action. Add rage damage bonus (+2/+3/+4 based on level).",
+					"example":     "frenzy_attack with greataxe",
+				})
+			} else if isRaging {
+				// Raging but not frenzying - show frenzy option (it's a free action)
+				bonusActions = append(bonusActions, map[string]interface{}{
+					"name":        "frenzy",
+					"description": "Enter a frenzy! Allows frenzy_attack (bonus action melee) each turn. ⚠️ WARNING: Causes 1 level of exhaustion when rage ends.",
+					"action_type": "free",
+				})
+			}
+		}
 	case "fighter":
 		bonusActions = append(bonusActions, map[string]interface{}{
 			"name":        "second_wind",
@@ -8167,7 +8200,7 @@ func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool) []map[
 			"description": "Spend 1 ki point to take the Dash or Disengage action, and your jump distance is doubled.",
 		})
 	}
-	
+
 	return bonusActions
 }
 
@@ -16997,7 +17030,7 @@ func getActionResourceType(actionType string) string {
 	case "attack", "cast", "dash", "disengage", "dodge", "help", "hide", "ready", "search", "use_item", "death_save", "grapple", "shove":
 		return "action"
 	// Bonus actions (consume bonus action - class/spell specific)
-	case "bonus_attack", "cunning_action", "offhand_attack", "second_wind", "action_surge", "rage", "bonus_cast":
+	case "bonus_attack", "cunning_action", "offhand_attack", "second_wind", "action_surge", "rage", "bonus_cast", "frenzy_attack":
 		return "bonus_action"
 	// Reactions (consume reaction - used on others' turns too)
 	case "opportunity_attack", "counterspell", "shield":
@@ -17006,7 +17039,7 @@ func getActionResourceType(actionType string) string {
 	case "move", "stand":
 		return "movement"
 	// Free actions (no resource cost)
-	case "drop", "speak", "interact", "other":
+	case "drop", "speak", "interact", "other", "frenzy":
 		return "free"
 	default:
 		// Default unknown actions to using the action
@@ -18084,31 +18117,116 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		return rageInfo
-	
-	case "end_rage":
-		// v0.8.89: End rage early
+
+	case "frenzy":
+		// v0.8.92: Berserker Frenzy - enter frenzy while raging
+		// Grants bonus action melee attack each turn, but 1 exhaustion when rage ends
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "barbarian" {
+			return "Only barbarians can frenzy!"
+		}
+		if !subclass.Valid || subclass.String != "berserker" {
+			return "Only Berserker barbarians can frenzy!"
+		}
+		if level < 3 {
+			return "Frenzy requires Berserker level 3+!"
+		}
+
+		// Check if already frenzying
 		var existingConds []byte
 		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
 		var currentConds []string
 		json.Unmarshal(existingConds, &currentConds)
-		
+
+		isRaging := false
+		isFrenzying := false
+		for _, c := range currentConds {
+			if c == "raging" {
+				isRaging = true
+			}
+			if c == "frenzying" {
+				isFrenzying = true
+			}
+		}
+
+		if !isRaging {
+			return "You must be raging to frenzy! Use 'rage' action first."
+		}
+		if isFrenzying {
+			return "You are already frenzying!"
+		}
+
+		// Add frenzying condition
+		currentConds = append(currentConds, "frenzying")
+		updatedConds, _ := json.Marshal(currentConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
+
+		return "🔥 FRENZY! You enter a frenzied rage. You can make a bonus action melee attack (frenzy_attack) on each of your turns. WARNING: When your rage ends, you will suffer 1 level of exhaustion."
+
+	case "end_rage":
+		// v0.8.89: End rage early
+		// v0.8.92: Check for frenzy exhaustion
+		var existingConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
+		var currentConds []string
+		json.Unmarshal(existingConds, &currentConds)
+
 		wasRaging := false
+		wasFrenzying := false
 		newConds := []string{}
 		for _, c := range currentConds {
 			if c == "raging" {
 				wasRaging = true
+			} else if c == "frenzying" {
+				wasFrenzying = true
 			} else {
 				newConds = append(newConds, c)
 			}
 		}
-		
+
 		if !wasRaging {
 			return "You are not currently raging."
 		}
-		
+
+		// Apply frenzy exhaustion if was frenzying
+		result := "Your rage ends."
+		if wasFrenzying {
+			// Get current exhaustion and increment
+			var currentExhaustion int
+			db.QueryRow("SELECT COALESCE(exhaustion_level, 0) FROM characters WHERE id = $1", charID).Scan(&currentExhaustion)
+			newExhaustion := currentExhaustion + 1
+			if newExhaustion > 6 {
+				newExhaustion = 6
+			}
+
+			// Update or add exhaustion condition
+			updatedConditions := []string{}
+			foundExhaustion := false
+			for _, c := range newConds {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(c)), "exhaustion:") {
+					updatedConditions = append(updatedConditions, fmt.Sprintf("exhaustion:%d", newExhaustion))
+					foundExhaustion = true
+				} else {
+					updatedConditions = append(updatedConditions, c)
+				}
+			}
+			if !foundExhaustion {
+				updatedConditions = append(updatedConditions, fmt.Sprintf("exhaustion:%d", newExhaustion))
+			}
+			newConds = updatedConditions
+
+			// Update exhaustion level in database
+			db.Exec("UPDATE characters SET exhaustion_level = $1 WHERE id = $2", newExhaustion, charID)
+
+			result = fmt.Sprintf("Your rage ends. The frenzy takes its toll — you gain 1 level of exhaustion (now at level %d).", newExhaustion)
+			if newExhaustion >= 6 {
+				result += " ☠️ EXHAUSTION LEVEL 6: You have died from exhaustion!"
+			}
+		}
+
 		updatedConds, _ := json.Marshal(newConds)
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
-		return "Your rage ends."
+		return result
 	
 	case "use_item":
 		// Parse item from description
@@ -18302,7 +18420,140 @@ func resolveAction(action, description string, charID int) string {
 		dmg := rollDamage(weapon.Damage, false)
 		return fmt.Sprintf("Offhand attack with %s%s: %d to hit%s. Damage: %d (TWF - no ability modifier)", 
 			weapon.Name, profInfo, totalAttack, rollInfo, dmg)
-	
+
+	case "frenzy_attack":
+		// v0.8.92: Berserker Frenzy bonus action attack
+		// While frenzying, you can make a melee weapon attack as a bonus action
+
+		// Verify is barbarian berserker
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "barbarian" {
+			return "Only barbarians can use frenzy attack!"
+		}
+		if !subclass.Valid || subclass.String != "berserker" {
+			return "Only Berserker barbarians can use frenzy attack!"
+		}
+
+		// Check conditions - must be raging AND frenzying
+		var existingConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
+		var currentConds []string
+		json.Unmarshal(existingConds, &currentConds)
+
+		isRaging := false
+		isFrenzying := false
+		for _, c := range currentConds {
+			if c == "raging" {
+				isRaging = true
+			}
+			if c == "frenzying" {
+				isFrenzying = true
+			}
+		}
+
+		if !isRaging {
+			return "You must be raging to use frenzy attack!"
+		}
+		if !isFrenzying {
+			return "You must be frenzying to use frenzy attack! Use 'frenzy' action while raging to enter frenzy."
+		}
+
+		// Parse weapon from description (or use default melee weapon)
+		weaponKey := parseWeaponFromDescription(description)
+		weapon, hasWeapon := srdWeapons[weaponKey]
+
+		if !hasWeapon {
+			return "Frenzy attack requires specifying a melee weapon (e.g., 'frenzy_attack with greataxe')."
+		}
+
+		// Validate weapon is melee
+		if weapon.Type != "melee" {
+			return fmt.Sprintf("Frenzy attack requires a melee weapon! %s is a ranged weapon.", weapon.Name)
+		}
+
+		// Determine attack modifier (DEX for finesse, STR otherwise)
+		frenzyAttackMod := modifier(str)
+		if containsProperty(weapon.Properties, "finesse") {
+			// Barbarian can use DEX for finesse weapons, but rage bonus only applies to STR attacks
+			// Most barbarians use STR anyway
+			frenzyAttackMod = modifier(dex)
+		}
+
+		// Add proficiency bonus if proficient
+		frenzyProficient := isWeaponProficient(weaponProfsStr, weaponKey)
+		if frenzyProficient {
+			frenzyAttackMod += proficiencyBonus(level)
+		}
+
+		// Get condition-based advantage/disadvantage (frenzy is always melee)
+		frenzyAdvantage, frenzyDisadvantage := getAttackModifiers(charID, currentConds, false)
+
+		// Raging grants advantage on STR checks (not attacks, but check for explicit advantage)
+		if requestedAdvantage {
+			frenzyAdvantage = true
+		}
+		if requestedDisadvantage {
+			frenzyDisadvantage = true
+		}
+
+		// Roll attack
+		var frenzyRoll, fRoll1, fRoll2 int
+		frenzyRollType := "normal"
+		if frenzyAdvantage && !frenzyDisadvantage {
+			frenzyRoll, fRoll1, fRoll2 = rollWithAdvantage()
+			frenzyRollType = "advantage"
+		} else if frenzyDisadvantage && !frenzyAdvantage {
+			frenzyRoll, fRoll1, fRoll2 = rollWithDisadvantage()
+			frenzyRollType = "disadvantage"
+		} else {
+			frenzyRoll = rollDie(20)
+			fRoll1, fRoll2 = frenzyRoll, 0
+		}
+
+		frenzyTotalAttack := frenzyRoll + frenzyAttackMod
+
+		frenzyRollInfo := ""
+		if frenzyRollType != "normal" {
+			frenzyRollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", frenzyRollType, fRoll1, fRoll2, frenzyRoll)
+		}
+
+		frenzyProfInfo := ""
+		if !frenzyProficient {
+			frenzyProfInfo = " (not proficient)"
+		}
+
+		// Determine damage modifier (STR for melee, rage bonus applies to STR attacks)
+		frenzyDamageMod := modifier(str)
+		// Add rage damage bonus (+2 at most levels, +3 at 9+, +4 at 16+)
+		rageDamageBonus := 2
+		if level >= 16 {
+			rageDamageBonus = 4
+		} else if level >= 9 {
+			rageDamageBonus = 3
+		}
+		frenzyDamageMod += rageDamageBonus
+
+		// Critical hit check (check for Improved Critical from Champion if multiclassed somehow)
+		critThreshold := 20
+
+		// Critical hit
+		if frenzyRoll >= critThreshold {
+			frenzyDmg := rollDamage(weapon.Damage, true) + frenzyDamageMod // crit = double dice
+			return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d (nat %d CRITICAL!)%s Damage: %d (%s + %d STR + %d rage)",
+				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRoll, frenzyRollInfo, frenzyDmg, weapon.Damage, modifier(str), rageDamageBonus)
+		}
+
+		// Critical miss
+		if frenzyRoll == 1 {
+			return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d (nat 1 - Critical miss!)%s",
+				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRollInfo)
+		}
+
+		// Normal hit
+		frenzyDmg := rollDamage(weapon.Damage, false) + frenzyDamageMod
+		return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d to hit%s. Damage: %d (%s + %d STR + %d rage)",
+			weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRollInfo, frenzyDmg, weapon.Damage, modifier(str), rageDamageBonus)
+
 	case "ready":
 		// Ready action: hold your action for a trigger condition
 		// Parse trigger from description (format: "trigger: X, action: Y" or just describe it)
