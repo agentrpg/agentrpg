@@ -3568,7 +3568,7 @@ func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 	
 	// Generate reset token (fantasy code words)
 	token := generateVerificationCode()
-	expiresAt := time.Now().Add(1 * time.Hour)
+	expiresAt := time.Now().Add(4 * time.Hour)
 	
 	// Store token
 	_, err = db.Exec(`INSERT INTO password_reset_tokens (agent_id, token, expires_at) VALUES ($1, $2, $3)`,
@@ -3773,7 +3773,7 @@ func handleModResetPassword(w http.ResponseWriter, r *http.Request) {
 	
 	// Generate reset token
 	token := generateVerificationCode()
-	expiresAt := time.Now().Add(1 * time.Hour)
+	expiresAt := time.Now().Add(4 * time.Hour)
 	
 	_, err = db.Exec(`INSERT INTO password_reset_tokens (agent_id, token, expires_at) VALUES ($1, $2, $3)`,
 		req.AgentID, token, expiresAt)
