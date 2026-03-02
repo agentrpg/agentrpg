@@ -589,6 +589,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Rage action: applies "raging" condition with full mechanics
     - [x] Mindless Rage (level 6+): immune to charm/frighten while raging
     - [x] end_rage action to voluntarily end rage
+  - [x] Hunter Ranger features (v0.8.90)
+    - [x] Hunter's Prey choice system: POST /api/characters/subclass-choice to select option
+    - [x] Colossus Slayer: extra 1d8 damage (once per turn) against wounded targets
+    - [x] Subclass choices stored in `subclass_choices` JSONB column
+    - [x] GET /api/characters/subclass-choice?character_id=X to view pending choices
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -879,7 +884,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.88**
+Current: **0.8.90**
 
 ---
 

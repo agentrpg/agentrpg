@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.89"
+const version = "0.8.90"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -440,6 +440,7 @@ func main() {
 	http.HandleFunc("/api/universe/subclasses", handleUniverseSubclasses)
 	http.HandleFunc("/api/universe/subclasses/", handleUniverseSubclass)
 	http.HandleFunc("/api/characters/subclass", handleCharacterSubclass)
+	http.HandleFunc("/api/characters/subclass-choice", handleCharacterSubclassChoice)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
 	http.HandleFunc("/api/", handleAPIRoot)
@@ -871,6 +872,10 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_resources JSONB DEFAULT '{}';
 		-- Tracks resources used since last rest: {"ki": 2, "rage": 1}
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_resources_used JSONB DEFAULT '{}';
+		
+		-- Subclass Choices (v0.8.90 - Store choices for subclass features like Hunter's Prey)
+		-- Example: {"hunters_prey": "colossus_slayer"} or {"hunters_prey": "giant_killer"}
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS subclass_choices JSONB DEFAULT '{}';
 		
 		-- Prepared Spells (v0.8.73 - Phase 8 Spell System)
 		-- JSONB array of spell slugs the character has prepared for the day
@@ -17640,8 +17645,27 @@ func resolveAction(action, description string, charID int) string {
 			if hasWeapon {
 				weaponName = weapon.Name
 			}
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, rollInfo, dmg)
+			
+			// Check for Hunter's Colossus Slayer on auto-crit (v0.8.90)
+			colossusSlayerNote := ""
+			if strings.ToLower(class) == "ranger" && subclass.Valid && subclass.String == "hunter" && level >= 3 {
+				var choicesJSON []byte
+				db.QueryRow("SELECT COALESCE(subclass_choices, '{}') FROM characters WHERE id = $1", charID).Scan(&choicesJSON)
+				var choices map[string]string
+				json.Unmarshal(choicesJSON, &choices)
+				if choices["hunters_prey"] == "colossus_slayer" && targetID > 0 {
+					var targetHP, targetMaxHP int
+					err := db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", targetID).Scan(&targetHP, &targetMaxHP)
+					if err == nil && targetHP < targetMaxHP {
+						colossusSlayerDmg := rollDie(8) + rollDie(8)
+						dmg += colossusSlayerDmg
+						colossusSlayerNote = fmt.Sprintf(" (+%d Colossus Slayer, 2d8 vs wounded)", colossusSlayerDmg)
+					}
+				}
+			}
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -17661,11 +17685,31 @@ func resolveAction(action, description string, charID int) string {
 			if hasWeapon {
 				weaponName = weapon.Name
 			}
+			
+			// Check for Hunter's Colossus Slayer on crit (v0.8.90)
+			// Extra 1d8 (doubled on crit = 2d8) against wounded targets
+			colossusSlayerNote := ""
+			if strings.ToLower(class) == "ranger" && subclass.Valid && subclass.String == "hunter" && level >= 3 {
+				var choicesJSON []byte
+				db.QueryRow("SELECT COALESCE(subclass_choices, '{}') FROM characters WHERE id = $1", charID).Scan(&choicesJSON)
+				var choices map[string]string
+				json.Unmarshal(choicesJSON, &choices)
+				if choices["hunters_prey"] == "colossus_slayer" && targetID > 0 {
+					var targetHP, targetMaxHP int
+					err := db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", targetID).Scan(&targetHP, &targetMaxHP)
+					if err == nil && targetHP < targetMaxHP {
+						colossusSlayerDmg := rollDie(8) + rollDie(8) // Doubled on crit
+						dmg += colossusSlayerDmg
+						colossusSlayerNote = fmt.Sprintf(" (+%d Colossus Slayer, 2d8 vs wounded)", colossusSlayerDmg)
+					}
+				}
+			}
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d", weaponName, totalAttack, critLabel, rollInfo, dmg)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote)
 		} else if attackRoll == 1 {
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
@@ -17678,7 +17722,30 @@ func resolveAction(action, description string, charID int) string {
 			weaponName = weapon.Name
 		}
 		dmg := rollDamage(damageDice, false) + damageMod
-		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d", weaponName, totalAttack, rollInfo, dmg)
+		
+		// Check for Hunter's Colossus Slayer (v0.8.90)
+		// Extra 1d8 damage once per turn against wounded targets
+		colossusSlayerDmg := 0
+		colossusSlayerNote := ""
+		if strings.ToLower(class) == "ranger" && subclass.Valid && subclass.String == "hunter" && level >= 3 {
+			// Check if they chose colossus_slayer
+			var choicesJSON []byte
+			db.QueryRow("SELECT COALESCE(subclass_choices, '{}') FROM characters WHERE id = $1", charID).Scan(&choicesJSON)
+			var choices map[string]string
+			json.Unmarshal(choicesJSON, &choices)
+			if choices["hunters_prey"] == "colossus_slayer" && targetID > 0 {
+				// Check if target is wounded (HP < max_hp)
+				var targetHP, targetMaxHP int
+				err := db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", targetID).Scan(&targetHP, &targetMaxHP)
+				if err == nil && targetHP < targetMaxHP {
+					colossusSlayerDmg = rollDie(8)
+					dmg += colossusSlayerDmg
+					colossusSlayerNote = fmt.Sprintf(" (+%d Colossus Slayer, 1d8 vs wounded)", colossusSlayerDmg)
+				}
+			}
+		}
+		
+		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote)
 		
 	case "cast":
 		// Parse spell from description
@@ -30586,6 +30653,329 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// handleCharacterSubclassChoice godoc
+// @Summary Choose a subclass feature option
+// @Description Choose from subclass features that offer choices, like Hunter's Prey (colossus_slayer, giant_killer, horde_breaker)
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,feature=string,choice=string} true "Feature choice"
+// @Success 200 {object} map[string]interface{} "Choice confirmation"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Router /characters/subclass-choice [post]
+func handleCharacterSubclassChoice(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		// Show available choices for a character
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_character_id",
+				"message": "Provide character_id query parameter",
+			})
+			return
+		}
+		
+		var class, subclass sql.NullString
+		var level int
+		var choicesJSON []byte
+		err = db.QueryRow(`
+			SELECT class, subclass, level, COALESCE(subclass_choices, '{}')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &subclass, &level, &choicesJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if !subclass.Valid || subclass.String == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_subclass",
+				"message": "Character has no subclass selected yet. Use POST /api/characters/subclass first.",
+			})
+			return
+		}
+		
+		var currentChoices map[string]string
+		json.Unmarshal(choicesJSON, &currentChoices)
+		
+		// Get pending choices (features with choice mechanics that haven't been chosen yet)
+		pendingChoices := []map[string]interface{}{}
+		if sub, ok := availableSubclasses[subclass.String]; ok {
+			for _, feat := range sub.Features {
+				if feat.Level > level {
+					continue // Not yet unlocked
+				}
+				for mechKey, mechVal := range feat.Mechanics {
+					if mechVal == "choice" {
+						// This is a choice feature
+						if _, alreadyChosen := currentChoices[mechKey]; !alreadyChosen {
+							// Build options based on feature
+							options := getSubclassChoiceOptions(subclass.String, mechKey)
+							pendingChoices = append(pendingChoices, map[string]interface{}{
+								"feature":     mechKey,
+								"name":        feat.Name,
+								"description": feat.Description,
+								"options":     options,
+							})
+						}
+					}
+				}
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":    charID,
+			"subclass":        subclass.String,
+			"current_choices": currentChoices,
+			"pending_choices": pendingChoices,
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Feature     string `json:"feature"` // e.g., "hunters_prey"
+		Choice      string `json:"choice"`  // e.g., "colossus_slayer"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_json",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class, subclass sql.NullString
+	var level int
+	var charName string
+	var choicesJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, name, class, subclass, level, COALESCE(subclass_choices, '{}')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &charName, &class, &subclass, &level, &choicesJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_your_character",
+			"message": "You can only make choices for your own characters",
+		})
+		return
+	}
+	
+	if !subclass.Valid || subclass.String == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_subclass",
+			"message": "Character has no subclass selected yet. Use POST /api/characters/subclass first.",
+		})
+		return
+	}
+	
+	// Validate the feature exists and requires a choice
+	sub, ok := availableSubclasses[subclass.String]
+	if !ok {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_subclass",
+			"message": fmt.Sprintf("Subclass '%s' not found", subclass.String),
+		})
+		return
+	}
+	
+	featureFound := false
+	featureName := ""
+	for _, feat := range sub.Features {
+		if feat.Level > level {
+			continue
+		}
+		if mechVal, ok := feat.Mechanics[req.Feature]; ok && mechVal == "choice" {
+			featureFound = true
+			featureName = feat.Name
+			break
+		}
+	}
+	
+	if !featureFound {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_feature",
+			"message": fmt.Sprintf("Feature '%s' not found or doesn't require a choice for %s at level %d", req.Feature, subclass.String, level),
+		})
+		return
+	}
+	
+	// Validate the choice is valid for this feature
+	validOptions := getSubclassChoiceOptions(subclass.String, req.Feature)
+	choiceLower := strings.ToLower(strings.TrimSpace(req.Choice))
+	validChoice := false
+	var choiceInfo map[string]interface{}
+	for _, opt := range validOptions {
+		if opt["slug"].(string) == choiceLower {
+			validChoice = true
+			choiceInfo = opt
+			break
+		}
+	}
+	
+	if !validChoice {
+		slugs := []string{}
+		for _, opt := range validOptions {
+			slugs = append(slugs, opt["slug"].(string))
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_choice",
+			"message":       fmt.Sprintf("'%s' is not a valid choice for %s", req.Choice, req.Feature),
+			"valid_options": validOptions,
+			"valid_slugs":   slugs,
+		})
+		return
+	}
+	
+	// Update subclass_choices
+	var currentChoices map[string]string
+	json.Unmarshal(choicesJSON, &currentChoices)
+	if currentChoices == nil {
+		currentChoices = make(map[string]string)
+	}
+	
+	// Check if already chosen
+	if existing, alreadyChosen := currentChoices[req.Feature]; alreadyChosen {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "already_chosen",
+			"current_choice":  existing,
+			"message":         fmt.Sprintf("You already chose '%s' for %s. This choice is permanent.", existing, featureName),
+		})
+		return
+	}
+	
+	currentChoices[req.Feature] = choiceLower
+	updatedJSON, _ := json.Marshal(currentChoices)
+	
+	_, err = db.Exec("UPDATE characters SET subclass_choices = $1 WHERE id = $2", updatedJSON, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "database_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"character_id":  req.CharacterID,
+		"character_name": charName,
+		"feature":       req.Feature,
+		"feature_name":  featureName,
+		"choice":        choiceLower,
+		"choice_name":   choiceInfo["name"],
+		"description":   choiceInfo["description"],
+		"message":       fmt.Sprintf("%s has chosen %s for their %s feature!", charName, choiceInfo["name"], featureName),
+	})
+}
+
+// getSubclassChoiceOptions returns the valid options for a subclass feature choice
+func getSubclassChoiceOptions(subclass, feature string) []map[string]interface{} {
+	switch feature {
+	case "hunters_prey":
+		return []map[string]interface{}{
+			{
+				"slug":        "colossus_slayer",
+				"name":        "Colossus Slayer",
+				"description": "Once per turn, deal an extra 1d8 damage when you hit a creature that is below its hit point maximum.",
+			},
+			{
+				"slug":        "giant_killer",
+				"name":        "Giant Killer",
+				"description": "When a Large or larger creature within 5 feet of you hits or misses you with an attack, you can use your reaction to attack that creature.",
+			},
+			{
+				"slug":        "horde_breaker",
+				"name":        "Horde Breaker",
+				"description": "Once per turn, when you make a weapon attack, you can make another attack with the same weapon against a different creature within 5 feet of the original target.",
+			},
+		}
+	case "defensive_tactics":
+		return []map[string]interface{}{
+			{
+				"slug":        "escape_the_horde",
+				"name":        "Escape the Horde",
+				"description": "Opportunity attacks against you are made with disadvantage.",
+			},
+			{
+				"slug":        "multiattack_defense",
+				"name":        "Multiattack Defense",
+				"description": "When a creature hits you with an attack, you gain a +4 bonus to AC against all subsequent attacks made by that creature for the rest of the turn.",
+			},
+			{
+				"slug":        "steel_will",
+				"name":        "Steel Will",
+				"description": "You have advantage on saving throws against being frightened.",
+			},
+		}
+	case "multiattack":
+		return []map[string]interface{}{
+			{
+				"slug":        "volley",
+				"name":        "Volley",
+				"description": "You can use your action to make a ranged attack against any number of creatures within 10 feet of a point you can see.",
+			},
+			{
+				"slug":        "whirlwind_attack",
+				"name":        "Whirlwind Attack",
+				"description": "You can use your action to make a melee attack against any number of creatures within 5 feet of you.",
+			},
+		}
+	case "superior_defense":
+		return []map[string]interface{}{
+			{
+				"slug":        "evasion",
+				"name":        "Evasion",
+				"description": "When you are subjected to an effect that allows a DEX save for half damage, you instead take no damage on success, and half on failure.",
+			},
+			{
+				"slug":        "stand_against_the_tide",
+				"name":        "Stand Against the Tide",
+				"description": "When a hostile creature misses you with a melee attack, you can use your reaction to force that creature to repeat the attack against another creature (other than itself) of your choice.",
+			},
+			{
+				"slug":        "uncanny_dodge",
+				"name":        "Uncanny Dodge",
+				"description": "When an attacker you can see hits you with an attack, you can use your reaction to halve the attack's damage against you.",
+			},
+		}
+	}
+	return []map[string]interface{}{}
 }
 
 // ============================================================================
