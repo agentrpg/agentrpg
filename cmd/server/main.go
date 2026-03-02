@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.99
+// @version 0.9.1
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.0"
+const version = "0.9.1"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -18437,8 +18437,24 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote)
+			// Check for Life Cleric's Divine Strike on auto-crit (v0.9.1)
+			// Double dice on crit: 2d8 at level 8+, 4d8 at level 14+
+			divineStrikeNote := ""
+			if strings.ToLower(class) == "cleric" && subclass.Valid && subclass.String == "life" && level >= 8 {
+				var divineStrikeDmg int
+				if level >= 14 {
+					divineStrikeDmg = rollDie(8) + rollDie(8) + rollDie(8) + rollDie(8) // 4d8 on crit
+					dmg += divineStrikeDmg
+					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 4d8 radiant)", divineStrikeDmg)
+				} else {
+					divineStrikeDmg = rollDie(8) + rollDie(8) // 2d8 on crit
+					dmg += divineStrikeDmg
+					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 2d8 radiant)", divineStrikeDmg)
+				}
+			}
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote, divineStrikeNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -18478,11 +18494,27 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// Check for Life Cleric's Divine Strike on crit (v0.9.1)
+			// Double dice on crit: 2d8 at level 8+, 4d8 at level 14+
+			divineStrikeNote := ""
+			if strings.ToLower(class) == "cleric" && subclass.Valid && subclass.String == "life" && level >= 8 {
+				var divineStrikeDmg int
+				if level >= 14 {
+					divineStrikeDmg = rollDie(8) + rollDie(8) + rollDie(8) + rollDie(8) // 4d8 on crit
+					dmg += divineStrikeDmg
+					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 4d8 radiant)", divineStrikeDmg)
+				} else {
+					divineStrikeDmg = rollDie(8) + rollDie(8) // 2d8 on crit
+					dmg += divineStrikeDmg
+					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 2d8 radiant)", divineStrikeDmg)
+				}
+			}
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote, divineStrikeNote)
 		} else if attackRoll == 1 {
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
@@ -18518,7 +18550,23 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote)
+		// Check for Life Cleric's Divine Strike (v0.9.1)
+		// Extra 1d8 radiant damage once per turn on weapon attacks (level 8+), 2d8 at level 14+
+		divineStrikeNote := ""
+		if strings.ToLower(class) == "cleric" && subclass.Valid && subclass.String == "life" && level >= 8 {
+			var divineStrikeDmg int
+			if level >= 14 {
+				divineStrikeDmg = rollDie(8) + rollDie(8)
+				dmg += divineStrikeDmg
+				divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 2d8 radiant)", divineStrikeDmg)
+			} else {
+				divineStrikeDmg = rollDie(8)
+				dmg += divineStrikeDmg
+				divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 1d8 radiant)", divineStrikeDmg)
+			}
+		}
+		
+		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote, divineStrikeNote)
 		
 	case "cast":
 		// Parse spell from description
