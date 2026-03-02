@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.92"
+const version = "0.8.93"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -376,6 +376,7 @@ func main() {
 	http.HandleFunc("/api/gm/give-item", handleGMGiveItem)
 	http.HandleFunc("/api/gm/recover-ammo", handleGMRecoverAmmo)
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
+	http.HandleFunc("/api/gm/giant-killer", handleGMGiantKiller)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
 	http.HandleFunc("/api/gm/legendary-resistance", handleGMLegendaryResistance)
@@ -708,6 +709,10 @@ func initDB() {
 		-- Tracks remaining attacks in current Attack action. NULL = no attack action started yet.
 		-- Reset to NULL at start of turn. When > 0, character can continue attacking as part of same action.
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attacks_remaining INTEGER DEFAULT NULL;
+		
+		-- Horde Breaker tracking (v0.8.93)
+		-- Hunter Ranger feature: once per turn, bonus attack against creature within 5ft of original target
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS horde_breaker_used BOOLEAN DEFAULT FALSE;
 		
 		-- Hit Dice tracking (Short/Long Rest - Phase 8 P0)
 		-- hit_dice_spent tracks how many dice have been used (recovers half on long rest)
@@ -7401,10 +7406,10 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var str, dex, con, intl, wis, cha int
 	var charName, class, race, lobbyName, setting, lobbyStatus string
 	var charSubclass sql.NullString
-	var conditionsJSON, slotsUsedJSON, campaignDocRaw []byte
+	var conditionsJSON, slotsUsedJSON, campaignDocRaw, subclassChoicesJSON []byte
 	var concentratingOn string
 	var deathSuccesses, deathFailures, pendingASI, movementRemaining int
-	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed, bonusActionSpellCast bool
+	var isStable, isDead, reactionUsed, actionUsed, bonusActionUsed, bonusActionSpellCast, hordeUsed bool
 	var mountedOnCreature sql.NullString
 	var mountIsControlled sql.NullBool
 	var attacksRemaining sql.NullInt32
@@ -7421,7 +7426,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(c.bonus_action_spell_cast, false),
 			COALESCE(l.campaign_document, '{}'),
 			c.mounted_on_creature, c.mount_is_controlled,
-			c.attacks_remaining
+			c.attacks_remaining,
+			COALESCE(c.subclass_choices, '{}'), COALESCE(c.horde_breaker_used, false)
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -7433,7 +7439,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &charCopper, &charSilver,
 		&charElectrum, &charPlatinum, &pendingASI,
 		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw,
-		&mountedOnCreature, &mountIsControlled, &attacksRemaining)
+		&mountedOnCreature, &mountIsControlled, &attacksRemaining, &subclassChoicesJSON, &hordeUsed)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -7936,6 +7942,10 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	// Get recent campaign messages (last 6 hours)
 	recentMessages := getRecentCampaignMessages(lobbyID, 6)
 	
+	// Parse subclass choices for Horde Breaker (v0.8.93)
+	var subclassChoices map[string]string
+	json.Unmarshal(subclassChoicesJSON, &subclassChoices)
+	
 	// Build response
 	response := map[string]interface{}{
 		"is_my_turn": isMyTurn,
@@ -7949,7 +7959,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		},
 		"your_options": map[string]interface{}{
 			"actions":       actions,
-			"bonus_actions": buildBonusActions(classKey, actionUsed, bonusActionUsed, conditions, charSubclass.String, level),
+			"bonus_actions": buildBonusActions(classKey, actionUsed, bonusActionUsed, conditions, charSubclass.String, level, subclassChoices, hordeUsed),
 			"movement":      buildMovementInfo(race, movementRemaining, conditions),
 			"reaction":      reactionStatus,
 			"action_economy": buildActionEconomy(class, level, actionUsed, bonusActionUsed, reactionUsed,
@@ -8114,7 +8124,8 @@ func parseStorySoFar(campaignDocRaw []byte) string {
 
 // buildBonusActions returns available bonus actions based on class and current state
 // v0.8.92: Added conditions, subclass, level params for frenzy support
-func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool, conditions []string, subclass string, level int) []map[string]interface{} {
+// v0.8.93: Added subclassChoices and hordeUsed for Horde Breaker support
+func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool, conditions []string, subclass string, level int, subclassChoices map[string]string, hordeUsed bool) []map[string]interface{} {
 	bonusActions := []map[string]interface{}{}
 
 	if bonusActionUsed {
@@ -8199,6 +8210,32 @@ func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool, condit
 			"name":        "step_of_the_wind",
 			"description": "Spend 1 ki point to take the Dash or Disengage action, and your jump distance is doubled.",
 		})
+	case "ranger":
+		// v0.8.93: Hunter Ranger's Horde Breaker (free extra attack, not bonus action)
+		if subclass == "hunter" && level >= 3 {
+			if subclassChoices["hunters_prey"] == "horde_breaker" {
+				if actionUsed && !hordeUsed {
+					bonusActions = append(bonusActions, map[string]interface{}{
+						"name":        "horde_breaker",
+						"description": "🏹 Free extra attack against a different creature within 5ft of your original target. Uses same weapon.",
+						"example":     "horde_breaker with longbow against goblin B",
+						"action_type": "free",
+					})
+				} else if !actionUsed {
+					bonusActions = append(bonusActions, map[string]interface{}{
+						"name":        "horde_breaker",
+						"description": "🏹 Free extra attack against a creature within 5ft of your target. Available after using Attack action.",
+						"available":   false,
+					})
+				} else if hordeUsed {
+					bonusActions = append(bonusActions, map[string]interface{}{
+						"name":        "horde_breaker",
+						"description": "🏹 Horde Breaker already used this turn.",
+						"available":   false,
+					})
+				}
+			}
+		}
 	}
 
 	return bonusActions
@@ -9698,11 +9735,12 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 			db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
 			speed := getMovementSpeed(race)
 			
-			// Reset turn resources: action, bonus action, movement, reaction, and bonus action spell tracking (resets on your turn)
+			// Reset turn resources: action, bonus action, movement, reaction, bonus action spell tracking, horde breaker (resets on your turn)
 			db.Exec(`
 				UPDATE characters 
 				SET action_used = false, bonus_action_used = false, 
-				    movement_remaining = $1, reaction_used = false, bonus_action_spell_cast = false
+				    movement_remaining = $1, reaction_used = false, bonus_action_spell_cast = false,
+				    horde_breaker_used = false
 				WHERE id = $2
 			`, speed, newActiveID)
 			
@@ -13406,6 +13444,260 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	if !req.AttackerIsMonster {
 		response["reaction_used"] = true
 		response["note"] = fmt.Sprintf("%s's reaction is now expended for this round", attackerName)
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMGiantKiller godoc
+// @Summary Trigger a Giant Killer reaction attack
+// @Description GM triggers a Giant Killer reaction when a Large+ creature attacks (hit or miss) a Hunter Ranger within 5ft.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,attacker_monster_key=string,attacker_name=string} true "Giant Killer details"
+// @Success 200 {object} map[string]interface{} "Attack result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or requirements not met"
+// @Router /gm/giant-killer [post]
+func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID       int    `json:"character_id"`        // The Hunter Ranger making the reaction attack
+		AttackerMonsterKey string `json:"attacker_monster_key"` // SRD slug for the attacking monster
+		AttackerName      string `json:"attacker_name"`       // Name of attacking creature
+		Weapon            string `json:"weapon"`              // Optional: specific weapon to use
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required (the Hunter Ranger making the attack)",
+		})
+		return
+	}
+	
+	if req.AttackerName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "attacker_name required (the Large+ creature that attacked)",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var charLobbyID, str, dex, level int
+	var reactionUsed bool
+	var weaponProfsStr, subclass string
+	var subclassChoicesJSON []byte
+	err = db.QueryRow(`
+		SELECT name, lobby_id, class, str, dex, level, 
+		       COALESCE(reaction_used, false), COALESCE(weapon_proficiencies, ''),
+		       COALESCE(subclass, ''), COALESCE(subclass_choices, '{}')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &charLobbyID, &class, &str, &dex, &level, 
+		&reactionUsed, &weaponProfsStr, &subclass, &subclassChoicesJSON)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Check if character has Giant Killer
+	if strings.ToLower(class) != "ranger" || subclass != "hunter" || level < 3 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_giant_killer",
+			"message": fmt.Sprintf("%s is not a Hunter Ranger level 3+ with Giant Killer", charName),
+		})
+		return
+	}
+	
+	var choices map[string]string
+	json.Unmarshal(subclassChoicesJSON, &choices)
+	if choices["hunters_prey"] != "giant_killer" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_giant_killer",
+			"message": fmt.Sprintf("%s has not chosen Giant Killer for Hunter's Prey", charName),
+		})
+		return
+	}
+	
+	// Check if reaction is available
+	if reactionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_reaction",
+			"message": fmt.Sprintf("%s has already used their reaction this round", charName),
+		})
+		return
+	}
+	
+	// Check if attacker is Large or larger
+	monsterSize := "medium" // default
+	if req.AttackerMonsterKey != "" {
+		var sizeStr string
+		err = db.QueryRow("SELECT COALESCE(size, 'medium') FROM monsters WHERE slug = $1", req.AttackerMonsterKey).Scan(&sizeStr)
+		if err == nil {
+			monsterSize = strings.ToLower(sizeStr)
+		}
+	}
+	
+	if monsterSize != "large" && monsterSize != "huge" && monsterSize != "gargantuan" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_large_enough",
+			"message": fmt.Sprintf("%s is %s size. Giant Killer only triggers against Large or larger creatures.", req.AttackerName, monsterSize),
+		})
+		return
+	}
+	
+	// Mark reaction as used
+	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
+	
+	// Determine weapon and modifiers
+	attackMod := modifier(str)
+	damageMod := modifier(str)
+	damageDice := "1d6"
+	weaponName := "unarmed strike"
+	weaponKey := ""
+	
+	// Check for weapon in request
+	if req.Weapon != "" {
+		weaponKey = strings.ToLower(strings.ReplaceAll(req.Weapon, " ", "-"))
+		if weapon, ok := srdWeapons[weaponKey]; ok {
+			weaponName = weapon.Name
+			damageDice = weapon.Damage
+			if weapon.Type == "ranged" || containsProperty(weapon.Properties, "finesse") {
+				attackMod = modifier(dex)
+				damageMod = modifier(dex)
+			}
+		}
+	}
+	
+	// Add proficiency bonus only if proficient with the weapon
+	if weaponKey == "" || isWeaponProficient(weaponProfsStr, weaponKey) {
+		attackMod += proficiencyBonus(level)
+	}
+	
+	// Get target AC (monster AC or estimate)
+	targetAC := 13 // default
+	if req.AttackerMonsterKey != "" {
+		var mAC int
+		err = db.QueryRow("SELECT COALESCE(ac, 13) FROM monsters WHERE slug = $1", req.AttackerMonsterKey).Scan(&mAC)
+		if err == nil {
+			targetAC = mAC
+		}
+	}
+	
+	// Roll the attack
+	attackRoll := rollDie(20)
+	totalAttack := attackRoll + attackMod
+	
+	var resultText string
+	var hit bool
+	var damage int
+	
+	if attackRoll == 1 {
+		// Critical miss
+		resultText = fmt.Sprintf("⚔️ GIANT KILLER: %s retaliates against the %s! Attack roll: %d (nat 1 - Critical Miss!)", 
+			charName, req.AttackerName, totalAttack)
+		hit = false
+	} else if attackRoll == 20 {
+		// Critical hit - double damage dice
+		damage = rollDamage(damageDice, true) + damageMod
+		if damage < 1 {
+			damage = 1
+		}
+		resultText = fmt.Sprintf("⚔️ GIANT KILLER: %s retaliates against the %s! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d with %s", 
+			charName, req.AttackerName, totalAttack, damage, weaponName)
+		hit = true
+	} else if totalAttack >= targetAC {
+		// Normal hit
+		damage = rollDamage(damageDice, false) + damageMod
+		if damage < 1 {
+			damage = 1
+		}
+		resultText = fmt.Sprintf("⚔️ GIANT KILLER: %s retaliates against the %s! Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
+			charName, req.AttackerName, totalAttack, targetAC, damage, weaponName)
+		hit = true
+	} else {
+		// Miss
+		resultText = fmt.Sprintf("⚔️ GIANT KILLER: %s retaliates against the %s! Attack roll: %d vs AC %d - MISS!", 
+			charName, req.AttackerName, totalAttack, targetAC)
+		hit = false
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Giant Killer reaction by %s against %s", charName, req.AttackerName)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'giant_killer', $2, $3)
+	`, campaignID, actionDesc, resultText)
+	
+	response := map[string]interface{}{
+		"success":       true,
+		"attacker":      charName,
+		"target":        req.AttackerName,
+		"monster_size":  monsterSize,
+		"attack_roll":   attackRoll,
+		"attack_mod":    attackMod,
+		"total":         totalAttack,
+		"target_ac":     targetAC,
+		"hit":           hit,
+		"result":        resultText,
+		"reaction_used": true,
+		"note":          fmt.Sprintf("%s's reaction is now expended for this round", charName),
+	}
+	
+	if hit {
+		response["damage"] = damage
+		response["weapon"] = weaponName
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -18553,6 +18845,133 @@ func resolveAction(action, description string, charID int) string {
 		frenzyDmg := rollDamage(weapon.Damage, false) + frenzyDamageMod
 		return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d to hit%s. Damage: %d (%s + %d STR + %d rage)",
 			weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRollInfo, frenzyDmg, weapon.Damage, modifier(str), rageDamageBonus)
+
+	case "horde_breaker":
+		// v0.8.93: Hunter Ranger's Horde Breaker
+		// Once per turn, when you make a weapon attack, you can make another attack 
+		// with the same weapon against a different creature within 5ft of the original target.
+		
+		// Verify is hunter ranger with horde_breaker choice
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "ranger" {
+			return "Only Rangers can use Horde Breaker!"
+		}
+		if !subclass.Valid || subclass.String != "hunter" {
+			return "Only Hunter Rangers can use Horde Breaker!"
+		}
+		if level < 3 {
+			return "Horde Breaker requires level 3+!"
+		}
+		
+		// Check subclass choice
+		var hbChoicesJSON []byte
+		db.QueryRow("SELECT COALESCE(subclass_choices, '{}') FROM characters WHERE id = $1", charID).Scan(&hbChoicesJSON)
+		var hbChoices map[string]string
+		json.Unmarshal(hbChoicesJSON, &hbChoices)
+		if hbChoices["hunters_prey"] != "horde_breaker" {
+			return "You have not chosen Horde Breaker for your Hunter's Prey feature! Your choice: " + hbChoices["hunters_prey"]
+		}
+		
+		// Check if already used this turn
+		var hbUsed bool
+		db.QueryRow("SELECT COALESCE(horde_breaker_used, false) FROM characters WHERE id = $1", charID).Scan(&hbUsed)
+		if hbUsed {
+			return "Horde Breaker already used this turn! It can only be used once per turn."
+		}
+		
+		// Check that we've made an attack this turn (action_used should be true from Attack action)
+		var hbActionUsed bool
+		db.QueryRow("SELECT COALESCE(action_used, false) FROM characters WHERE id = $1", charID).Scan(&hbActionUsed)
+		if !hbActionUsed {
+			return "Horde Breaker requires making a weapon attack first! Use 'attack' action, then 'horde_breaker' against a different creature within 5ft of the original target."
+		}
+		
+		// Parse weapon from description
+		hbWeaponKey := parseWeaponFromDescription(description)
+		hbWeapon, hbHasWeapon := srdWeapons[hbWeaponKey]
+		
+		if !hbHasWeapon {
+			return "Horde Breaker requires specifying a weapon (e.g., 'horde_breaker with longbow against goblin B')."
+		}
+		
+		// Mark horde_breaker as used
+		db.Exec(`UPDATE characters SET horde_breaker_used = true WHERE id = $1`, charID)
+		
+		// Determine attack modifier
+		hbAttackMod := modifier(str)
+		hbDamageMod := modifier(str)
+		if hbWeapon.Type == "ranged" || containsProperty(hbWeapon.Properties, "finesse") {
+			hbAttackMod = modifier(dex)
+			hbDamageMod = modifier(dex)
+		}
+		
+		// Add proficiency bonus if proficient
+		hbProficient := isWeaponProficient(weaponProfsStr, hbWeaponKey)
+		if hbProficient {
+			hbAttackMod += proficiencyBonus(level)
+		}
+		
+		// Get condition-based advantage/disadvantage
+		var hbConditions []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&hbConditions)
+		var hbConds []string
+		json.Unmarshal(hbConditions, &hbConds)
+		isRangedAttack := hbWeapon.Type == "ranged"
+		hbAdvantage, hbDisadvantage := getAttackModifiers(charID, hbConds, isRangedAttack)
+		
+		if requestedAdvantage {
+			hbAdvantage = true
+		}
+		if requestedDisadvantage {
+			hbDisadvantage = true
+		}
+		
+		// Roll attack
+		var hbRoll, hbRoll1, hbRoll2 int
+		hbRollType := "normal"
+		if hbAdvantage && !hbDisadvantage {
+			hbRoll, hbRoll1, hbRoll2 = rollWithAdvantage()
+			hbRollType = "advantage"
+		} else if hbDisadvantage && !hbAdvantage {
+			hbRoll, hbRoll1, hbRoll2 = rollWithDisadvantage()
+			hbRollType = "disadvantage"
+		} else {
+			hbRoll = rollDie(20)
+			hbRoll1, hbRoll2 = hbRoll, 0
+		}
+		
+		hbTotalAttack := hbRoll + hbAttackMod
+		
+		hbRollInfo := ""
+		if hbRollType != "normal" {
+			hbRollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", hbRollType, hbRoll1, hbRoll2, hbRoll)
+		}
+		
+		hbProfInfo := ""
+		if !hbProficient {
+			hbProfInfo = " (not proficient)"
+		}
+		
+		// Check for Hunter's Colossus Slayer (should not apply - they chose horde_breaker)
+		// This is intentionally not included since they chose horde_breaker instead
+		
+		// Critical hit
+		if hbRoll == 20 {
+			hbDmg := rollDamage(hbWeapon.Damage, true) + hbDamageMod
+			return fmt.Sprintf("🏹 Horde Breaker with %s%s: %d (nat 20 CRITICAL!)%s Damage: %d (attacking second target within 5ft of original)",
+				hbWeapon.Name, hbProfInfo, hbTotalAttack, hbRollInfo, hbDmg)
+		}
+		
+		// Critical miss
+		if hbRoll == 1 {
+			return fmt.Sprintf("🏹 Horde Breaker with %s%s: %d (nat 1 - Critical miss!)%s",
+				hbWeapon.Name, hbProfInfo, hbTotalAttack, hbRollInfo)
+		}
+		
+		// Normal hit
+		hbDmg := rollDamage(hbWeapon.Damage, false) + hbDamageMod
+		return fmt.Sprintf("🏹 Horde Breaker with %s%s: %d to hit%s. Damage: %d (attacking second target within 5ft of original)",
+			hbWeapon.Name, hbProfInfo, hbTotalAttack, hbRollInfo, hbDmg)
 
 	case "ready":
 		// Ready action: hold your action for a trigger condition

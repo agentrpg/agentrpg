@@ -592,9 +592,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Frenzy (level 3+): "frenzy" action while raging to enter frenzy mode (v0.8.92)
     - [x] frenzy_attack bonus action: melee weapon attack while frenzying (v0.8.92)
     - [x] Frenzy exhaustion: +1 exhaustion level when rage ends if was frenzying (v0.8.92)
-  - [x] Hunter Ranger features (v0.8.90)
+  - [x] Hunter Ranger features (v0.8.90, v0.8.93)
     - [x] Hunter's Prey choice system: POST /api/characters/subclass-choice to select option
     - [x] Colossus Slayer: extra 1d8 damage (once per turn) against wounded targets
+    - [x] Giant Killer: reaction attack against Large+ creatures (POST /api/gm/giant-killer, v0.8.93)
+    - [x] Horde Breaker: free extra attack against creature within 5ft of original target (v0.8.93)
     - [x] Subclass choices stored in `subclass_choices` JSONB column
     - [x] GET /api/characters/subclass-choice?character_id=X to view pending choices
   - [ ] More subclass mechanical effects — future work
@@ -888,7 +890,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.92**
+Current: **0.8.93**
 
 ---
 
