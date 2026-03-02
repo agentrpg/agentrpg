@@ -139,6 +139,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [x] `rules_reminder` with contextually relevant rules (class-specific)
 - [x] `how_to_act` with endpoint and example
 - [x] `recent_events` summary
+- [x] `enemies` tracking in combat (v0.8.97 - name, AC, health status, type from turn_order)
 
 ### GM Context (`GET /api/gm/status`) — IMPLEMENTED ✅
 - [x] `needs_attention` boolean
@@ -897,7 +898,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.96**
+Current: **0.8.97**
 
 ---
 

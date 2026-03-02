@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.95
+// @version 0.8.97
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.96"
+const version = "0.8.97"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -8224,6 +8224,69 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var subclassChoices map[string]string
 	json.Unmarshal(subclassChoicesJSON, &subclassChoices)
 	
+	// v0.8.97: Extract enemy information from combat turn_order
+	enemies := []map[string]interface{}{}
+	if inCombat && len(turnOrderJSON) > 0 {
+		type FullTurnEntry struct {
+			ID         int    `json:"id"`
+			Name       string `json:"name"`
+			Initiative int    `json:"initiative"`
+			IsMonster  bool   `json:"is_monster"`
+			MonsterKey string `json:"monster_key"`
+			HP         int    `json:"hp"`
+			MaxHP      int    `json:"max_hp"`
+			AC         int    `json:"ac"`
+		}
+		var fullEntries []FullTurnEntry
+		json.Unmarshal(turnOrderJSON, &fullEntries)
+		
+		for _, e := range fullEntries {
+			if e.IsMonster && e.HP > 0 {
+				// Determine health status (don't reveal exact HP)
+				healthStatus := "healthy"
+				if e.MaxHP > 0 {
+					hpPercent := float64(e.HP) / float64(e.MaxHP)
+					if hpPercent <= 0.25 {
+						healthStatus = "critical"
+					} else if hpPercent <= 0.50 {
+						healthStatus = "bloodied"
+					} else if hpPercent <= 0.75 {
+						healthStatus = "wounded"
+					}
+				}
+				
+				enemy := map[string]interface{}{
+					"name":   e.Name,
+					"id":     e.ID, // Negative ID for targeting
+					"ac":     e.AC,
+					"status": healthStatus,
+				}
+				
+				// Add monster type info if available
+				if e.MonsterKey != "" {
+					var mType string
+					db.QueryRow("SELECT COALESCE(type, '') FROM monsters WHERE slug = $1", e.MonsterKey).Scan(&mType)
+					if mType != "" {
+						enemy["type"] = mType
+					}
+				}
+				
+				enemies = append(enemies, enemy)
+			}
+		}
+	}
+	
+	// Build enemies summary for situation (simple string list for backward compat)
+	enemySummary := []string{}
+	for _, e := range enemies {
+		status := e["status"].(string)
+		summary := fmt.Sprintf("%s (AC %d, %s)", e["name"], e["ac"], status)
+		if mtype, ok := e["type"].(string); ok && mtype != "" {
+			summary = fmt.Sprintf("%s [%s] (AC %d, %s)", e["name"], mtype, e["ac"], status)
+		}
+		enemySummary = append(enemySummary, summary)
+	}
+	
 	// Build response
 	response := map[string]interface{}{
 		"is_my_turn": isMyTurn,
@@ -8231,8 +8294,9 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"situation": map[string]interface{}{
 			"summary":   fmt.Sprintf("You are in %s. %s", lobbyName, setting),
 			"allies":    allies,
-			"enemies":   []string{}, // TODO: track enemies when encounter system is built
-			"terrain":   "", // TODO: track terrain
+			"enemies":   enemySummary,
+			"enemy_details": enemies, // v0.8.97: Full enemy data for targeting
+			"terrain":   "", // TODO: track terrain when position system is built
 			"in_combat": inCombat,
 		},
 		"your_options": map[string]interface{}{
