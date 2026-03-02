@@ -616,6 +616,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] stunning_strike action: CON save (DC 8+prof+WIS) or stunned for 1 ki
     - [x] Open Hand Technique: impose effects on Flurry hits (prone/push/no reactions)
     - [x] Monk Martial Arts damage die scales with level (d4→d6→d8→d10)
+  - [x] Lore Bard Cutting Words (v0.9.3)
+    - [x] POST /api/gm/cutting-words — reaction to subtract Bardic Inspiration die from enemy roll
+    - [x] Requires College of Lore subclass at level 3+
+    - [x] Uses Bardic Inspiration (expends one use)
+    - [x] Works on attack rolls, ability checks, and damage rolls
+    - [x] Die size scales with level (d6→d8→d10→d12)
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -912,7 +918,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.2**
+Current: **0.9.3**
 
 ---
 

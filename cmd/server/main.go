@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.2
+// @version 0.9.3
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.2"
+const version = "0.9.3"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -425,6 +425,7 @@ func main() {
 	http.HandleFunc("/api/gm/set-lighting", handleGMSetLighting)
 	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
+	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
 	http.HandleFunc("/api/gm/apply-poison", handleGMApplyPoison)
@@ -2190,6 +2191,19 @@ func recoverClassResources(charID int, isLongRest bool) map[string]int {
 	db.Exec(`UPDATE characters SET class_resources_used = $1 WHERE id = $2`, newUsedJSON, charID)
 	
 	return recovered
+}
+
+// getBardicInspirationDie returns the die size for Bardic Inspiration based on bard level (v0.9.3)
+// d6 at level 1, d8 at level 5, d10 at level 10, d12 at level 15
+func getBardicInspirationDie(level int) int {
+	if level >= 15 {
+		return 12
+	} else if level >= 10 {
+		return 10
+	} else if level >= 5 {
+		return 8
+	}
+	return 6
 }
 
 // ArmorInfo holds armor data for AC calculation
@@ -21859,6 +21873,193 @@ func handleGMDispelMagic(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
 		VALUES ($1, $2, $3, $4, $5)
 	`, lobbyID, req.CasterID, "dispel_magic", actionDesc, actionResult)
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMCuttingWords godoc
+// @Summary Lore Bard uses Cutting Words to penalize enemy roll (v0.9.3)
+// @Description Cutting Words (College of Lore, level 3+): When a creature within 60 feet makes an attack roll, ability check, or damage roll, a Lore Bard can use their reaction and expend one Bardic Inspiration die to subtract the roll from the creature's result. The GM calls this after the enemy rolls but before the outcome is determined.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{bard_id=integer,enemy_roll=integer,roll_type=string} true "Cutting Words: bard_id (character using the reaction), enemy_roll (the roll to reduce), roll_type (attack/ability/damage)"
+// @Success 200 {object} map[string]interface{} "Cutting Words result with reduced roll"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not Lore Bard"
+// @Failure 400 {object} map[string]interface{} "Invalid request or no Bardic Inspiration"
+// @Router /gm/cutting-words [post]
+func handleGMCuttingWords(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		BardID    int    `json:"bard_id"`
+		EnemyRoll int    `json:"enemy_roll"`
+		RollType  string `json:"roll_type"` // "attack", "ability", or "damage"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.BardID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "bard_id required",
+		})
+		return
+	}
+	
+	validRollTypes := map[string]bool{"attack": true, "ability": true, "damage": true}
+	if req.RollType == "" {
+		req.RollType = "attack" // Default
+	}
+	if !validRollTypes[req.RollType] {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "roll_type must be 'attack', 'ability', or 'damage'",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the bard's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.BardID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.BardID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var level int
+	var subclass sql.NullString
+	err = db.QueryRow(`
+		SELECT name, class, level, subclass FROM characters WHERE id = $1
+	`, req.BardID).Scan(&charName, &class, &level, &subclass)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify character is a Bard with Lore subclass
+	if strings.ToLower(class) != "bard" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_bard",
+			"message": fmt.Sprintf("%s is a %s, not a Bard. Only Bards can use Cutting Words.", charName, class),
+		})
+		return
+	}
+	
+	if !subclass.Valid || strings.ToLower(subclass.String) != "lore" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_lore_bard",
+			"message": fmt.Sprintf("%s is not a College of Lore bard. Cutting Words is a Lore-specific feature.", charName),
+		})
+		return
+	}
+	
+	// Check that character has the cutting_words feature (level 3+)
+	if !hasSubclassFeature(subclass.String, level, "cutting_words") {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "feature_not_available",
+			"message": fmt.Sprintf("%s hasn't unlocked Cutting Words yet (requires College of Lore level 3+)", charName),
+		})
+		return
+	}
+	
+	// Check for Bardic Inspiration uses
+	success, errMsg, remaining := useClassResource(req.BardID, "bardic_inspiration", 1)
+	if !success {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_bardic_inspiration",
+			"message": errMsg,
+		})
+		return
+	}
+	
+	// Roll the Bardic Inspiration die
+	dieSize := getBardicInspirationDie(level)
+	subtraction := rollDie(dieSize)
+	
+	// Calculate the reduced roll
+	reducedRoll := req.EnemyRoll - subtraction
+	if reducedRoll < 0 && req.RollType != "damage" {
+		reducedRoll = 0 // Rolls can't go below 0, except damage can go negative (treated as 0 damage)
+	}
+	
+	// Build descriptive message based on roll type
+	var rollTypeDesc string
+	switch req.RollType {
+	case "attack":
+		rollTypeDesc = "attack roll"
+	case "ability":
+		rollTypeDesc = "ability check"
+	case "damage":
+		rollTypeDesc = "damage roll"
+	}
+	
+	response := map[string]interface{}{
+		"success":              true,
+		"bard":                 charName,
+		"bard_id":              req.BardID,
+		"feature":              "Cutting Words",
+		"roll_type":            req.RollType,
+		"original_roll":        req.EnemyRoll,
+		"inspiration_die":      fmt.Sprintf("d%d", dieSize),
+		"subtraction":          subtraction,
+		"reduced_roll":         reducedRoll,
+		"bardic_inspiration_remaining": remaining,
+		"message": fmt.Sprintf("🎭 %s uses Cutting Words! Rolling d%d... %d! The enemy's %s is reduced from %d to %d. (%d Bardic Inspiration remaining)",
+			charName, dieSize, subtraction, rollTypeDesc, req.EnemyRoll, reducedRoll, remaining),
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("%s uses Cutting Words (reaction) to reduce enemy %s", charName, rollTypeDesc)
+	actionResult := fmt.Sprintf("d%d = %d subtracted. Roll reduced from %d to %d", dieSize, subtraction, req.EnemyRoll, reducedRoll)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.BardID, "cutting_words", actionDesc, actionResult)
 	
 	json.NewEncoder(w).Encode(response)
 }
