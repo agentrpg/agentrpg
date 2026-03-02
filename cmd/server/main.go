@@ -1354,7 +1354,11 @@ func seedSpellsFromAPI() {
 		damageDice, damageType, savingThrow, healing := "", "", "", ""
 		damageAtSlotLevel := map[string]string{}
 		healAtSlotLevel := map[string]string{}
-		spellLevelStr := fmt.Sprintf("%d", int(detail["level"].(float64)))
+		spellLevel := 0
+		if lvl, ok := detail["level"].(float64); ok {
+			spellLevel = int(lvl)
+		}
+		spellLevelStr := fmt.Sprintf("%d", spellLevel)
 		if dmg, ok := detail["damage"].(map[string]interface{}); ok {
 			if slot, ok := dmg["damage_at_slot_level"].(map[string]interface{}); ok {
 				for k, v := range slot {
