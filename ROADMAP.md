@@ -609,6 +609,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Horde Breaker: free extra attack against creature within 5ft of original target (v0.8.93)
     - [x] Subclass choices stored in `subclass_choices` JSONB column
     - [x] GET /api/characters/subclass-choice?character_id=X to view pending choices
+  - [x] Monk Ki abilities and Open Hand features (v0.9.2)
+    - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
+    - [x] patient_defense action: Dodge as bonus action for 1 ki
+    - [x] step_of_the_wind action: Dash/Disengage + doubled jump for 1 ki
+    - [x] stunning_strike action: CON save (DC 8+prof+WIS) or stunned for 1 ki
+    - [x] Open Hand Technique: impose effects on Flurry hits (prone/push/no reactions)
+    - [x] Monk Martial Arts damage die scales with level (d4→d6→d8→d10)
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -905,7 +912,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.1**
+Current: **0.9.2**
 
 ---
 

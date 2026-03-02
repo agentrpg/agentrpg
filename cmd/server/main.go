@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.1
+// @version 0.9.2
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.1"
+const version = "0.9.2"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1834,6 +1834,18 @@ func rollWithDisadvantage() (int, int, int) {
 
 func modifier(stat int) int {
 	return (stat - 10) / 2
+}
+
+// getMonkDie returns the monk's Martial Arts damage die based on level (v0.9.2)
+func getMonkDie(level int) string {
+	if level >= 17 {
+		return "1d10"
+	} else if level >= 11 {
+		return "1d8"
+	} else if level >= 5 {
+		return "1d6"
+	}
+	return "1d4"
 }
 
 // formatDuration returns a human-readable duration string (v0.8.48)
@@ -17759,7 +17771,7 @@ func getActionResourceType(actionType string) string {
 	case "attack", "cast", "dash", "disengage", "dodge", "help", "hide", "ready", "search", "use_item", "death_save", "grapple", "shove":
 		return "action"
 	// Bonus actions (consume bonus action - class/spell specific)
-	case "bonus_attack", "cunning_action", "offhand_attack", "second_wind", "action_surge", "rage", "bonus_cast", "frenzy_attack":
+	case "bonus_attack", "cunning_action", "offhand_attack", "second_wind", "action_surge", "rage", "bonus_cast", "frenzy_attack", "flurry_of_blows", "patient_defense", "step_of_the_wind":
 		return "bonus_action"
 	// Reactions (consume reaction - used on others' turns too)
 	case "opportunity_attack", "counterspell", "shield":
@@ -17768,7 +17780,7 @@ func getActionResourceType(actionType string) string {
 	case "move", "stand":
 		return "movement"
 	// Free actions (no resource cost)
-	case "drop", "speak", "interact", "other", "frenzy":
+	case "drop", "speak", "interact", "other", "frenzy", "stunning_strike":
 		return "free"
 	default:
 		// Default unknown actions to using the action
@@ -19457,6 +19469,239 @@ func resolveAction(action, description string, charID int) string {
 		hbDmg := rollDamage(hbWeapon.Damage, false) + hbDamageMod
 		return fmt.Sprintf("🏹 Horde Breaker with %s%s: %d to hit%s. Damage: %d (attacking second target within 5ft of original)",
 			hbWeapon.Name, hbProfInfo, hbTotalAttack, hbRollInfo, hbDmg)
+
+	case "flurry_of_blows":
+		// v0.9.2: Monk's Flurry of Blows
+		// Spend 1 ki point immediately after Attack action to make two unarmed strikes as bonus action
+		// For Way of the Open Hand (level 3+), each hit can impose one effect
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "monk" {
+			return "Only monks can use Flurry of Blows!"
+		}
+		
+		if level < 2 {
+			return "Flurry of Blows requires Ki (level 2+)!"
+		}
+		
+		// Check if action_used (must have taken Attack action first)
+		var flurryActionUsed bool
+		db.QueryRow("SELECT COALESCE(action_used, false) FROM characters WHERE id = $1", charID).Scan(&flurryActionUsed)
+		if !flurryActionUsed {
+			return "Flurry of Blows requires taking the Attack action first! Use 'attack' action, then 'flurry_of_blows'."
+		}
+		
+		// Spend 1 ki point
+		kiSuccess, kiErr, kiRemaining := useClassResource(charID, "ki", 1)
+		if !kiSuccess {
+			return fmt.Sprintf("Cannot use Flurry of Blows: %s", kiErr)
+		}
+		
+		// Get monk die for damage
+		monkDie := getMonkDie(level)
+		
+		// Monks can use DEX or STR for unarmed strikes (Martial Arts)
+		flurryAttackMod := modifier(dex)
+		flurryDamageMod := modifier(dex)
+		if modifier(str) > modifier(dex) {
+			flurryAttackMod = modifier(str)
+			flurryDamageMod = modifier(str)
+		}
+		
+		// Add proficiency bonus (monks are proficient with unarmed strikes)
+		flurryAttackMod += proficiencyBonus(level)
+		
+		// Check for conditions
+		var flurryConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&flurryConds)
+		var flurryConditions []string
+		json.Unmarshal(flurryConds, &flurryConditions)
+		
+		flurryAdvantage, flurryDisadvantage := getAttackModifiers(charID, flurryConditions, false)
+		if requestedAdvantage {
+			flurryAdvantage = true
+		}
+		if requestedDisadvantage {
+			flurryDisadvantage = true
+		}
+		
+		// Check for Open Hand Technique
+		isOpenHand := subclass.Valid && subclass.String == "open_hand" && level >= 3
+		
+		// Parse Open Hand effect from description if applicable
+		// Format: "flurry_of_blows with effect: prone" or "flurry with effect: push" or "flurry with effect: no_reactions"
+		openHandEffect := ""
+		if isOpenHand {
+			descLower := strings.ToLower(description)
+			if strings.Contains(descLower, "effect:") {
+				parts := strings.Split(descLower, "effect:")
+				if len(parts) > 1 {
+					effect := strings.TrimSpace(parts[1])
+					effect = strings.Split(effect, " ")[0] // Take first word after effect:
+					switch {
+					case strings.Contains(effect, "prone"):
+						openHandEffect = "prone"
+					case strings.Contains(effect, "push"):
+						openHandEffect = "push"
+					case strings.Contains(effect, "no_reaction"), strings.Contains(effect, "reaction"):
+						openHandEffect = "no_reactions"
+					}
+				}
+			}
+		}
+		
+		// Make two unarmed strikes
+		var results []string
+		totalDamage := 0
+		
+		for strike := 1; strike <= 2; strike++ {
+			// Roll attack
+			var fRoll, fRoll1, fRoll2 int
+			fRollType := "normal"
+			if flurryAdvantage && !flurryDisadvantage {
+				fRoll, fRoll1, fRoll2 = rollWithAdvantage()
+				fRollType = "advantage"
+			} else if flurryDisadvantage && !flurryAdvantage {
+				fRoll, fRoll1, fRoll2 = rollWithDisadvantage()
+				fRollType = "disadvantage"
+			} else {
+				fRoll = rollDie(20)
+				fRoll1, fRoll2 = fRoll, 0
+			}
+			
+			fTotalAttack := fRoll + flurryAttackMod
+			
+			fRollInfo := ""
+			if fRollType != "normal" {
+				fRollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", fRollType, fRoll1, fRoll2, fRoll)
+			}
+			
+			// Critical hit
+			if fRoll == 20 {
+				fDmg := rollDamage(monkDie, true) + flurryDamageMod
+				totalDamage += fDmg
+				strikeResult := fmt.Sprintf("Strike %d: %d (nat 20 CRITICAL!)%s - %d damage", strike, fTotalAttack, fRollInfo, fDmg)
+				
+				// Apply Open Hand effect on crit
+				if isOpenHand && openHandEffect != "" {
+					strikeResult += " " + applyOpenHandEffect(charID, openHandEffect, level)
+				}
+				results = append(results, strikeResult)
+				continue
+			}
+			
+			// Critical miss
+			if fRoll == 1 {
+				results = append(results, fmt.Sprintf("Strike %d: %d (nat 1 - miss!)%s", strike, fTotalAttack, fRollInfo))
+				continue
+			}
+			
+			// Normal hit (damage calculated, GM determines if it hits)
+			fDmg := rollDamage(monkDie, false) + flurryDamageMod
+			totalDamage += fDmg
+			strikeResult := fmt.Sprintf("Strike %d: %d to hit%s - %d damage", strike, fTotalAttack, fRollInfo, fDmg)
+			
+			// Apply Open Hand effect on hit
+			if isOpenHand && openHandEffect != "" {
+				strikeResult += " " + applyOpenHandEffect(charID, openHandEffect, level)
+			}
+			results = append(results, strikeResult)
+		}
+		
+		// Build response
+		header := fmt.Sprintf("👊 Flurry of Blows! (1 ki spent, %d remaining)", kiRemaining)
+		if isOpenHand && openHandEffect == "" {
+			header += "\n💫 Open Hand Technique: Specify 'effect: prone', 'effect: push', or 'effect: no_reactions' to impose effects on hits!"
+		}
+		
+		return header + "\n" + strings.Join(results, "\n") + fmt.Sprintf("\nTotal damage if both hit: %d", totalDamage)
+
+	case "patient_defense":
+		// v0.9.2: Monk's Patient Defense
+		// Spend 1 ki point to take Dodge action as bonus action
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "monk" {
+			return "Only monks can use Patient Defense!"
+		}
+		
+		if level < 2 {
+			return "Patient Defense requires Ki (level 2+)!"
+		}
+		
+		// Spend 1 ki point
+		pdSuccess, pdErr, pdRemaining := useClassResource(charID, "ki", 1)
+		if !pdSuccess {
+			return fmt.Sprintf("Cannot use Patient Defense: %s", pdErr)
+		}
+		
+		// Add dodge condition
+		var existingPD []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingPD)
+		var pdConds []string
+		json.Unmarshal(existingPD, &pdConds)
+		pdConds = append(pdConds, "dodging")
+		updatedPD, _ := json.Marshal(pdConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedPD, charID)
+		
+		return fmt.Sprintf("🛡️ Patient Defense! (1 ki spent, %d remaining) Dodging - attacks against you have disadvantage until your next turn.", pdRemaining)
+
+	case "step_of_the_wind":
+		// v0.9.2: Monk's Step of the Wind
+		// Spend 1 ki point to take Dash or Disengage as bonus action, and jump distance is doubled
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "monk" {
+			return "Only monks can use Step of the Wind!"
+		}
+		
+		if level < 2 {
+			return "Step of the Wind requires Ki (level 2+)!"
+		}
+		
+		// Parse whether dash or disengage from description
+		stepAction := "dash"
+		descLower := strings.ToLower(description)
+		if strings.Contains(descLower, "disengage") {
+			stepAction = "disengage"
+		}
+		
+		// Spend 1 ki point
+		swSuccess, swErr, swRemaining := useClassResource(charID, "ki", 1)
+		if !swSuccess {
+			return fmt.Sprintf("Cannot use Step of the Wind: %s", swErr)
+		}
+		
+		if stepAction == "disengage" {
+			return fmt.Sprintf("💨 Step of the Wind (Disengage)! (1 ki spent, %d remaining) You can move without provoking opportunity attacks, and your jump distance is doubled this turn.", swRemaining)
+		}
+		return fmt.Sprintf("💨 Step of the Wind (Dash)! (1 ki spent, %d remaining) Your speed is doubled for this turn, and your jump distance is doubled.", swRemaining)
+
+	case "stunning_strike":
+		// v0.9.2: Monk's Stunning Strike
+		// When you hit with a melee weapon attack, spend 1 ki to force CON save or stunned
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "monk" {
+			return "Only monks can use Stunning Strike!"
+		}
+		
+		if level < 5 {
+			return "Stunning Strike requires level 5+!"
+		}
+		
+		// Spend 1 ki point
+		ssSuccess, ssErr, ssRemaining := useClassResource(charID, "ki", 1)
+		if !ssSuccess {
+			return fmt.Sprintf("Cannot use Stunning Strike: %s", ssErr)
+		}
+		
+		// Calculate ki save DC: 8 + proficiency + WIS modifier
+		var wis int
+		db.QueryRow("SELECT wis FROM characters WHERE id = $1", charID).Scan(&wis)
+		kiSaveDC := 8 + proficiencyBonus(level) + modifier(wis)
+		
+		return fmt.Sprintf("⚡ Stunning Strike! (1 ki spent, %d remaining) Target must make CON save DC %d or be STUNNED until the end of your next turn.", ssRemaining, kiSaveDC)
 
 	case "ready":
 		// Ready action: hold your action for a trigger condition
@@ -23317,6 +23562,30 @@ func isPreparedCaster(class string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// applyOpenHandEffect applies Way of the Open Hand Technique effects (v0.9.2)
+// Called when a monk with Open Hand subclass hits with Flurry of Blows
+// Effects:
+// - prone: DEX save or knocked prone
+// - push: STR save or pushed up to 15 feet
+// - no_reactions: target can't take reactions until end of monk's next turn
+func applyOpenHandEffect(charID int, effect string, level int) string {
+	// Calculate Ki save DC: 8 + proficiency + WIS modifier
+	var wis int
+	db.QueryRow("SELECT wis FROM characters WHERE id = $1", charID).Scan(&wis)
+	kiSaveDC := 8 + proficiencyBonus(level) + modifier(wis)
+	
+	switch effect {
+	case "prone":
+		return fmt.Sprintf("[Open Hand: Target must make DEX save DC %d or be knocked PRONE]", kiSaveDC)
+	case "push":
+		return fmt.Sprintf("[Open Hand: Target must make STR save DC %d or be pushed up to 15 feet away]", kiSaveDC)
+	case "no_reactions":
+		return "[Open Hand: Target can't take REACTIONS until the end of your next turn (no save)]"
+	default:
+		return ""
 	}
 }
 
