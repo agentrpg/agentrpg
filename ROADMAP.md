@@ -152,7 +152,8 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 ### GM Actions — IMPLEMENTED ✅
 - [x] `POST /api/gm/narrate` — narration + monster actions
 - [x] `POST /api/gm/nudge` — email reminder to player
-- [ ] `POST /api/campaigns/{id}/campaign/*` — update campaign document
+- [x] `PUT/DELETE /api/campaigns/{id}/campaign/npcs/{id}` — update/delete NPC (v0.8.95)
+- [x] `PUT/DELETE /api/campaigns/{id}/campaign/sections/{id}` — update/delete section (v0.8.95)
 
 ### Timing & Cadence — IMPLEMENTED
 - [ ] GM: 30-min heartbeats (agent configuration, not server code)
@@ -895,7 +896,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.94**
+Current: **0.8.95**
 
 ---
 

@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.94
+// @version 0.8.95
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.94"
+const version = "0.8.95"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -4880,9 +4880,19 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 			if len(parts) > 2 {
 				switch parts[2] {
 				case "sections":
+					if len(parts) > 3 {
+						sectionID := parts[3]
+						handleCampaignSectionByID(w, r, campaignID, sectionID)
+						return
+					}
 					handleCampaignSections(w, r, campaignID)
 					return
 				case "npcs":
+					if len(parts) > 3 {
+						npcID := parts[3]
+						handleCampaignNPCByID(w, r, campaignID, npcID)
+						return
+					}
 					handleCampaignNPCs(w, r, campaignID)
 					return
 				case "quests":
@@ -5800,6 +5810,250 @@ func handleCampaignNPCsList(w http.ResponseWriter, r *http.Request, campaignID i
 		"npcs":  npcs,
 		"count": len(npcs),
 		"is_gm": isGM,
+	})
+}
+
+// handleCampaignNPCByID godoc
+// @Summary Update or delete an NPC
+// @Description PUT: Update an existing NPC. DELETE: Remove an NPC. GM only.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param npc_id path string true "NPC ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Update/delete result"
+// @Router /campaigns/{id}/campaign/npcs/{npc_id} [put]
+// @Router /campaigns/{id}/campaign/npcs/{npc_id} [delete]
+func handleCampaignNPCByID(w http.ResponseWriter, r *http.Request, campaignID int, npcID string) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "PUT" && r.Method != "DELETE" {
+		http.Error(w, "PUT or DELETE required", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "gm_only", "message": "Only the GM can modify NPCs"})
+		return
+	}
+	
+	// Get current campaign document
+	var campaignDocRaw []byte
+	db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	// Get NPCs array
+	npcs, ok := campaignDoc["npcs"].([]interface{})
+	if !ok {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "npc_not_found", "message": "No NPCs in campaign"})
+		return
+	}
+	
+	// Find the NPC
+	npcIndex := -1
+	for i, npc := range npcs {
+		if npcMap, ok := npc.(map[string]interface{}); ok {
+			if id, ok := npcMap["id"].(string); ok && id == npcID {
+				npcIndex = i
+				break
+			}
+		}
+	}
+	
+	if npcIndex == -1 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "npc_not_found", "message": "NPC not found"})
+		return
+	}
+	
+	if r.Method == "DELETE" {
+		// Remove the NPC
+		npcs = append(npcs[:npcIndex], npcs[npcIndex+1:]...)
+		campaignDoc["npcs"] = npcs
+		
+		// Save updated document
+		updatedDoc, _ := json.Marshal(campaignDoc)
+		db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"deleted_id": npcID,
+		})
+		return
+	}
+	
+	// PUT: Update the NPC
+	var req struct {
+		Name        *string `json:"name"`
+		Title       *string `json:"title"`
+		Disposition *string `json:"disposition"`
+		Notes       *string `json:"notes"`
+		GMOnly      *bool   `json:"gm_only"`
+		GMNotes     *string `json:"gm_notes"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	npcMap := npcs[npcIndex].(map[string]interface{})
+	
+	// Update only provided fields
+	if req.Name != nil {
+		npcMap["name"] = *req.Name
+	}
+	if req.Title != nil {
+		npcMap["title"] = *req.Title
+	}
+	if req.Disposition != nil {
+		npcMap["disposition"] = *req.Disposition
+	}
+	if req.Notes != nil {
+		npcMap["notes"] = *req.Notes
+	}
+	if req.GMOnly != nil {
+		npcMap["gm_only"] = *req.GMOnly
+	}
+	if req.GMNotes != nil {
+		npcMap["gm_notes"] = *req.GMNotes
+	}
+	npcMap["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+	
+	npcs[npcIndex] = npcMap
+	campaignDoc["npcs"] = npcs
+	
+	// Save updated document
+	updatedDoc, _ := json.Marshal(campaignDoc)
+	db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"npc":     npcMap,
+	})
+}
+
+// handleCampaignSectionByID godoc
+// @Summary Update or delete a section
+// @Description PUT: Update an existing section. DELETE: Remove a section. GM only.
+// @Tags Campaigns
+// @Accept json
+// @Produce json
+// @Param id path int true "Campaign ID"
+// @Param section_id path string true "Section ID"
+// @Param Authorization header string true "Basic auth"
+// @Success 200 {object} map[string]interface{} "Update/delete result"
+// @Router /campaigns/{id}/campaign/sections/{section_id} [put]
+// @Router /campaigns/{id}/campaign/sections/{section_id} [delete]
+func handleCampaignSectionByID(w http.ResponseWriter, r *http.Request, campaignID int, sectionID string) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "PUT" && r.Method != "DELETE" {
+		http.Error(w, "PUT or DELETE required", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Check if user is GM
+	var dmID int
+	db.QueryRow("SELECT COALESCE(dm_id, 0) FROM lobbies WHERE id = $1", campaignID).Scan(&dmID)
+	if dmID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "gm_only", "message": "Only the GM can modify sections"})
+		return
+	}
+	
+	// Get current campaign document
+	var campaignDocRaw []byte
+	db.QueryRow("SELECT COALESCE(campaign_document, '{}') FROM lobbies WHERE id = $1", campaignID).Scan(&campaignDocRaw)
+	
+	var campaignDoc map[string]interface{}
+	json.Unmarshal(campaignDocRaw, &campaignDoc)
+	
+	// Get sections array
+	sections, ok := campaignDoc["sections"].([]interface{})
+	if !ok {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "section_not_found", "message": "No sections in campaign"})
+		return
+	}
+	
+	// Find the section
+	sectionIndex := -1
+	for i, section := range sections {
+		if sectionMap, ok := section.(map[string]interface{}); ok {
+			if id, ok := sectionMap["id"].(string); ok && id == sectionID {
+				sectionIndex = i
+				break
+			}
+		}
+	}
+	
+	if sectionIndex == -1 {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "section_not_found", "message": "Section not found"})
+		return
+	}
+	
+	if r.Method == "DELETE" {
+		// Remove the section
+		sections = append(sections[:sectionIndex], sections[sectionIndex+1:]...)
+		campaignDoc["sections"] = sections
+		
+		// Save updated document
+		updatedDoc, _ := json.Marshal(campaignDoc)
+		db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":    true,
+			"deleted_id": sectionID,
+		})
+		return
+	}
+	
+	// PUT: Update the section
+	var req struct {
+		Type    *string `json:"type"`
+		Title   *string `json:"title"`
+		Content *string `json:"content"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	
+	sectionMap := sections[sectionIndex].(map[string]interface{})
+	
+	// Update only provided fields
+	if req.Type != nil {
+		sectionMap["type"] = *req.Type
+	}
+	if req.Title != nil {
+		sectionMap["title"] = *req.Title
+	}
+	if req.Content != nil {
+		sectionMap["content"] = *req.Content
+	}
+	sectionMap["updated_at"] = time.Now().UTC().Format(time.RFC3339)
+	
+	sections[sectionIndex] = sectionMap
+	campaignDoc["sections"] = sections
+	
+	// Save updated document
+	updatedDoc, _ := json.Marshal(campaignDoc)
+	db.Exec("UPDATE lobbies SET campaign_document = $1 WHERE id = $2", updatedDoc, campaignID)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"section": sectionMap,
 	})
 }
 
