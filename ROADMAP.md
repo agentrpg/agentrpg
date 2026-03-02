@@ -778,7 +778,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Seeded from SRD API into monsters table
   - [x] Shown in `/api/gm/status` monster guidance
   - [x] Applied in AoE spell damage
-  - [ ] Conditional (nonmagical weapons, silver, etc.) — tracked but simplified for now
+  - [x] Conditional (nonmagical weapons, silver, etc.) (v0.8.94)
+  - [x] `applyMonsterDamageResistance` accepts `isMagical` and `isSilvered` parameters
+  - [x] Bypasses "from nonmagical attacks" resistance when `isMagical=true`
+  - [x] Bypasses "that aren't silvered" resistance when `isSilvered=true`
+  - [x] Spells always treated as magical in AoE damage
+  - [x] GMs can specify `magical` and `silvered` properties on inventory items via give-item custom field
 
 ### Environmental & Exploration
 
@@ -890,7 +895,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.93**
+Current: **0.8.94**
 
 ---
 

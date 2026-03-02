@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.89
+// @version 0.8.94
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.93"
+const version = "0.8.94"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -124,10 +124,12 @@ func applyDamageResistance(charID int, damage int, damageType string) DamageModR
 	return result
 }
 
-// applyMonsterDamageResistance checks monster damage resistances/immunities/vulnerabilities (v0.8.31)
+// applyMonsterDamageResistance checks monster damage resistances/immunities/vulnerabilities (v0.8.31, v0.8.94)
 // monsterKey is the slug of the monster from the SRD (e.g., "ancient-red-dragon")
 // damageType is the type of damage being dealt (e.g., "fire", "slashing", "bludgeoning")
-func applyMonsterDamageResistance(monsterKey string, damage int, damageType string) DamageModResult {
+// isMagical is true if the damage source is magical (spells, +1 weapons, etc.) - bypasses "nonmagical" resistances
+// isSilvered is true if the weapon is silvered - bypasses "that aren't silvered" resistances
+func applyMonsterDamageResistance(monsterKey string, damage int, damageType string, isMagical bool, isSilvered bool) DamageModResult {
 	result := DamageModResult{
 		FinalDamage:     damage,
 		Resistances:     []string{},
@@ -156,7 +158,7 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	if immunities != "" {
 		for _, immunity := range strings.Split(immunities, ",") {
 			immunity = strings.TrimSpace(strings.ToLower(immunity))
-			if matchesDamageType(damageType, immunity) {
+			if matchesDamageType(damageType, immunity, isMagical, isSilvered) {
 				result.FinalDamage = 0
 				result.Immunities = append(result.Immunities, immunity)
 				result.WasNegated = true
@@ -169,7 +171,7 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	if vulnerabilities != "" {
 		for _, vulnerability := range strings.Split(vulnerabilities, ",") {
 			vulnerability = strings.TrimSpace(strings.ToLower(vulnerability))
-			if matchesDamageType(damageType, vulnerability) {
+			if matchesDamageType(damageType, vulnerability, isMagical, isSilvered) {
 				result.FinalDamage = damage * 2
 				result.Vulnerabilities = append(result.Vulnerabilities, vulnerability)
 				result.WasDoubled = true
@@ -183,7 +185,7 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	if resistances != "" {
 		for _, resistance := range strings.Split(resistances, ",") {
 			resistance = strings.TrimSpace(strings.ToLower(resistance))
-			if matchesDamageType(damageType, resistance) {
+			if matchesDamageType(damageType, resistance, isMagical, isSilvered) {
 				if result.WasDoubled {
 					// Vulnerability + Resistance = normal damage
 					result.FinalDamage = damage
@@ -201,20 +203,42 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	return result
 }
 
-// matchesDamageType checks if a damage type matches a resistance/immunity/vulnerability string
+// matchesDamageType checks if a damage type matches a resistance/immunity/vulnerability string (v0.8.94)
 // Handles both simple ("fire") and complex ("bludgeoning, piercing, and slashing from nonmagical attacks") entries
-func matchesDamageType(damageType, resistanceEntry string) bool {
-	// Simple match
+// isMagical: true if the damage source is magical (spells, +1 weapons, etc.)
+// isSilvered: true if the weapon is silvered
+func matchesDamageType(damageType, resistanceEntry string, isMagical bool, isSilvered bool) bool {
+	// Simple match (no conditional modifiers)
 	if damageType == resistanceEntry {
 		return true
 	}
 	
 	// Check if damage type is contained in the entry (for complex strings)
 	// e.g., "bludgeoning, piercing, and slashing from nonmagical attacks"
+	// e.g., "bludgeoning, piercing, and slashing from nonmagical attacks that aren't silvered"
 	if strings.Contains(resistanceEntry, damageType) {
-		// TODO: In the future, track if weapon is magical to handle
-		// "from nonmagical attacks" properly. For now, assume all attacks
-		// are nonmagical unless noted.
+		entryLower := strings.ToLower(resistanceEntry)
+		
+		// Check for "nonmagical" condition
+		// Common phrasings: "from nonmagical attacks", "from nonmagical weapons"
+		isNonmagicalOnly := strings.Contains(entryLower, "nonmagical")
+		
+		// Check for "silvered" exception
+		// Common phrasing: "that aren't silvered"
+		hasSilveredExemption := strings.Contains(entryLower, "aren't silvered") || 
+			strings.Contains(entryLower, "not silvered") ||
+			strings.Contains(entryLower, "except silver")
+		
+		// If resistance only applies to nonmagical attacks and this IS magical, resistance doesn't apply
+		if isNonmagicalOnly && isMagical {
+			return false
+		}
+		
+		// If resistance has a silvered exemption and weapon IS silvered, resistance doesn't apply
+		if hasSilveredExemption && isSilvered {
+			return false
+		}
+		
 		return true
 	}
 	
@@ -14059,9 +14083,9 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 							targetHP = e.HP
 							targetMaxHP = e.MaxHP
 							
-							// Apply monster damage resistance
+							// Apply monster damage resistance (spells are always magical - v0.8.94)
 							if e.MonsterKey != "" && damageType != "" {
-								dmgMod := applyMonsterDamageResistance(e.MonsterKey, damage, damageType)
+								dmgMod := applyMonsterDamageResistance(e.MonsterKey, damage, damageType, true, false)
 								if dmgMod.WasNegated {
 									damage = 0
 									result["immunities_applied"] = dmgMod.Immunities
