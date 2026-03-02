@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.88
+// @version 0.8.89
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.88"
+const version = "0.8.89"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -8130,7 +8130,7 @@ func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool) []map[
 	case "barbarian":
 		bonusActions = append(bonusActions, map[string]interface{}{
 			"name":        "rage",
-			"description": "Enter a rage (if not already raging). Gain resistance to bludgeoning, piercing, and slashing damage, and bonus damage on melee attacks.",
+			"description": "Enter a rage (if not already raging). Gain resistance to bludgeoning, piercing, and slashing damage, +2 damage on melee attacks. Berserkers gain Mindless Rage (immune to charm/frighten) at level 6.",
 		})
 	case "fighter":
 		bonusActions = append(bonusActions, map[string]interface{}{
@@ -17967,6 +17967,71 @@ func resolveAction(action, description string, charID int) string {
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
 		return "Dodging. Attacks against you have disadvantage until your next turn."
 	
+	case "rage":
+		// v0.8.89: Barbarian rage - add raging condition
+		// Rage grants: advantage on STR checks/saves, +2 damage on STR melee attacks,
+		// resistance to bludgeoning/piercing/slashing damage
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "barbarian" {
+			return "Only barbarians can rage!"
+		}
+		
+		// Check if already raging
+		var existingConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
+		var currentConds []string
+		json.Unmarshal(existingConds, &currentConds)
+		for _, c := range currentConds {
+			if c == "raging" {
+				return "You are already raging!"
+			}
+		}
+		
+		// Add raging condition
+		currentConds = append(currentConds, "raging")
+		updatedConds, _ := json.Marshal(currentConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
+		
+		// Build response with subclass-specific info
+		rageInfo := "⚔️ RAGE! While raging: advantage on STR checks/saves, +2 damage on STR melee attacks, resistance to bludgeoning/piercing/slashing damage."
+		
+		// Check for Berserker features
+		if subclass.Valid && subclass.String == "berserker" {
+			if level >= 6 {
+				rageInfo += " (Mindless Rage: immune to charm and frighten while raging!)"
+			}
+			if level >= 3 {
+				rageInfo += " You can choose to FRENZY for a bonus action melee attack each turn (causes 1 exhaustion when rage ends)."
+			}
+		}
+		
+		return rageInfo
+	
+	case "end_rage":
+		// v0.8.89: End rage early
+		var existingConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
+		var currentConds []string
+		json.Unmarshal(existingConds, &currentConds)
+		
+		wasRaging := false
+		newConds := []string{}
+		for _, c := range currentConds {
+			if c == "raging" {
+				wasRaging = true
+			} else {
+				newConds = append(newConds, c)
+			}
+		}
+		
+		if !wasRaging {
+			return "You are not currently raging."
+		}
+		
+		updatedConds, _ := json.Marshal(newConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
+		return "Your rage ends."
+	
 	case "use_item":
 		// Parse item from description
 		itemKey := parseConsumableFromDescription(description)
@@ -25937,6 +26002,32 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 					"message":         fmt.Sprintf("🛡️ %s is immune to being frightened through their Aura of Courage! The fear effect has no effect.", charName),
 				})
 				return
+			}
+			
+			// v0.8.89: Berserker's Mindless Rage - immune to charm/frightened while raging
+			if classKey == "barbarian" && level >= 6 {
+				if subclass.Valid && subclass.String == "berserker" {
+					// Check if currently raging
+					isRaging := false
+					for _, c := range conditions {
+						if c == "raging" {
+							isRaging = true
+							break
+						}
+					}
+					if isRaging {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"success":         true,
+							"immune":          true,
+							"immunity_source": "Mindless Rage (Berserker Barbarian level 6+ while raging)",
+							"character":       charName,
+							"character_id":    charID,
+							"condition":       condition,
+							"message":         fmt.Sprintf("⚔️ %s is immune to being %s through Mindless Rage! Their fury cannot be swayed.", charName, baseCondition),
+						})
+						return
+					}
+				}
 			}
 		}
 	}

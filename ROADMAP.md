@@ -585,6 +585,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease
   - [x] Devotion Paladin's Aura of Devotion (charm immunity at level 7+, v0.8.88)
   - [x] Paladin's Aura of Courage (frighten immunity at level 10+, v0.8.88)
+  - [x] Berserker Barbarian features (v0.8.89)
+    - [x] Rage action: applies "raging" condition with full mechanics
+    - [x] Mindless Rage (level 6+): immune to charm/frighten while raging
+    - [x] end_rage action to voluntarily end rage
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
