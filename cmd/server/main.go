@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.99"
+const version = "0.9.0"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -451,6 +451,8 @@ func main() {
 	http.HandleFunc("/api/universe/spells/", handleUniverseSpell)
 	http.HandleFunc("/api/universe/classes", handleUniverseClasses)
 	http.HandleFunc("/api/universe/classes/", handleUniverseClass)
+	http.HandleFunc("/api/universe/class-spells", handleUniverseClassSpells)
+	http.HandleFunc("/api/universe/class-spells/", handleUniverseClassSpellList)
 	http.HandleFunc("/api/universe/races", handleUniverseRaces)
 	http.HandleFunc("/api/universe/races/", handleUniverseRace)
 	http.HandleFunc("/api/universe/weapons", handleUniverseWeapons)
@@ -951,6 +953,17 @@ func initDB() {
 		source VARCHAR(50) DEFAULT 'srd',
 		created_at TIMESTAMP DEFAULT NOW()
 	);
+	
+	-- Class spell lists (which spells each class can learn/prepare)
+	CREATE TABLE IF NOT EXISTS class_spells (
+		id SERIAL PRIMARY KEY,
+		class_slug VARCHAR(50) NOT NULL,
+		spell_slug VARCHAR(100) NOT NULL,
+		created_at TIMESTAMP DEFAULT NOW(),
+		UNIQUE(class_slug, spell_slug)
+	);
+	CREATE INDEX IF NOT EXISTS idx_class_spells_class ON class_spells(class_slug);
+	CREATE INDEX IF NOT EXISTS idx_class_spells_spell ON class_spells(spell_slug);
 	
 	CREATE TABLE IF NOT EXISTS classes (
 		id SERIAL PRIMARY KEY,
@@ -23301,14 +23314,23 @@ func getMaxPreparedSpells(class string, level, intl, wis, cha int) int {
 	return preparedCount
 }
 
-// getClassSpellList returns all spell slugs available to a class
-// NOTE: Currently returns nil as class spell lists aren't seeded from SRD
-// Validation against class spell list is skipped - any SRD spell can be prepared
-// TODO: Seed class spell lists from https://www.dnd5eapi.co/api/classes/{class}/spells
+// getClassSpellList returns all spell slugs available to a class from the class_spells table
+// Returns nil if class spell list not seeded (allows any SRD spell as fallback)
 func getClassSpellList(class string) []string {
-	// For now, return nil - prepared spell validation only checks SRD exists
-	// Future: fetch from seeded class_spells table
-	return nil
+	rows, err := db.Query(`SELECT spell_slug FROM class_spells WHERE class_slug = $1`, strings.ToLower(class))
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var spells []string
+	for rows.Next() {
+		var slug string
+		if err := rows.Scan(&slug); err == nil {
+			spells = append(spells, slug)
+		}
+	}
+	return spells // Returns nil if no rows found
 }
 
 // getCritRange returns the critical hit range for a character (default 20, can be 19 or 18 for Champions)
@@ -28235,11 +28257,47 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 				slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
 				// Try to find the spell in SRD
 				if _, ok := srdSpellsMemory[slugLower]; ok {
+					// Check class spell list before adding
+					classSpellList := getClassSpellList(class)
+					if classSpellList != nil && len(classSpellList) > 0 {
+						isOnList := false
+						for _, cs := range classSpellList {
+							if cs == slugLower {
+								isOnList = true
+								break
+							}
+						}
+						if !isOnList {
+							json.NewEncoder(w).Encode(map[string]interface{}{
+								"error":   "not_on_class_list",
+								"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[slugLower].Name, class, strings.ToLower(class)),
+							})
+							return
+						}
+					}
 					newSpells = append(newSpells, slugLower)
 				} else {
 					// Try with dashes
 					slugDashed := strings.ReplaceAll(slugLower, " ", "-")
 					if _, ok := srdSpellsMemory[slugDashed]; ok {
+						// Check class spell list before adding
+						classSpellList := getClassSpellList(class)
+						if classSpellList != nil && len(classSpellList) > 0 {
+							isOnList := false
+							for _, cs := range classSpellList {
+								if cs == slugDashed {
+									isOnList = true
+									break
+								}
+							}
+							if !isOnList {
+								json.NewEncoder(w).Encode(map[string]interface{}{
+									"error":   "not_on_class_list",
+									"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[slugDashed].Name, class, strings.ToLower(class)),
+								})
+								return
+							}
+						}
 						newSpells = append(newSpells, slugDashed)
 					} else {
 						json.NewEncoder(w).Encode(map[string]interface{}{
@@ -28273,6 +28331,24 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 						"message": fmt.Sprintf("Spell '%s' not found in SRD.", spellSlug),
 					})
 					return
+				}
+				// Check class spell list
+				classSpellList := getClassSpellList(class)
+				if classSpellList != nil && len(classSpellList) > 0 {
+					isOnList := false
+					for _, cs := range classSpellList {
+						if cs == validSlug {
+							isOnList = true
+							break
+						}
+					}
+					if !isOnList {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"error":   "not_on_class_list",
+							"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[validSlug].Name, class, strings.ToLower(class)),
+						})
+						return
+					}
 				}
 				// Check if already known
 				alreadyKnown := false
@@ -28502,6 +28578,25 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 					"message": fmt.Sprintf("Spell '%s' not found in SRD. Check /api/universe/spells for valid spell slugs.", spellSlug),
 				})
 				return
+			}
+			
+			// Check if spell is on the class spell list
+			classSpellList := getClassSpellList(className)
+			if classSpellList != nil && len(classSpellList) > 0 {
+				isOnList := false
+				for _, cs := range classSpellList {
+					if cs == validSlug {
+						isOnList = true
+						break
+					}
+				}
+				if !isOnList {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":   "not_on_class_list",
+						"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[validSlug].Name, className, strings.ToLower(className)),
+					})
+					return
+				}
 			}
 			
 			// Check spell level isn't too high for this character's slots
@@ -31091,6 +31186,118 @@ func handleUniverseClass(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(c)
+}
+
+// handleUniverseClassSpells godoc
+// @Summary List all spellcasting classes with spell counts
+// @Description Returns list of classes that have spell lists with their spell counts
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of classes with spell counts"
+// @Router /universe/class-spells [get]
+func handleUniverseClassSpells(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	rows, err := db.Query(`
+		SELECT class_slug, COUNT(*) as spell_count 
+		FROM class_spells 
+		GROUP BY class_slug 
+		ORDER BY class_slug
+	`)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type ClassSpellCount struct {
+		Class      string `json:"class"`
+		SpellCount int    `json:"spell_count"`
+	}
+	classes := []ClassSpellCount{}
+	for rows.Next() {
+		var c ClassSpellCount
+		rows.Scan(&c.Class, &c.SpellCount)
+		classes = append(classes, c)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"classes": classes, "count": len(classes)})
+}
+
+// handleUniverseClassSpellList godoc
+// @Summary Get spell list for a class
+// @Description Returns all spells available to a specific class with optional level filter
+// @Tags Universe
+// @Produce json
+// @Param class path string true "Class slug (e.g., wizard, cleric)"
+// @Param level query int false "Filter by spell level (0-9)"
+// @Success 200 {object} map[string]interface{} "List of spells for the class"
+// @Failure 404 {object} map[string]interface{} "Class not found or has no spell list"
+// @Router /universe/class-spells/{class} [get]
+func handleUniverseClassSpellList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	class := strings.TrimPrefix(r.URL.Path, "/api/universe/class-spells/")
+	class = strings.ToLower(class)
+
+	// Optional level filter
+	levelFilter := r.URL.Query().Get("level")
+
+	var query string
+	var args []interface{}
+
+	if levelFilter != "" {
+		level, err := strconv.Atoi(levelFilter)
+		if err != nil || level < 0 || level > 9 {
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid_level"})
+			return
+		}
+		query = `
+			SELECT s.slug, s.name, s.level, s.school
+			FROM class_spells cs
+			JOIN spells s ON s.slug = cs.spell_slug
+			WHERE cs.class_slug = $1 AND s.level = $2
+			ORDER BY s.level, s.name
+		`
+		args = []interface{}{class, level}
+	} else {
+		query = `
+			SELECT s.slug, s.name, s.level, s.school
+			FROM class_spells cs
+			JOIN spells s ON s.slug = cs.spell_slug
+			WHERE cs.class_slug = $1
+			ORDER BY s.level, s.name
+		`
+		args = []interface{}{class}
+	}
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	type SpellInfo struct {
+		Slug   string `json:"slug"`
+		Name   string `json:"name"`
+		Level  int    `json:"level"`
+		School string `json:"school"`
+	}
+	spells := []SpellInfo{}
+	for rows.Next() {
+		var s SpellInfo
+		rows.Scan(&s.Slug, &s.Name, &s.Level, &s.School)
+		spells = append(spells, s)
+	}
+
+	if len(spells) == 0 {
+		json.NewEncoder(w).Encode(map[string]string{"error": "class_not_found_or_no_spells"})
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"class":  class,
+		"spells": spells,
+		"count":  len(spells),
+	})
 }
 
 // handleUniverseRaces godoc

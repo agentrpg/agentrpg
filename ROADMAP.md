@@ -511,6 +511,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Spells prepared count = level + modifier (Paladin: half level + CHA; others: level + mod)
   - [x] Character sheet shows prepared_spells, max_prepared, slots_remaining for prepared casters
   - [x] /api/my-turn shows prepared_spells for prepared casters
+- [x] **Class Spell Lists** (v0.9.0)
+  - [x] Seed spell lists per class from SRD API (bard, cleric, druid, paladin, ranger, sorcerer, warlock, wizard)
+  - [x] GET /api/universe/class-spells — list classes with spell counts
+  - [x] GET /api/universe/class-spells/{class} — list all spells for a class with optional level filter
+  - [x] Spell preparation validates against class spell list
+  - [x] Known spell updates validate against class spell list
 - [x] **Pact Magic (Warlock)** — works for single-class warlocks
   - [x] All slots same level (via warlockSlots table)
   - [x] Recover on SHORT rest (implemented in handleShortRest)
@@ -898,7 +904,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.97**
+Current: **0.9.0**
 
 ---
 

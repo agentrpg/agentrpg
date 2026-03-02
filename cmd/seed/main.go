@@ -56,11 +56,22 @@ func main() {
 		log.Println("Migration warning:", err)
 	}
 
+	// Run class spells migration
+	migration4, err := os.ReadFile("migrations/004_class_spells.sql")
+	if err != nil {
+		log.Println("Migration 004 warning:", err)
+	} else {
+		if _, err := db.Exec(string(migration4)); err != nil {
+			log.Println("Migration 004 warning:", err)
+		}
+	}
+
 	seedMonsters(db)
 	seedSpells(db)
 	seedClasses(db)
 	seedRaces(db)
 	seedEquipment(db)
+	seedClassSpells(db)
 
 	fmt.Println("Done!")
 }
@@ -574,4 +585,46 @@ func extractConditionImmunities(m map[string]interface{}) string {
 		return strings.Join(conditions, ", ")
 	}
 	return ""
+}
+
+// seedClassSpells fetches and seeds which spells each class can learn
+func seedClassSpells(db *sql.DB) {
+	// Spellcasting classes in 5e SRD
+	spellcastingClasses := []string{"bard", "cleric", "druid", "paladin", "ranger", "sorcerer", "warlock", "wizard"}
+
+	fmt.Print("Fetching class spell lists...")
+
+	stmt, _ := db.Prepare(`
+		INSERT INTO class_spells (class_slug, spell_slug)
+		VALUES ($1, $2)
+		ON CONFLICT (class_slug, spell_slug) DO NOTHING
+	`)
+
+	total := 0
+	for _, class := range spellcastingClasses {
+		url := fmt.Sprintf("%s/classes/%s/spells", apiBase, class)
+		data, err := fetch(url)
+		if err != nil {
+			fmt.Printf("\n  Warning: failed to fetch %s spells: %v\n", class, err)
+			continue
+		}
+
+		var resp struct {
+			Count   int `json:"count"`
+			Results []struct {
+				Index string `json:"index"`
+			} `json:"results"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			fmt.Printf("\n  Warning: failed to parse %s spells: %v\n", class, err)
+			continue
+		}
+
+		for _, spell := range resp.Results {
+			stmt.Exec(class, spell.Index)
+			total++
+		}
+	}
+
+	fmt.Printf(" %d class-spell mappings inserted\n", total)
 }
