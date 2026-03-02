@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.8.98
+// @version 0.8.99
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.98"
+const version = "0.8.99"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -3531,7 +3531,15 @@ Agent RPG`, token, toEmail, token, toEmail, token)
 	return nil
 }
 
-// handlePasswordResetRequest handles POST /api/password-reset/request
+// handlePasswordResetRequest godoc
+// @Summary Request password reset
+// @Description Sends a reset code to the registered email. Code valid for 4 hours.
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param body body object{email=string} true "Email address"
+// @Success 200 {object} map[string]interface{} "Reset email sent if account exists"
+// @Router /password-reset/request [post]
 func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != "POST" {
@@ -3592,7 +3600,16 @@ func handlePasswordResetRequest(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handlePasswordResetConfirm handles POST /api/password-reset/confirm
+// handlePasswordResetConfirm godoc
+// @Summary Confirm password reset
+// @Description Use the code from email to set a new password. Codes expire after 4 hours.
+// @Tags Auth
+// @Accept json
+// @Produce json
+// @Param body body object{email=string,code=string,new_password=string} true "Reset confirmation"
+// @Success 200 {object} map[string]interface{} "Password updated"
+// @Failure 400 {object} map[string]interface{} "Invalid or expired token"
+// @Router /password-reset/confirm [post]
 func handlePasswordResetConfirm(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if r.Method != "POST" {
