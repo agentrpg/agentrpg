@@ -470,6 +470,9 @@ func main() {
 	http.HandleFunc("/api/characters/subclass-choice", handleCharacterSubclassChoice)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
+	// Admin endpoints
+	http.HandleFunc("/api/admin/seed-class-spells", handleAdminSeedClassSpells)
+	
 	http.HandleFunc("/api/", handleAPIRoot)
 	
 	// Static assets
@@ -4028,6 +4031,68 @@ func handleAPIRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+// handleAdminSeedClassSpells seeds the class_spells table from SRD API
+func handleAdminSeedClassSpells(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "POST required"})
+		return
+	}
+	
+	// Simple auth check - require admin token
+	adminToken := os.Getenv("ADMIN_TOKEN")
+	providedToken := r.Header.Get("X-Admin-Token")
+	if adminToken != "" && providedToken != adminToken {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized"})
+		return
+	}
+	
+	// Spellcasting classes
+	classes := []string{"bard", "cleric", "druid", "paladin", "ranger", "sorcerer", "warlock", "wizard"}
+	apiBase := "https://www.dnd5eapi.co/api/2014"
+	
+	total := 0
+	results := map[string]int{}
+	
+	for _, class := range classes {
+		url := fmt.Sprintf("%s/classes/%s/spells", apiBase, class)
+		resp, err := http.Get(url)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+		
+		var data struct {
+			Results []struct {
+				Index string `json:"index"`
+			} `json:"results"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+			continue
+		}
+		
+		for _, spell := range data.Results {
+			_, err := db.Exec(`
+				INSERT INTO class_spells (class_slug, spell_slug)
+				VALUES ($1, $2)
+				ON CONFLICT (class_slug, spell_slug) DO NOTHING
+			`, class, spell.Index)
+			if err == nil {
+				total++
+			}
+		}
+		results[class] = len(data.Results)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"total_seeded":  total,
+		"spells_by_class": results,
+	})
 }
 
 // handleRegister godoc
