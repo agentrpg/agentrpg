@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.90"
+const version = "0.8.91"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1904,6 +1904,7 @@ func getClassResources(class string) []ClassResource {
 	case "druid":
 		return []ClassResource{
 			{Name: "Wild Shape", Key: "wild_shape", RecoverShort: true, RecoverLong: true},
+			{Name: "Natural Recovery", Key: "natural_recovery", RecoverShort: false, RecoverLong: true}, // v0.8.91: Circle of the Land only (checked at usage)
 		}
 	case "wizard":
 		return []ClassResource{
@@ -1998,6 +1999,12 @@ func getMaxClassResource(class string, level int, resourceKey string, chaMod int
 	case "arcane_recovery":
 		// Arcane Recovery = 1 use per day (PHB p115)
 		if classLower == "wizard" {
+			return 1
+		}
+	case "natural_recovery":
+		// v0.8.91: Natural Recovery = 1 use per day for Circle of the Land druids (PHB p68)
+		// Subclass check happens at usage time; resource tracking is for all druids
+		if classLower == "druid" && level >= 2 {
 			return 1
 		}
 	}
@@ -26186,34 +26193,59 @@ func handleRemoveCondition(w http.ResponseWriter, r *http.Request, charID int) {
 // @Router /characters/{id}/rest [post]
 // handleShortRest godoc
 // @Summary Take a short rest
-// @Description Spend hit dice to heal during a short rest (1+ hour). Warlock spell slots recover.
+// @Description Spend hit dice to heal during a short rest (1+ hour). Warlock spell slots recover. Wizards can use Arcane Recovery and Circle of the Land Druids can use Natural Recovery to regain spell slots (v0.8.91).
 // @Tags Characters
 // @Accept json
 // @Produce json
 // @Param id path int true "Character ID"
-// @Param request body object true "Hit dice to spend" example({"hit_dice": 2})
+// @Param request body object true "Short rest options" example({"hit_dice": 2, "recover_slots": [1, 2]})
 // @Success 200 {object} map[string]interface{} "Short rest results"
-// @Failure 400 {object} map[string]interface{} "No hit dice available or invalid request"
+// @Failure 400 {object} map[string]interface{} "No hit dice available, invalid slot recovery, or ability already used"
 // @Security BasicAuth
 // @Router /characters/{id}/short-rest [post]
+// v0.8.91: getSlotRecoveryAbility returns the spell slot recovery ability for a class/subclass combo
+// Returns: ability name (for resource tracking), max combined slot levels, max individual slot level, or empty if not available
+func getSlotRecoveryAbility(class, subclass string, level int) (abilityName string, maxCombined int, maxSlotLevel int) {
+	classLower := strings.ToLower(class)
+	subclassLower := strings.ToLower(subclass)
+	
+	// Wizard's Arcane Recovery (PHB p115) - all wizards get this at level 1
+	// Recover slots with combined level ≤ half wizard level (rounded up), max 5th level
+	if classLower == "wizard" {
+		maxCombined = (level + 1) / 2 // Round up
+		return "arcane_recovery", maxCombined, 5
+	}
+	
+	// Druid's Natural Recovery (PHB p68) - Circle of the Land druids only, level 2+
+	// Same mechanics as Arcane Recovery
+	if classLower == "druid" && subclassLower == "land" && level >= 2 {
+		maxCombined = (level + 1) / 2 // Round up
+		return "natural_recovery", maxCombined, 5
+	}
+	
+	return "", 0, 0
+}
+
 func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	w.Header().Set("Content-Type", "application/json")
 	
-	// Parse request - how many hit dice to spend
+	// Parse request - how many hit dice to spend, optional slot recovery
 	var req struct {
-		HitDice int `json:"hit_dice"`
+		HitDice      int   `json:"hit_dice"`
+		RecoverSlots []int `json:"recover_slots"` // v0.8.91: Array of slot levels to recover (e.g., [1, 2] = recover one 1st and one 2nd level slot)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		req.HitDice = 1 // Default to 1 die if not specified
+		req.HitDice = 0 // Default to 0 if not specified (don't spend hit dice unless requested)
 	}
 	
-	// Get character info
+	// Get character info including subclass for Natural Recovery
 	var class string
 	var level, hp, maxHP, con, hitDiceSpent int
+	var subclass sql.NullString
 	err := db.QueryRow(`
-		SELECT class, level, hp, max_hp, con, COALESCE(hit_dice_spent, 0) 
+		SELECT class, level, hp, max_hp, con, COALESCE(hit_dice_spent, 0), subclass
 		FROM characters WHERE id = $1
-	`, charID).Scan(&class, &level, &hp, &maxHP, &con, &hitDiceSpent)
+	`, charID).Scan(&class, &level, &hp, &maxHP, &con, &hitDiceSpent, &subclass)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "Character not found",
@@ -26286,6 +26318,113 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		warlockRecovery = "Pact Magic spell slots recovered!"
 	}
 	
+	// v0.8.91: Handle Arcane Recovery (Wizard) / Natural Recovery (Land Druid) slot recovery
+	var slotRecoveryResult map[string]interface{}
+	subclassStr := ""
+	if subclass.Valid {
+		subclassStr = subclass.String
+	}
+	
+	if len(req.RecoverSlots) > 0 {
+		abilityName, maxCombined, maxSlotLevel := getSlotRecoveryAbility(class, subclassStr, level)
+		
+		if abilityName == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "Your class/subclass cannot recover spell slots on short rest",
+				"details": "Only Wizards (Arcane Recovery) and Circle of the Land Druids (Natural Recovery) can recover slots.",
+			})
+			return
+		}
+		
+		// Check if ability has already been used (tracked as class resource)
+		current := getCurrentClassResources(charID)
+		if current[abilityName] <= 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   fmt.Sprintf("%s has already been used since your last long rest", strings.ReplaceAll(abilityName, "_", " ")),
+				"details": "This ability can only be used once per long rest.",
+			})
+			return
+		}
+		
+		// Validate recover_slots: each slot must be ≤ maxSlotLevel
+		totalLevels := 0
+		for _, slotLevel := range req.RecoverSlots {
+			if slotLevel < 1 || slotLevel > maxSlotLevel {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":          fmt.Sprintf("Cannot recover %d-level slots with %s", slotLevel, strings.ReplaceAll(abilityName, "_", " ")),
+					"max_slot_level": maxSlotLevel,
+				})
+				return
+			}
+			totalLevels += slotLevel
+		}
+		
+		// Validate total combined levels
+		if totalLevels > maxCombined {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":              "Combined slot levels exceed maximum",
+				"total_requested":    totalLevels,
+				"max_combined":       maxCombined,
+				"your_level":         level,
+				"details":            fmt.Sprintf("You can recover slots with combined levels up to %d (half your level, rounded up)", maxCombined),
+			})
+			return
+		}
+		
+		// Get current spell slots used and total slots
+		var usedJSON []byte
+		db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+		used := make(map[string]int)
+		json.Unmarshal(usedJSON, &used)
+		
+		totalSlots := getSpellSlots(class, level)
+		
+		// Count how many slots of each level we're recovering
+		slotsToRecover := make(map[int]int)
+		for _, slotLevel := range req.RecoverSlots {
+			slotsToRecover[slotLevel]++
+		}
+		
+		// Validate we have used slots to recover for each level
+		for slotLevel, countToRecover := range slotsToRecover {
+			slotKey := fmt.Sprintf("%d", slotLevel)
+			usedAtLevel := used[slotKey]
+			if usedAtLevel < countToRecover {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":           fmt.Sprintf("Cannot recover %d level %d slots - only %d used", countToRecover, slotLevel, usedAtLevel),
+					"used_slots":      used,
+					"total_slots":     totalSlots,
+				})
+				return
+			}
+		}
+		
+		// Apply recovery - reduce used slots
+		recovered := []string{}
+		for slotLevel, countToRecover := range slotsToRecover {
+			slotKey := fmt.Sprintf("%d", slotLevel)
+			used[slotKey] -= countToRecover
+			if used[slotKey] <= 0 {
+				delete(used, slotKey)
+			}
+			recovered = append(recovered, fmt.Sprintf("%d level %d", countToRecover, slotLevel))
+		}
+		
+		// Save updated spell slots used
+		updatedJSON, _ := json.Marshal(used)
+		db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, charID)
+		
+		// Mark the ability as used
+		useClassResource(charID, abilityName, 1)
+		
+		slotRecoveryResult = map[string]interface{}{
+			"ability":          strings.ReplaceAll(abilityName, "_", " "),
+			"slots_recovered":  recovered,
+			"total_levels":     totalLevels,
+			"max_combined":     maxCombined,
+		}
+	}
+	
 	// Recover class resources that refresh on short rest (v0.8.69)
 	classResourcesRecovered := recoverClassResources(charID, false)
 	
@@ -26305,6 +26444,11 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	if warlockRecovery != "" {
 		response["warlock_recovery"] = warlockRecovery
+	}
+	
+	// v0.8.91: Show slot recovery results
+	if slotRecoveryResult != nil {
+		response["slot_recovery"] = slotRecoveryResult
 	}
 	
 	// Show recovered class resources

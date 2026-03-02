@@ -607,7 +607,8 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Second Wind (Fighter) — 1 use, recovers on short rest
     - [x] Action Surge (Fighter) — 1-2 uses, recovers on short rest
     - [x] Wild Shape (Druid) — 2 uses, recovers on short rest
-    - [x] Arcane Recovery (Wizard) — 1 use per day
+    - [x] Arcane Recovery (Wizard) — 1 use per day, recovers spell slots on short rest (v0.8.91)
+    - [x] Natural Recovery (Circle of the Land Druid) — 1 use per day, recovers spell slots on short rest (v0.8.91)
     - [x] POST /api/characters/{id}/use-resource endpoint
   - [x] Extra Attack at level 5 (Fighter, Paladin, Ranger, Monk, Barbarian) (v0.8.68)
   - [ ] Spellcasting feature at class-specific levels
