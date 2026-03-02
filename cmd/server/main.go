@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.8.95"
+const version = "0.8.96"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -20081,8 +20081,8 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		
-		newConditions := strings.Join(condList, ", ")
-		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", newConditions, req.CharacterID)
+		newConditionsJSON, _ := json.Marshal(condList)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", newConditionsJSON, req.CharacterID)
 		
 		// Log the action
 		db.Exec(`
@@ -20133,16 +20133,24 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 			}
 			// Check if unconscious is already in the list
 			hasUnconscious := false
+			hasProne := false
 			for _, c := range newConditions {
 				if strings.ToLower(c) == "unconscious" {
 					hasUnconscious = true
-					break
+				}
+				if strings.ToLower(c) == "prone" {
+					hasProne = true
 				}
 			}
 			if !hasUnconscious {
 				newConditions = append(newConditions, "unconscious")
 			}
-			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", strings.Join(newConditions, ", "), req.CharacterID)
+			// v0.8.96: Auto-prone when becoming unconscious
+			if !hasProne {
+				newConditions = append(newConditions, "prone")
+			}
+			updatedConditions, _ := json.Marshal(newConditions)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConditions, req.CharacterID)
 			
 			// Log the action
 			db.Exec(`
@@ -20150,7 +20158,7 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 				VALUES ($1, $2, $3, $4, $5)
 			`, lobbyID, req.CharacterID, "suffocation",
 				fmt.Sprintf("%s suffocates from %s", charName, reason),
-				fmt.Sprintf("Dropped to 0 HP! Now unconscious and making death saves."))
+				fmt.Sprintf("Dropped to 0 HP! Now unconscious and prone, making death saves."))
 			
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":          true,
@@ -20161,12 +20169,13 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 				"previous_hp":      currentHP,
 				"current_hp":       newHP,
 				"dropped":          true,
-				"message":          fmt.Sprintf("💀 %s has suffocated! Drops to 0 HP and is unconscious. Death saving throws required!", charName),
+				"message":          fmt.Sprintf("💀 %s has suffocated! Drops to 0 HP, falls unconscious and prone. Death saving throws required!", charName),
 			})
 		} else {
 			// Still hanging on
 			condList[suffocatingIdx] = fmt.Sprintf("suffocating:%d", roundsRemaining)
-			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", strings.Join(condList, ", "), req.CharacterID)
+			condListJSON, _ := json.Marshal(condList)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", condListJSON, req.CharacterID)
 			
 			// Log the action
 			db.Exec(`
@@ -27078,6 +27087,26 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 		if len(released) > 0 {
 			response["grapples_released"] = released
 			response["grapple_note"] = fmt.Sprintf("Grapple(s) ended because %s became incapacitated", getCharacterName(charID))
+		}
+	}
+	
+	// v0.8.96: Auto-prone when becoming unconscious
+	// Per 5e PHB: "An unconscious creature... falls prone"
+	if baseCondition == "unconscious" {
+		hasProne := false
+		for _, c := range conditions {
+			if c == "prone" {
+				hasProne = true
+				break
+			}
+		}
+		if !hasProne {
+			conditions = append(conditions, "prone")
+			updated, _ := json.Marshal(conditions)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+			response["conditions"] = conditions
+			response["auto_prone"] = true
+			response["prone_note"] = fmt.Sprintf("%s falls prone (unconscious creatures automatically fall prone)", getCharacterName(charID))
 		}
 	}
 	

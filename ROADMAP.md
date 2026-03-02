@@ -453,7 +453,8 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Attacks have advantage (implemented in getAttackModifiers)
 - [x] **Unconscious** ✅ (v0.8.8)
   - [x] Incapacitated, can't move or speak, unaware (enforced)
-  - [ ] Drop held items, fall prone (not automated — requires equipment tracking)
+  - [x] Fall prone automatically (v0.8.96 - triggered when becoming unconscious)
+  - [ ] Drop held items (requires equipment slot tracking for "held" vs "carried")
   - [x] Auto-fail STR/DEX saves (in autoFailsSave)
   - [x] Attacks have advantage (in getAttackModifiers)
   - [x] Hits within 5ft are automatic crits (in isAutoCrit)
@@ -896,7 +897,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.95**
+Current: **0.8.96**
 
 ---
 
