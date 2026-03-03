@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.20
+// @version 0.9.21
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.20"
+const version = "0.9.21"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -10734,7 +10734,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		req.DC = 10 // Default DC
 	}
 	
-	// Get character stats (including inspiration, expertise, and subclass)
+	// Get character stats (including inspiration, expertise, subclass, and class)
 	var charName string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
@@ -10742,10 +10742,11 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	var expertiseRaw sql.NullString
 	var hasInspiration bool
 	var subclassRaw sql.NullString
+	var class string
 	err = db.QueryRow(`
-		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, '')
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, ''), COALESCE(class, '')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &expertiseRaw, &hasInspiration, &subclassRaw)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &expertiseRaw, &hasInspiration, &subclassRaw, &class)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -10881,15 +10882,25 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	// v0.9.9: Remarkable Athlete (Champion Fighter level 7+)
 	// Add half proficiency bonus (rounded up) to STR, DEX, or CON checks when not proficient
 	remarkableAthleteBonus := 0
+	isPhysicalCheck := abilityUsed == "str" || abilityUsed == "strength" ||
+		abilityUsed == "dex" || abilityUsed == "dexterity" ||
+		abilityUsed == "con" || abilityUsed == "constitution"
 	if !isProficient && subclassRaw.Valid && subclassRaw.String != "" {
-		isPhysicalCheck := abilityUsed == "str" || abilityUsed == "strength" ||
-			abilityUsed == "dex" || abilityUsed == "dexterity" ||
-			abilityUsed == "con" || abilityUsed == "constitution"
 		if isPhysicalCheck && hasSubclassFeature(subclassRaw.String, level, "remarkable_athlete") {
 			// Half proficiency bonus, rounded up
 			remarkableAthleteBonus = (proficiencyBonus(level) + 1) / 2
 			totalMod += remarkableAthleteBonus
 		}
+	}
+	
+	// v0.9.21: Jack of All Trades (Bard level 2+)
+	// Add half proficiency bonus (rounded down) to ability checks not already using proficiency
+	// Does not stack with Remarkable Athlete - RA is better for physical checks (rounds up)
+	jackOfAllTradesBonus := 0
+	if !isProficient && remarkableAthleteBonus == 0 && hasClassFeature(class, level, "jack_of_all_trades") {
+		// Half proficiency bonus, rounded down
+		jackOfAllTradesBonus = proficiencyBonus(level) / 2
+		totalMod += jackOfAllTradesBonus
 	}
 	
 	// Handle inspiration: spend it for advantage
@@ -11043,6 +11054,12 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		response["remarkable_athlete_bonus"] = remarkableAthleteBonus
 		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Remarkable Athlete (half proficiency for physical checks)", charName, remarkableAthleteBonus)
 	}
+	// v0.9.21: Add Jack of All Trades note
+	if jackOfAllTradesBonus > 0 {
+		response["jack_of_all_trades"] = true
+		response["jack_of_all_trades_bonus"] = jackOfAllTradesBonus
+		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Jack of All Trades (half proficiency for non-proficient checks)", charName, jackOfAllTradesBonus)
+	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {
 		response["poisoned"] = true
@@ -11140,11 +11157,12 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	var expertiseRaw string
 	var hasInspiration bool
 	var toolSubclassRaw sql.NullString
+	var toolClass string
 	err = db.QueryRow(`
 		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, 
-			COALESCE(tool_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, '')
+			COALESCE(tool_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, ''), COALESCE(class, '')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &expertiseRaw, &hasInspiration, &toolSubclassRaw)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &expertiseRaw, &hasInspiration, &toolSubclassRaw, &toolClass)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -11251,15 +11269,25 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	// v0.9.9: Remarkable Athlete (Champion Fighter level 7+)
 	// Add half proficiency bonus (rounded up) to STR, DEX, or CON checks when not proficient
 	toolRemarkableAthleteBonus := 0
+	toolIsPhysicalCheck := abilityUsed == "str" || abilityUsed == "strength" ||
+		abilityUsed == "dex" || abilityUsed == "dexterity" ||
+		abilityUsed == "con" || abilityUsed == "constitution"
 	if !isProficient && toolSubclassRaw.Valid && toolSubclassRaw.String != "" {
-		isPhysicalCheck := abilityUsed == "str" || abilityUsed == "strength" ||
-			abilityUsed == "dex" || abilityUsed == "dexterity" ||
-			abilityUsed == "con" || abilityUsed == "constitution"
-		if isPhysicalCheck && hasSubclassFeature(toolSubclassRaw.String, level, "remarkable_athlete") {
+		if toolIsPhysicalCheck && hasSubclassFeature(toolSubclassRaw.String, level, "remarkable_athlete") {
 			// Half proficiency bonus, rounded up
 			toolRemarkableAthleteBonus = (proficiencyBonus(level) + 1) / 2
 			totalMod += toolRemarkableAthleteBonus
 		}
+	}
+	
+	// v0.9.21: Jack of All Trades (Bard level 2+)
+	// Add half proficiency bonus (rounded down) to ability checks not already using proficiency
+	// Does not stack with Remarkable Athlete - RA is better for physical checks (rounds up)
+	toolJackOfAllTradesBonus := 0
+	if !isProficient && toolRemarkableAthleteBonus == 0 && hasClassFeature(toolClass, level, "jack_of_all_trades") {
+		// Half proficiency bonus, rounded down
+		toolJackOfAllTradesBonus = proficiencyBonus(level) / 2
+		totalMod += toolJackOfAllTradesBonus
 	}
 	
 	// Handle inspiration
@@ -11397,6 +11425,14 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Remarkable Athlete (half proficiency for physical checks)", charName, toolRemarkableAthleteBonus)
 		// Update the note to reflect the bonus
 		response["note"] = fmt.Sprintf("%s is not proficient with %s, but gains +%d from Remarkable Athlete", charName, req.Tool, toolRemarkableAthleteBonus)
+	}
+	// v0.9.21: Add Jack of All Trades note
+	if toolJackOfAllTradesBonus > 0 {
+		response["jack_of_all_trades"] = true
+		response["jack_of_all_trades_bonus"] = toolJackOfAllTradesBonus
+		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Jack of All Trades (half proficiency for non-proficient checks)", charName, toolJackOfAllTradesBonus)
+		// Update the note to reflect the bonus
+		response["note"] = fmt.Sprintf("%s is not proficient with %s, but gains +%d from Jack of All Trades", charName, req.Tool, toolJackOfAllTradesBonus)
 	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {

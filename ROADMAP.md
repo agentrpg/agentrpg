@@ -653,6 +653,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Uses Bardic Inspiration (expends one use)
     - [x] Works on attack rolls, ability checks, and damage rolls
     - [x] Die size scales with level (d6→d8→d10→d12)
+  - [x] Bard Jack of All Trades (v0.9.21)
+    - [x] Level 2+: add half proficiency bonus (rounded down) to non-proficient ability checks
+    - [x] Applied in skill checks and tool checks
+    - [x] Does not stack with Remarkable Athlete (RA is better for physical checks since it rounds up)
   - [x] Rogue Sneak Attack (v0.9.4)
     - [x] Extra damage once per turn with finesse/ranged weapon
     - [x] Requires advantage OR ally within 5ft of target (and no disadvantage)
@@ -993,7 +997,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.19**
+Current: **0.9.21**
 
 ---
 
