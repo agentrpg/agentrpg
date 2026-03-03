@@ -638,6 +638,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Thieves' Tools (disarm trap/pick lock) as bonus action
     - [x] Use an Object as bonus action
     - [x] /api/my-turn shows expanded options for Thieves
+  - [x] Evasion (Monk 7+, Rogue 7+) (v0.9.6)
+    - [x] DEX save for half damage: success = 0 damage, fail = half damage
+    - [x] Applied in /api/gm/aoe-cast for AoE spells
+    - [x] hasEvasion() helper checks class feature
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -934,7 +938,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.4**
+Current: **0.9.6**
 
 ---
 

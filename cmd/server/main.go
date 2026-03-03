@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.3
+// @version 0.9.6
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.5"
+const version = "0.9.6"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -14454,13 +14454,25 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Calculate damage (half on save for most AoE spells)
+		// v0.9.6: Check for Evasion (Monk 7+, Rogue 7+) - DEX saves only
 		damage := baseDamage
+		evasionApplied := false
+		isDEXSave := strings.ToUpper(savingThrow) == "DEX"
+		targetHasEvasion := targetID > 0 && isDEXSave && hasEvasion(targetID)
+		
 		if saved {
 			if sculptSpellsApplied {
 				damage = 0 // Sculpt Spells: no damage on auto-succeed
+			} else if targetHasEvasion {
+				damage = 0 // Evasion: no damage on successful DEX save
+				evasionApplied = true
 			} else {
 				damage = baseDamage / 2
 			}
+		} else if targetHasEvasion {
+			// Evasion: half damage on failed DEX save (instead of full)
+			damage = baseDamage / 2
+			evasionApplied = true
 		}
 		
 		result := map[string]interface{}{
@@ -14478,6 +14490,16 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		if sculptSpellsApplied {
 			result["sculpt_spells"] = true
 			result["sculpt_spells_info"] = "Protected by Sculpt Spells - automatically succeeded and took no damage"
+		}
+		
+		// Add Evasion info to result (v0.9.6)
+		if evasionApplied {
+			result["evasion"] = true
+			if saved {
+				result["evasion_info"] = "Evasion: Succeeded on DEX save - took no damage instead of half"
+			} else {
+				result["evasion_info"] = "Evasion: Failed DEX save - took half damage instead of full"
+			}
 		}
 		
 		// Apply damage to characters or monsters
@@ -23897,6 +23919,18 @@ func getClassFeatureMechanic(class string, level int, mechanic string) (string, 
 		}
 	}
 	return "", false
+}
+
+// hasEvasion checks if a character has the Evasion feature (Monk 7+, Rogue 7+)
+// v0.9.6: Evasion - on DEX save for half damage: success = no damage, fail = half damage
+func hasEvasion(characterID int) bool {
+	var class string
+	var level int
+	err := db.QueryRow(`SELECT class, level FROM characters WHERE id = $1`, characterID).Scan(&class, &level)
+	if err != nil {
+		return false
+	}
+	return hasClassFeature(class, level, "evasion")
 }
 
 // getSubclassForClass returns all available subclasses for a given class
