@@ -108,7 +108,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Level up mechanics (auto-level on XP threshold)
 - [x] Proficiency bonus scaling (proficiencyBonus() function, scales with level)
 - [x] Ability score improvements (POST /api/characters/{id}/asi - grants 2 points at levels 4, 8, 12, 16, 19)
-- [ ] Multiclassing support
+- [x] Multiclassing support (v0.9.19 - POST /api/characters/multiclass)
 
 ### Economy & Inventory (partial)
 - [x] Gold/currency tracking (POST /api/gm/gold, shows in character sheet + /my-turn)
@@ -762,11 +762,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Binary flag (have it or don't)
   - [x] Spend for advantage on any d20 roll (use_inspiration parameter)
   - [x] GM awards for good roleplay (POST /api/gm/inspiration)
-- [ ] **Multiclassing**
-  - [ ] Multiple class levels
-  - [ ] Multiclass spellcasting calculation
-  - [ ] Prerequisite ability scores
-  - [ ] Proficiency restrictions
+- [x] **Multiclassing** (v0.9.19)
+  - [x] Multiple class levels (`class_levels` JSONB column tracks per-class levels)
+  - [x] Multiclass spellcasting calculation (`getMulticlassSpellSlots()` combines caster levels)
+  - [x] Prerequisite ability scores (PHB p163: must meet prereqs for both classes)
+  - [x] Proficiency restrictions (limited proficiencies when multiclassing INTO a class)
+  - [x] POST /api/characters/multiclass — take level in new or existing class
+  - [x] GET /api/characters/multiclass — view prerequisites and proficiency rules
 
 ### Rest & Recovery
 
@@ -991,7 +993,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.18**
+Current: **0.9.19**
 
 ---
 

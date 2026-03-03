@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.18"
+const version = "0.9.19"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -474,6 +474,7 @@ func main() {
 	http.HandleFunc("/api/characters/subclass-choice", handleCharacterSubclassChoice)
 	http.HandleFunc("/api/characters/metamagic", handleCharacterMetamagic)
 	http.HandleFunc("/api/characters/flexible-casting", handleFlexibleCasting)
+	http.HandleFunc("/api/characters/multiclass", handleCharacterMulticlass)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
 	http.HandleFunc("/api/universe/rules/", handleUniverseRule)
@@ -766,6 +767,10 @@ func initDB() {
 		-- Metamagic choices tracking (v0.9.12)
 		-- Sorcerer feature: choose 2 at level 3, +1 at levels 10 and 17
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS metamagic_choices JSONB DEFAULT '[]';
+		
+		-- Multiclassing support (v0.9.19)
+		-- Tracks levels in each class, e.g., {"fighter": 3, "wizard": 2}
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS class_levels JSONB DEFAULT '{}';
 		
 		-- Hit Dice tracking (Short/Long Rest - Phase 8 P0)
 		-- hit_dice_spent tracks how many dice have been used (recovers half on long rest)
@@ -33770,6 +33775,115 @@ var srdClasses = map[string]SRDClass{
 	"wizard": {Name: "Wizard", HitDie: 6, Primary: "INT", Saves: []string{"INT", "WIS"}, ArmorProf: []string{}, WeaponProf: []string{"daggers", "darts", "slings", "quarterstaffs", "light crossbows"}, Spellcasting: "INT"},
 }
 
+// Multiclass Prerequisites (v0.9.19)
+// Each class requires minimum ability score(s) to multiclass INTO or OUT OF
+// PHB p163: "To qualify for a new class, you must meet the ability score prerequisites for both your current class and your new one"
+type MulticlassPrereqs struct {
+	STR int `json:"str,omitempty"`
+	DEX int `json:"dex,omitempty"`
+	INT int `json:"int,omitempty"`
+	WIS int `json:"wis,omitempty"`
+	CHA int `json:"cha,omitempty"`
+	// Some classes require meeting EITHER stat (use -1 to indicate OR logic)
+	OrLogic bool `json:"or_logic,omitempty"` // If true, meet ANY of the stats, not ALL
+}
+
+// multiclassPrereqs maps each class to its multiclassing prerequisites
+var multiclassPrereqs = map[string]MulticlassPrereqs{
+	"barbarian": {STR: 13},
+	"bard":      {CHA: 13},
+	"cleric":    {WIS: 13},
+	"druid":     {WIS: 13},
+	"fighter":   {STR: 13, DEX: 13, OrLogic: true}, // STR 13 OR DEX 13
+	"monk":      {DEX: 13, WIS: 13},                // Both required
+	"paladin":   {STR: 13, CHA: 13},                // Both required
+	"ranger":    {DEX: 13, WIS: 13},                // Both required
+	"rogue":     {DEX: 13},
+	"sorcerer":  {CHA: 13},
+	"warlock":   {CHA: 13},
+	"wizard":    {INT: 13},
+}
+
+// Multiclass Proficiencies (v0.9.19)
+// PHB p164: When you gain your first level in a class other than your initial class,
+// you gain only some of that class's starting proficiencies
+type MulticlassProfs struct {
+	ArmorProf  []string `json:"armor_proficiencies"`
+	WeaponProf []string `json:"weapon_proficiencies"`
+	ToolProf   []string `json:"tool_proficiencies,omitempty"`
+	Skills     int      `json:"skill_choices,omitempty"` // Number of skill choices
+}
+
+// multiclassProfs maps each class to proficiencies gained when multiclassing INTO it
+var multiclassProfs = map[string]MulticlassProfs{
+	"barbarian": {ArmorProf: []string{"shields"}, WeaponProf: []string{"simple", "martial"}},
+	"bard":      {ArmorProf: []string{"light"}, WeaponProf: []string{}, Skills: 1},
+	"cleric":    {ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{}},
+	"druid":     {ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{}},
+	"fighter":   {ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{"simple", "martial"}},
+	"monk":      {ArmorProf: []string{}, WeaponProf: []string{"simple", "shortswords"}},
+	"paladin":   {ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{"simple", "martial"}},
+	"ranger":    {ArmorProf: []string{"light", "medium", "shields"}, WeaponProf: []string{"simple", "martial"}, Skills: 1},
+	"rogue":     {ArmorProf: []string{"light"}, WeaponProf: []string{}, ToolProf: []string{"thieves' tools"}, Skills: 1},
+	"sorcerer":  {ArmorProf: []string{}, WeaponProf: []string{}},
+	"warlock":   {ArmorProf: []string{"light"}, WeaponProf: []string{"simple"}},
+	"wizard":    {ArmorProf: []string{}, WeaponProf: []string{}},
+}
+
+// meetsMulticlassPrereqs checks if a character meets the ability score requirements for a class
+func meetsMulticlassPrereqs(class string, str, dex, intl, wis, cha int) (bool, string) {
+	prereqs, ok := multiclassPrereqs[strings.ToLower(class)]
+	if !ok {
+		return false, fmt.Sprintf("Unknown class: %s", class)
+	}
+	
+	if prereqs.OrLogic {
+		// Meet ANY of the requirements (Fighter: STR 13 OR DEX 13)
+		metAny := false
+		reasons := []string{}
+		if prereqs.STR > 0 {
+			if str >= prereqs.STR {
+				metAny = true
+			} else {
+				reasons = append(reasons, fmt.Sprintf("STR %d (have %d)", prereqs.STR, str))
+			}
+		}
+		if prereqs.DEX > 0 {
+			if dex >= prereqs.DEX {
+				metAny = true
+			} else {
+				reasons = append(reasons, fmt.Sprintf("DEX %d (have %d)", prereqs.DEX, dex))
+			}
+		}
+		if !metAny {
+			return false, fmt.Sprintf("Need %s", strings.Join(reasons, " OR "))
+		}
+	} else {
+		// Meet ALL of the requirements
+		failedReqs := []string{}
+		if prereqs.STR > 0 && str < prereqs.STR {
+			failedReqs = append(failedReqs, fmt.Sprintf("STR %d (have %d)", prereqs.STR, str))
+		}
+		if prereqs.DEX > 0 && dex < prereqs.DEX {
+			failedReqs = append(failedReqs, fmt.Sprintf("DEX %d (have %d)", prereqs.DEX, dex))
+		}
+		if prereqs.INT > 0 && intl < prereqs.INT {
+			failedReqs = append(failedReqs, fmt.Sprintf("INT %d (have %d)", prereqs.INT, intl))
+		}
+		if prereqs.WIS > 0 && wis < prereqs.WIS {
+			failedReqs = append(failedReqs, fmt.Sprintf("WIS %d (have %d)", prereqs.WIS, wis))
+		}
+		if prereqs.CHA > 0 && cha < prereqs.CHA {
+			failedReqs = append(failedReqs, fmt.Sprintf("CHA %d (have %d)", prereqs.CHA, cha))
+		}
+		if len(failedReqs) > 0 {
+			return false, fmt.Sprintf("Need %s", strings.Join(failedReqs, " AND "))
+		}
+	}
+	
+	return true, ""
+}
+
 type SRDRace struct {
 	Name           string         `json:"name"`
 	Size           string         `json:"size"`
@@ -36240,6 +36354,480 @@ func handleFlexibleCasting(w http.ResponseWriter, r *http.Request) {
 			"message":           fmt.Sprintf("%s converted a level %d spell slot into %d sorcery points", charName, req.SlotLevel, pointsGained),
 		})
 	}
+}
+
+// handleCharacterMulticlass godoc
+// @Summary Multiclass a character into a new class
+// @Description Take a level in a new class (multiclassing) or existing class when leveling up.
+// @Description Requires meeting ability score prerequisites for both current and new class.
+// @Description PHB p163-165 multiclassing rules.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id body int true "Character ID"
+// @Param target_class body string true "Class to take a level in"
+// @Success 200 {object} map[string]interface{} "Multiclass success with new class levels"
+// @Failure 400 {object} map[string]interface{} "Prerequisites not met or invalid request"
+// @Router /characters/multiclass [post]
+func handleCharacterMulticlass(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		// Return multiclass prerequisites info
+		prereqInfo := map[string]interface{}{}
+		for class, prereqs := range multiclassPrereqs {
+			info := map[string]interface{}{}
+			if prereqs.STR > 0 {
+				info["str"] = prereqs.STR
+			}
+			if prereqs.DEX > 0 {
+				info["dex"] = prereqs.DEX
+			}
+			if prereqs.INT > 0 {
+				info["int"] = prereqs.INT
+			}
+			if prereqs.WIS > 0 {
+				info["wis"] = prereqs.WIS
+			}
+			if prereqs.CHA > 0 {
+				info["cha"] = prereqs.CHA
+			}
+			if prereqs.OrLogic {
+				info["logic"] = "OR (meet any one)"
+			} else if len(info) > 1 {
+				info["logic"] = "AND (meet all)"
+			}
+			prereqInfo[class] = info
+		}
+		
+		profInfo := map[string]interface{}{}
+		for class, profs := range multiclassProfs {
+			info := map[string]interface{}{}
+			if len(profs.ArmorProf) > 0 {
+				info["armor"] = profs.ArmorProf
+			}
+			if len(profs.WeaponProf) > 0 {
+				info["weapons"] = profs.WeaponProf
+			}
+			if len(profs.ToolProf) > 0 {
+				info["tools"] = profs.ToolProf
+			}
+			if profs.Skills > 0 {
+				info["skill_choices"] = profs.Skills
+			}
+			profInfo[class] = info
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"description":                "Multiclassing allows taking levels in multiple classes",
+			"prerequisites":              prereqInfo,
+			"proficiencies_when_multiclassing": profInfo,
+			"rules": map[string]interface{}{
+				"prerequisites": "Must meet ability score requirements for BOTH current class and new class",
+				"proficiencies": "When multiclassing INTO a class, gain limited proficiencies (not full)",
+				"spell_slots":   "Multiclass spellcasters combine levels for spell slots (full casters count fully, half casters at half level)",
+				"hit_points":    "Gain hit die for new class + CON mod (not max like level 1)",
+			},
+			"usage": "POST with character_id and target_class to take a level in that class",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		TargetClass string `json:"target_class"` // Class to take a level in
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_json",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	targetClass := strings.ToLower(strings.TrimSpace(req.TargetClass))
+	if targetClass == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "missing_target_class",
+			"message": "target_class is required",
+		})
+		return
+	}
+	
+	// Validate target class exists
+	if _, ok := srdClasses[targetClass]; !ok {
+		validClasses := []string{}
+		for c := range srdClasses {
+			validClasses = append(validClasses, c)
+		}
+		sort.Strings(validClasses)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_class",
+			"message":       fmt.Sprintf("Unknown class: %s", targetClass),
+			"valid_classes": validClasses,
+		})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var charName, currentClass string
+	var level, str, dex, con, intl, wis, cha, hp, maxHP int
+	var classLevelsJSON []byte
+	var pendingASI int
+	var armorProfsStr, weaponProfsStr string
+	
+	err = db.QueryRow(`
+		SELECT agent_id, name, class, level, str, dex, con, intl, wis, cha, hp, max_hp,
+		       COALESCE(class_levels, '{}'), COALESCE(pending_asi, 0),
+		       COALESCE(armor_proficiencies, ''), COALESCE(weapon_proficiencies, '')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &charName, &currentClass, &level, &str, &dex, &con, &intl, &wis, &cha,
+		&hp, &maxHP, &classLevelsJSON, &pendingASI, &armorProfsStr, &weaponProfsStr)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_your_character",
+			"message": "You can only multiclass your own characters",
+		})
+		return
+	}
+	
+	// Parse existing class levels
+	var classLevels map[string]int
+	json.Unmarshal(classLevelsJSON, &classLevels)
+	if classLevels == nil {
+		classLevels = make(map[string]int)
+	}
+	
+	// If class_levels is empty, initialize with current class
+	if len(classLevels) == 0 {
+		classLevels[strings.ToLower(currentClass)] = level
+	}
+	
+	// Calculate current total level from class_levels
+	totalLevel := 0
+	for _, lvl := range classLevels {
+		totalLevel += lvl
+	}
+	if totalLevel == 0 {
+		totalLevel = level
+	}
+	
+	// Check if this is taking first level in a new class (multiclassing)
+	isNewClass := classLevels[targetClass] == 0 && targetClass != strings.ToLower(currentClass)
+	
+	// Check prerequisites for multiclassing
+	// PHB p163: "To qualify for a new class, you must meet the ability score prerequisites 
+	// for both your current class and your new one"
+	if isNewClass {
+		// Check prerequisites for LEAVING current class
+		canLeave, leaveReason := meetsMulticlassPrereqs(currentClass, str, dex, intl, wis, cha)
+		if !canLeave {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":        "prerequisites_not_met",
+				"message":      fmt.Sprintf("Cannot multiclass out of %s: %s", currentClass, leaveReason),
+				"current_class": currentClass,
+				"failed_prereq": leaveReason,
+			})
+			return
+		}
+		
+		// Check prerequisites for ENTERING new class
+		canEnter, enterReason := meetsMulticlassPrereqs(targetClass, str, dex, intl, wis, cha)
+		if !canEnter {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":        "prerequisites_not_met",
+				"message":      fmt.Sprintf("Cannot multiclass into %s: %s", targetClass, enterReason),
+				"target_class":  targetClass,
+				"failed_prereq": enterReason,
+			})
+			return
+		}
+	}
+	
+	// Check for pending level-up (need XP or pending ASI to indicate level available)
+	// For now, we'll check if they have enough XP for next level
+	var currentXP int
+	db.QueryRow("SELECT COALESCE(xp, 0) FROM characters WHERE id = $1", req.CharacterID).Scan(&currentXP)
+	xpForNextLevel := getXPForNextLevel(totalLevel)
+	
+	if currentXP < xpForNextLevel && totalLevel > 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":            "no_level_available",
+			"message":          fmt.Sprintf("Not enough XP to level up. Need %d XP, have %d", xpForNextLevel, currentXP),
+			"current_xp":       currentXP,
+			"xp_for_next_level": xpForNextLevel,
+			"current_level":    totalLevel,
+		})
+		return
+	}
+	
+	// Take the level!
+	oldClassLevels := make(map[string]int)
+	for k, v := range classLevels {
+		oldClassLevels[k] = v
+	}
+	
+	classLevels[targetClass]++
+	newTotalLevel := totalLevel + 1
+	
+	// Calculate HP gain (hit die roll average + CON mod, not max like level 1)
+	targetClassInfo := srdClasses[targetClass]
+	hitDie := targetClassInfo.HitDie
+	hpGain := (hitDie / 2) + 1 + modifier(con) // Average roll + 1 (D&D standard) + CON mod
+	if hpGain < 1 {
+		hpGain = 1 // Minimum 1 HP per level
+	}
+	newMaxHP := maxHP + hpGain
+	newHP := hp + hpGain
+	
+	// Calculate ASI earned (at levels 4, 8, 12, 16, 19)
+	asiLevels := []int{4, 8, 12, 16, 19}
+	asiEarned := 0
+	for _, asiLevel := range asiLevels {
+		if totalLevel < asiLevel && newTotalLevel >= asiLevel {
+			asiEarned += 2
+		}
+	}
+	
+	// Grant proficiencies if taking first level in new class
+	newProfsMessage := ""
+	if isNewClass {
+		profs := multiclassProfs[targetClass]
+		
+		// Add armor proficiencies
+		if len(profs.ArmorProf) > 0 {
+			existingArmor := strings.Split(armorProfsStr, ", ")
+			for _, prof := range profs.ArmorProf {
+				found := false
+				for _, existing := range existingArmor {
+					if strings.ToLower(existing) == strings.ToLower(prof) {
+						found = true
+						break
+					}
+				}
+				if !found && prof != "" {
+					if armorProfsStr != "" {
+						armorProfsStr += ", "
+					}
+					armorProfsStr += strings.ToLower(prof)
+				}
+			}
+			newProfsMessage += fmt.Sprintf("Armor: %v ", profs.ArmorProf)
+		}
+		
+		// Add weapon proficiencies
+		if len(profs.WeaponProf) > 0 {
+			existingWeapons := strings.Split(weaponProfsStr, ", ")
+			for _, prof := range profs.WeaponProf {
+				found := false
+				for _, existing := range existingWeapons {
+					if strings.ToLower(existing) == strings.ToLower(prof) {
+						found = true
+						break
+					}
+				}
+				if !found && prof != "" {
+					if weaponProfsStr != "" {
+						weaponProfsStr += ", "
+					}
+					weaponProfsStr += strings.ToLower(prof)
+				}
+			}
+			newProfsMessage += fmt.Sprintf("Weapons: %v ", profs.WeaponProf)
+		}
+		
+		// Note about tools and skills (would need additional handling)
+		if len(profs.ToolProf) > 0 {
+			newProfsMessage += fmt.Sprintf("Tools: %v ", profs.ToolProf)
+		}
+		if profs.Skills > 0 {
+			newProfsMessage += fmt.Sprintf("(may choose %d skill proficiency) ", profs.Skills)
+		}
+	}
+	
+	// Save changes
+	classLevelsJSON, _ = json.Marshal(classLevels)
+	
+	_, err = db.Exec(`
+		UPDATE characters 
+		SET level = $1, class_levels = $2, hp = $3, max_hp = $4, 
+		    pending_asi = pending_asi + $5,
+		    armor_proficiencies = $6, weapon_proficiencies = $7
+		WHERE id = $8
+	`, newTotalLevel, classLevelsJSON, newHP, newMaxHP, asiEarned, armorProfsStr, weaponProfsStr, req.CharacterID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "database_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Build response
+	response := map[string]interface{}{
+		"success":         true,
+		"character_id":    req.CharacterID,
+		"character_name":  charName,
+		"class_levels":    classLevels,
+		"old_class_levels": oldClassLevels,
+		"total_level":     newTotalLevel,
+		"hp_gained":       hpGain,
+		"new_hp":          newHP,
+		"new_max_hp":      newMaxHP,
+	}
+	
+	if isNewClass {
+		response["multiclassed_into"] = targetClass
+		response["message"] = fmt.Sprintf("%s took their first level in %s! (Now %s %d)", 
+			charName, srdClasses[targetClass].Name, formatClassLevels(classLevels), newTotalLevel)
+		if newProfsMessage != "" {
+			response["new_proficiencies"] = newProfsMessage
+		}
+	} else {
+		response["leveled_up_in"] = targetClass
+		response["message"] = fmt.Sprintf("%s gained a level in %s! (Now %s %d)",
+			charName, srdClasses[targetClass].Name, formatClassLevels(classLevels), newTotalLevel)
+	}
+	
+	if asiEarned > 0 {
+		response["asi_earned"] = asiEarned
+		response["asi_message"] = fmt.Sprintf("You earned %d ability score improvement points! Use POST /api/characters/{id}/asi to apply them.", asiEarned)
+	}
+	
+	// Calculate new spell slots if multiclassing spellcasters
+	newSpellSlots := getMulticlassSpellSlots(classLevels)
+	if len(newSpellSlots) > 0 {
+		response["spell_slots"] = newSpellSlots
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// formatClassLevels formats class levels map as "Fighter 3/Wizard 2" string
+func formatClassLevels(classLevels map[string]int) string {
+	if len(classLevels) == 0 {
+		return ""
+	}
+	if len(classLevels) == 1 {
+		for class, level := range classLevels {
+			if info, ok := srdClasses[class]; ok {
+				return fmt.Sprintf("%s %d", info.Name, level)
+			}
+			return fmt.Sprintf("%s %d", strings.Title(class), level)
+		}
+	}
+	
+	// Sort by level descending, then alphabetically
+	type classLevel struct {
+		class string
+		level int
+	}
+	sorted := []classLevel{}
+	for c, l := range classLevels {
+		sorted = append(sorted, classLevel{c, l})
+	}
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].level != sorted[j].level {
+			return sorted[i].level > sorted[j].level
+		}
+		return sorted[i].class < sorted[j].class
+	})
+	
+	parts := []string{}
+	for _, cl := range sorted {
+		if info, ok := srdClasses[cl.class]; ok {
+			parts = append(parts, fmt.Sprintf("%s %d", info.Name, cl.level))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s %d", strings.Title(cl.class), cl.level))
+		}
+	}
+	return strings.Join(parts, "/")
+}
+
+// getMulticlassSpellSlots calculates combined spell slots for multiclass characters
+// PHB p164-165: Combined spellcasting levels determine spell slots
+func getMulticlassSpellSlots(classLevels map[string]int) map[int]int {
+	if len(classLevels) == 0 {
+		return map[int]int{}
+	}
+	
+	// Single class - use standard calculation
+	if len(classLevels) == 1 {
+		for class, level := range classLevels {
+			return getSpellSlots(class, level)
+		}
+	}
+	
+	// Multiclass spellcasting calculation
+	// Full casters: Bard, Cleric, Druid, Sorcerer, Wizard = full level
+	// Half casters: Paladin, Ranger = half level (round down)
+	// Third casters: Eldritch Knight (Fighter), Arcane Trickster (Rogue) = 1/3 level (round down)
+	// Warlocks: separate Pact Magic, don't add to multiclass calculation
+	
+	fullCasters := map[string]bool{"bard": true, "cleric": true, "druid": true, "sorcerer": true, "wizard": true}
+	halfCasters := map[string]bool{"paladin": true, "ranger": true}
+	
+	combinedLevel := 0
+	warlockLevel := 0
+	
+	for class, level := range classLevels {
+		class = strings.ToLower(class)
+		if fullCasters[class] {
+			combinedLevel += level
+		} else if halfCasters[class] {
+			combinedLevel += level / 2 // Round down
+		} else if class == "warlock" {
+			warlockLevel = level // Warlock pact magic is separate
+		}
+		// Note: Eldritch Knight and Arcane Trickster would need subclass checking
+		// For now, non-caster classes don't contribute
+	}
+	
+	// If no spellcasting levels, return empty
+	if combinedLevel == 0 && warlockLevel == 0 {
+		return map[int]int{}
+	}
+	
+	// Get spell slots based on combined caster level
+	// Use the full caster table for combined level
+	result := map[int]int{}
+	if combinedLevel > 0 {
+		result = getSpellSlots("wizard", combinedLevel) // Use wizard table for combined slots
+	}
+	
+	// Warlock pact magic is separate - add those slots
+	if warlockLevel > 0 {
+		warlockSlots := getSpellSlots("warlock", warlockLevel)
+		for slotLevel, count := range warlockSlots {
+			result[slotLevel] += count
+		}
+	}
+	
+	return result
 }
 
 // handleUniverseMetamagic godoc
