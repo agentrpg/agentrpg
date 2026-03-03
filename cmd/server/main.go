@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.13
+// @version 0.9.18
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.17"
+const version = "0.9.18"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -430,6 +430,7 @@ func main() {
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
+	http.HandleFunc("/api/gm/facing", handleGMFacing)
 	http.HandleFunc("/api/gm/apply-poison", handleGMApplyPoison)
 	http.HandleFunc("/api/gm/apply-disease", handleGMApplyDisease)
 	http.HandleFunc("/api/gm/apply-madness", handleGMApplyMadness)
@@ -738,6 +739,13 @@ func initDB() {
 		-- Area lighting level: 'bright' (normal), 'dim' (disadvantage on Perception), 'darkness' (heavily obscured)
 		-- Affects attack rolls based on characters' vision capabilities
 		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS lighting VARCHAR(20) DEFAULT 'bright';
+		
+		-- Facing tracking (v0.9.18 - DMG optional rule)
+		-- When enabled, creatures have a facing direction. Attacks from behind get advantage.
+		-- facing_enabled: whether the optional rule is active for this combat
+		-- combatant_facing: JSONB mapping combatant IDs to their facing direction (N, NE, E, SE, S, SW, W, NW)
+		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS facing_enabled BOOLEAN DEFAULT FALSE;
+		ALTER TABLE combat_state ADD COLUMN IF NOT EXISTS combatant_facing JSONB DEFAULT '{}';
 		
 		-- Magic item attunement (max 3 attuned items per character)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS attuned_items JSONB DEFAULT '[]';
@@ -19140,6 +19148,34 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
+		// v0.9.18: Facing (optional rule) - "from behind" grants advantage
+		facingNote := ""
+		if targetID > 0 && !isRangedAttack {
+			// Check if facing is enabled and if attack is from behind
+			if strings.Contains(descLower, "from behind") || strings.Contains(descLower, "rear attack") || strings.Contains(descLower, "from the rear") {
+				targetFacing, facingEnabled := getCombatantFacing(lobbyID, targetID)
+				if facingEnabled && targetFacing != "" {
+					// Attack from behind - rear arc directions are opposite to facing
+					hasAdvantage = true
+					facingNote = fmt.Sprintf(" ⚔️ Rear attack (target facing %s)!", targetFacing)
+				} else if facingEnabled {
+					facingNote = " (facing enabled but target has no facing set)"
+				}
+			}
+			// Also support explicit direction keywords like "attack from N" or "attacking from the south"
+			for dir := range validFacingDirections {
+				if strings.Contains(descLower, fmt.Sprintf("from %s", strings.ToLower(dir))) || 
+				   strings.Contains(descLower, fmt.Sprintf("from the %s", strings.ToLower(getDirectionName(dir)))) {
+					targetFacing, facingEnabled := getCombatantFacing(lobbyID, targetID)
+					if facingEnabled && targetFacing != "" && isRearAttack(targetFacing, dir) {
+						hasAdvantage = true
+						facingNote = fmt.Sprintf(" ⚔️ Rear attack from %s (target facing %s)!", dir, targetFacing)
+					}
+					break
+				}
+			}
+		}
+		
 		// Roll attack (advantage and disadvantage cancel out)
 		var attackRoll, roll1, roll2 int
 		rollType := "normal"
@@ -19163,6 +19199,10 @@ func resolveAction(action, description string, charID int) string {
 		// v0.9.14: Add reckless note to roll info
 		if recklessNote != "" {
 			rollInfo = recklessNote + rollInfo
+		}
+		// v0.9.18: Add facing note to roll info
+		if facingNote != "" {
+			rollInfo = facingNote + rollInfo
 		}
 		
 		// Auto-crit against paralyzed/unconscious targets (within 5ft assumed for melee)
@@ -23998,6 +24038,480 @@ func handleGMFlanking(w http.ResponseWriter, r *http.Request) {
 		"message":          message,
 		"rules_note":       "Flanking (DMG optional rule): When you and an ally are on opposite sides of an enemy, you both have advantage on melee attacks. Condition clears when target changes or at end of character's next turn.",
 	})
+}
+
+// Valid facing directions (8 compass directions)
+var validFacingDirections = map[string]bool{
+	"N": true, "NE": true, "E": true, "SE": true,
+	"S": true, "SW": true, "W": true, "NW": true,
+}
+
+// getOppositeDirection returns the direction opposite to the given direction
+func getOppositeDirection(dir string) string {
+	opposites := map[string]string{
+		"N": "S", "NE": "SW", "E": "W", "SE": "NW",
+		"S": "N", "SW": "NE", "W": "E", "NW": "SE",
+	}
+	return opposites[dir]
+}
+
+// isRearAttack checks if attackDir is from behind the defender's facing
+// Rear arc is the 3 directions opposite to facing (e.g., facing N means S, SE, SW are rear)
+func isRearAttack(defenderFacing, attackDirection string) bool {
+	if defenderFacing == "" || attackDirection == "" {
+		return false
+	}
+	
+	// Rear arc is 135 degrees behind (3 directions)
+	rearArcs := map[string][]string{
+		"N":  {"S", "SE", "SW"},
+		"NE": {"SW", "S", "W"},
+		"E":  {"W", "NW", "SW"},
+		"SE": {"NW", "N", "W"},
+		"S":  {"N", "NE", "NW"},
+		"SW": {"NE", "N", "E"},
+		"W":  {"E", "NE", "SE"},
+		"NW": {"SE", "S", "E"},
+	}
+	
+	rearDirs := rearArcs[defenderFacing]
+	for _, d := range rearDirs {
+		if d == attackDirection {
+			return true
+		}
+	}
+	return false
+}
+
+// isFrontAttack checks if attackDir is from the front arc of the defender's facing
+// Front arc is the 3 directions in front (e.g., facing N means N, NE, NW are front)
+func isFrontAttack(defenderFacing, attackDirection string) bool {
+	if defenderFacing == "" || attackDirection == "" {
+		return true // Default to front if no facing set
+	}
+	
+	// Front arc is 135 degrees ahead (3 directions)
+	frontArcs := map[string][]string{
+		"N":  {"N", "NE", "NW"},
+		"NE": {"NE", "N", "E"},
+		"E":  {"E", "NE", "SE"},
+		"SE": {"SE", "E", "S"},
+		"S":  {"S", "SE", "SW"},
+		"SW": {"SW", "S", "W"},
+		"W":  {"W", "NW", "SW"},
+		"NW": {"NW", "N", "W"},
+	}
+	
+	frontDirs := frontArcs[defenderFacing]
+	for _, d := range frontDirs {
+		if d == attackDirection {
+			return true
+		}
+	}
+	return false
+}
+
+// getDirectionName returns the full name for a direction abbreviation
+func getDirectionName(dir string) string {
+	names := map[string]string{
+		"N": "north", "NE": "northeast", "E": "east", "SE": "southeast",
+		"S": "south", "SW": "southwest", "W": "west", "NW": "northwest",
+	}
+	return names[dir]
+}
+
+// getCombatantFacing retrieves facing direction for a combatant in a campaign
+func getCombatantFacing(lobbyID, combatantID int) (string, bool) {
+	var facingEnabled bool
+	var facingJSON []byte
+	
+	err := db.QueryRow(`
+		SELECT COALESCE(facing_enabled, false), COALESCE(combatant_facing, '{}')
+		FROM combat_state WHERE lobby_id = $1
+	`, lobbyID).Scan(&facingEnabled, &facingJSON)
+	
+	if err != nil || !facingEnabled {
+		return "", false
+	}
+	
+	var facingMap map[string]string
+	json.Unmarshal(facingJSON, &facingMap)
+	
+	idStr := strconv.Itoa(combatantID)
+	facing := facingMap[idStr]
+	return facing, facingEnabled
+}
+
+// handleGMFacing godoc
+// @Summary Manage facing (optional rule)
+// @Description Facing (DMG optional rule p252): Creatures have a direction they're facing. Attacks from behind get advantage. Shields only protect from frontal attacks. Actions: "enable" activates facing for the campaign, "disable" turns it off, "set" changes a combatant's facing direction. Directions: N, NE, E, SE, S, SW, W, NW.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{campaign_id=integer,action=string,combatant_id=integer,direction=string,attack_direction=string} true "action: enable/disable/set/check. For 'set': combatant_id + direction. For 'check': combatant_id + attack_direction to see if rear attack."
+// @Success 200 {object} map[string]interface{} "Facing updated or checked"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/facing [post]
+func handleGMFacing(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CampaignID      int    `json:"campaign_id"`
+		Action          string `json:"action"`           // enable, disable, set, check
+		CombatantID     int    `json:"combatant_id"`     // Character or monster ID
+		Direction       string `json:"direction"`        // N, NE, E, SE, S, SW, W, NW
+		AttackDirection string `json:"attack_direction"` // For checking if attack is from rear
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CampaignID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "campaign_id required",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the campaign
+	var dmID int
+	var campaignName string
+	err = db.QueryRow("SELECT dm_id, name FROM lobbies WHERE id = $1", req.CampaignID).Scan(&dmID, &campaignName)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "campaign_not_found",
+			"message": fmt.Sprintf("Campaign %d not found", req.CampaignID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this campaign",
+		})
+		return
+	}
+	
+	// Handle action
+	switch strings.ToLower(req.Action) {
+	case "enable":
+		// Enable facing for this campaign
+		_, err = db.Exec(`
+			INSERT INTO combat_state (lobby_id, active, facing_enabled)
+			VALUES ($1, false, true)
+			ON CONFLICT (lobby_id) DO UPDATE SET facing_enabled = true
+		`, req.CampaignID)
+		
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "database_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		
+		// Log the action
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, NULL, $2, $3, $4)
+		`, req.CampaignID, "facing", "Facing rules enabled", "Attacks from behind now grant advantage. Shields only protect from frontal attacks.")
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"facing_enabled": true,
+			"message":       "⚔️ Facing rules enabled! Creatures now have a facing direction. Attacks from behind grant advantage.",
+			"rules_note":    "Facing (DMG p252): Track which way creatures face. Rear attacks (135° arc behind) get advantage. Shield AC bonus only applies to frontal attacks. Change facing as free action or part of movement.",
+		})
+		
+	case "disable":
+		// Disable facing for this campaign
+		_, err = db.Exec(`
+			UPDATE combat_state SET facing_enabled = false, combatant_facing = '{}'
+			WHERE lobby_id = $1
+		`, req.CampaignID)
+		
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "database_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, NULL, $2, $3, $4)
+		`, req.CampaignID, "facing", "Facing rules disabled", "No longer tracking creature facing.")
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":        true,
+			"facing_enabled": false,
+			"message":        "Facing rules disabled.",
+		})
+		
+	case "set":
+		// Set facing direction for a combatant
+		if req.CombatantID == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_request",
+				"message": "combatant_id required for 'set' action",
+			})
+			return
+		}
+		
+		dir := strings.ToUpper(req.Direction)
+		if !validFacingDirections[dir] {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":           "invalid_direction",
+				"message":         fmt.Sprintf("Invalid direction '%s'. Must be one of: N, NE, E, SE, S, SW, W, NW", req.Direction),
+				"valid_directions": []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"},
+			})
+			return
+		}
+		
+		// Check if facing is enabled
+		var facingEnabled bool
+		var facingJSON []byte
+		err = db.QueryRow(`
+			SELECT COALESCE(facing_enabled, false), COALESCE(combatant_facing, '{}')
+			FROM combat_state WHERE lobby_id = $1
+		`, req.CampaignID).Scan(&facingEnabled, &facingJSON)
+		
+		if err != nil {
+			// No combat_state row yet, create one with facing enabled
+			_, err = db.Exec(`
+				INSERT INTO combat_state (lobby_id, active, facing_enabled, combatant_facing)
+				VALUES ($1, false, true, $2)
+			`, req.CampaignID, fmt.Sprintf(`{"%d": "%s"}`, req.CombatantID, dir))
+			facingEnabled = true
+			facingJSON = []byte("{}")
+		}
+		
+		if !facingEnabled {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "facing_not_enabled",
+				"message": "Facing rules are not enabled. Use action='enable' first.",
+			})
+			return
+		}
+		
+		// Update facing map
+		var facingMap map[string]string
+		json.Unmarshal(facingJSON, &facingMap)
+		if facingMap == nil {
+			facingMap = make(map[string]string)
+		}
+		
+		idStr := strconv.Itoa(req.CombatantID)
+		oldFacing := facingMap[idStr]
+		facingMap[idStr] = dir
+		
+		updatedJSON, _ := json.Marshal(facingMap)
+		_, err = db.Exec(`
+			UPDATE combat_state SET combatant_facing = $1 WHERE lobby_id = $2
+		`, updatedJSON, req.CampaignID)
+		
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "database_error",
+				"message": err.Error(),
+			})
+			return
+		}
+		
+		// Get combatant name
+		var combatantName string
+		db.QueryRow("SELECT name FROM characters WHERE id = $1 AND lobby_id = $2", req.CombatantID, req.CampaignID).Scan(&combatantName)
+		if combatantName == "" {
+			// Check turn order for monsters
+			var turnOrderJSON string
+			db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", req.CampaignID).Scan(&turnOrderJSON)
+			type CombatEntry struct {
+				Name string `json:"name"`
+				ID   int    `json:"id"`
+			}
+			var entries []CombatEntry
+			json.Unmarshal([]byte(turnOrderJSON), &entries)
+			for _, e := range entries {
+				if e.ID == req.CombatantID {
+					combatantName = e.Name
+					break
+				}
+			}
+			if combatantName == "" {
+				combatantName = fmt.Sprintf("Combatant %d", req.CombatantID)
+			}
+		}
+		
+		message := fmt.Sprintf("🧭 %s is now facing %s", combatantName, dir)
+		if oldFacing != "" {
+			message = fmt.Sprintf("🧭 %s turns from %s to face %s", combatantName, oldFacing, dir)
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"combatant":     combatantName,
+			"combatant_id":  req.CombatantID,
+			"facing":        dir,
+			"previous":      oldFacing,
+			"message":       message,
+			"rear_arc":      []string{getOppositeDirection(dir)},
+			"rules_note":    fmt.Sprintf("Attacks from %s's rear arc (%s, and adjacent directions) get advantage.", combatantName, getOppositeDirection(dir)),
+		})
+		
+	case "check":
+		// Check if an attack direction would be a rear attack
+		if req.CombatantID == 0 || req.AttackDirection == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_request",
+				"message": "combatant_id and attack_direction required for 'check' action",
+			})
+			return
+		}
+		
+		attackDir := strings.ToUpper(req.AttackDirection)
+		if !validFacingDirections[attackDir] {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "invalid_direction",
+				"message":          fmt.Sprintf("Invalid attack_direction '%s'", req.AttackDirection),
+				"valid_directions": []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"},
+			})
+			return
+		}
+		
+		facing, enabled := getCombatantFacing(req.CampaignID, req.CombatantID)
+		if !enabled {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"facing_enabled": false,
+				"message":        "Facing rules are not enabled for this campaign.",
+			})
+			return
+		}
+		
+		if facing == "" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"facing_enabled":  true,
+				"combatant_id":    req.CombatantID,
+				"facing":          nil,
+				"is_rear_attack":  false,
+				"is_front_attack": true,
+				"message":         "Combatant has no facing set. Attack treated as frontal.",
+			})
+			return
+		}
+		
+		isRear := isRearAttack(facing, attackDir)
+		isFront := isFrontAttack(facing, attackDir)
+		
+		// Get combatant name
+		var combatantName string
+		db.QueryRow("SELECT name FROM characters WHERE id = $1 AND lobby_id = $2", req.CombatantID, req.CampaignID).Scan(&combatantName)
+		if combatantName == "" {
+			combatantName = fmt.Sprintf("Combatant %d", req.CombatantID)
+		}
+		
+		result := map[string]interface{}{
+			"facing_enabled":   true,
+			"combatant":        combatantName,
+			"combatant_id":     req.CombatantID,
+			"facing":           facing,
+			"attack_direction": attackDir,
+			"is_rear_attack":   isRear,
+			"is_front_attack":  isFront,
+			"is_flank_attack":  !isRear && !isFront,
+		}
+		
+		if isRear {
+			result["advantage"] = true
+			result["shield_applies"] = false
+			result["message"] = fmt.Sprintf("⚔️ Rear attack! Attacking %s from %s while they face %s grants advantage. Shield does not protect.", combatantName, attackDir, facing)
+		} else if isFront {
+			result["advantage"] = false
+			result["shield_applies"] = true
+			result["message"] = fmt.Sprintf("Frontal attack. %s is facing %s and attack comes from %s.", combatantName, facing, attackDir)
+		} else {
+			result["advantage"] = false
+			result["shield_applies"] = true
+			result["message"] = fmt.Sprintf("Flank attack (side). %s is facing %s and attack comes from %s. No rear advantage.", combatantName, facing, attackDir)
+		}
+		
+		json.NewEncoder(w).Encode(result)
+		
+	default:
+		// Show current facing status if no action specified
+		var facingEnabled bool
+		var facingJSON []byte
+		err = db.QueryRow(`
+			SELECT COALESCE(facing_enabled, false), COALESCE(combatant_facing, '{}')
+			FROM combat_state WHERE lobby_id = $1
+		`, req.CampaignID).Scan(&facingEnabled, &facingJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"facing_enabled":    false,
+				"combatant_facing":  map[string]string{},
+				"message":           "No combat state. Facing not tracked.",
+				"available_actions": []string{"enable", "disable", "set", "check"},
+			})
+			return
+		}
+		
+		var facingMap map[string]string
+		json.Unmarshal(facingJSON, &facingMap)
+		
+		// Enrich with combatant names
+		enrichedFacing := make(map[string]interface{})
+		for idStr, dir := range facingMap {
+			id, _ := strconv.Atoi(idStr)
+			var name string
+			db.QueryRow("SELECT name FROM characters WHERE id = $1", id).Scan(&name)
+			if name == "" {
+				name = fmt.Sprintf("Combatant %d", id)
+			}
+			enrichedFacing[idStr] = map[string]interface{}{
+				"name":      name,
+				"direction": dir,
+				"rear_arc":  getOppositeDirection(dir),
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"facing_enabled":     facingEnabled,
+			"combatant_facing":   enrichedFacing,
+			"available_actions":  []string{"enable", "disable", "set", "check"},
+			"valid_directions":   []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"},
+			"rules_note":         "Facing (DMG p252): Enable to track creature facing. Rear attacks get advantage. Shield only protects from frontal arc.",
+		})
+	}
 }
 
 // Poison represents a D&D poison with its effects

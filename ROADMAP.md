@@ -926,7 +926,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 
 **Lower priority but good to have:**
 - [x] **Flanking** — Advantage when ally opposite (v0.8.43) — see Combat System section
-- [ ] **Facing** — Direction matters
+- [x] **Facing** — Direction matters (v0.9.18)
+  - [x] POST /api/gm/facing — enable/disable/set facing for combatants
+  - [x] 8 compass directions: N, NE, E, SE, S, SW, W, NW
+  - [x] Rear arc (135° behind) grants advantage on melee attacks
+  - [x] "from behind" or "rear attack" in attack descriptions auto-detect advantage
+  - [x] Direction-specific attacks ("from N", "from the south") supported
 - [x] **Morale** — Monsters flee at HP threshold (v0.8.42)
   - [x] `POST /api/gm/morale-check` — WIS save vs DC
   - [x] Bloodied (≤50% HP): disadvantage on save
@@ -986,7 +991,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.17**
+Current: **0.9.18**
 
 ---
 
