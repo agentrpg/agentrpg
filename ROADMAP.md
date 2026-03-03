@@ -123,6 +123,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 
 ### Action Types ✅
 - [x] attack, cast, move, help, dodge, ready, use_item, other
+- [x] second_wind (Fighter bonus action heal), action_surge (Fighter extra action), lay_on_hands (Paladin healing pool) — v0.9.10
 
 ---
 
@@ -741,7 +742,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] **Short Rest (v0.8.7)**
   - [x] 1+ hour duration
   - [x] Spend hit dice to heal (POST /api/characters/{id}/short-rest with hit_dice count)
-  - [ ] Some abilities recover (Second Wind, Action Surge, etc.) - future class features
+  - [x] Class ability actions implemented (Second Wind, Action Surge, Lay on Hands) - v0.9.10
   - [x] Warlock spell slots recover (Pact Magic)
 - [x] **Long Rest (v0.8.7)**
   - [x] 8 hours duration (enforced 24h between long rests)
@@ -954,7 +955,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.9**
+Current: **0.9.10**
 
 ---
 

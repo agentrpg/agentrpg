@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.8
+// @version 0.9.10
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.9"
+const version = "0.9.10"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -20385,6 +20385,247 @@ func resolveAction(action, description string, charID int) string {
 			options = "Specify: dash, disengage, hide, sleight of hand, thieves' tools, or use object"
 		}
 		return fmt.Sprintf("🗡️ Cunning Action! %s", options)
+
+	case "second_wind":
+		// v0.9.10: Fighter's Second Wind (level 1+)
+		// Bonus action to regain 1d10 + fighter level HP. Once per short rest.
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "fighter" {
+			return "Only fighters can use Second Wind!"
+		}
+		
+		// Check if resource is available
+		var resourcesUsedJSON []byte
+		db.QueryRow("SELECT COALESCE(class_resources_used, '{}') FROM characters WHERE id = $1", charID).Scan(&resourcesUsedJSON)
+		var resourcesUsed map[string]int
+		json.Unmarshal(resourcesUsedJSON, &resourcesUsed)
+		
+		maxUses := getMaxClassResource(class, level, "second_wind", 0)
+		currentUsed := resourcesUsed["second_wind"]
+		
+		if currentUsed >= maxUses {
+			return "You've already used Second Wind! Take a short or long rest to regain this ability."
+		}
+		
+		// Roll 1d10 + fighter level
+		healRoll := rollDie(10)
+		totalHeal := healRoll + level
+		
+		// Apply healing (up to max HP)
+		var currentHP, maxHP int
+		db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", charID).Scan(&currentHP, &maxHP)
+		newHP := currentHP + totalHeal
+		if newHP > maxHP {
+			newHP = maxHP
+		}
+		actualHeal := newHP - currentHP
+		
+		// Update HP
+		db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, charID)
+		
+		// Consume the resource
+		resourcesUsed["second_wind"] = currentUsed + 1
+		updatedResources, _ := json.Marshal(resourcesUsed)
+		db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedResources, charID)
+		
+		if actualHeal == 0 {
+			return fmt.Sprintf("💪 Second Wind! Rolled 1d10 (%d) + %d (level) = %d healing. You're already at full HP!", healRoll, level, totalHeal)
+		}
+		return fmt.Sprintf("💪 Second Wind! Rolled 1d10 (%d) + %d (level) = %d healing. HP: %d → %d", healRoll, level, totalHeal, currentHP, newHP)
+
+	case "action_surge":
+		// v0.9.10: Fighter's Action Surge (level 2+)
+		// Bonus action to gain an additional action this turn. Once per short rest (twice at level 17+).
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "fighter" {
+			return "Only fighters can use Action Surge!"
+		}
+		
+		if level < 2 {
+			return "Action Surge requires Fighter level 2+!"
+		}
+		
+		// Check if resource is available
+		var resourcesUsedJSON []byte
+		db.QueryRow("SELECT COALESCE(class_resources_used, '{}') FROM characters WHERE id = $1", charID).Scan(&resourcesUsedJSON)
+		var resourcesUsed map[string]int
+		json.Unmarshal(resourcesUsedJSON, &resourcesUsed)
+		
+		maxUses := getMaxClassResource(class, level, "action_surge", 0)
+		currentUsed := resourcesUsed["action_surge"]
+		
+		if currentUsed >= maxUses {
+			usesWord := "use"
+			if maxUses > 1 {
+				usesWord = "uses"
+			}
+			return fmt.Sprintf("You've already used Action Surge %d time(s)! Take a short or long rest to regain this ability (%d %s per rest).", currentUsed, maxUses, usesWord)
+		}
+		
+		// Grant an extra action by resetting action_used
+		db.Exec("UPDATE characters SET action_used = false WHERE id = $1", charID)
+		
+		// Consume the resource
+		resourcesUsed["action_surge"] = currentUsed + 1
+		updatedResources, _ := json.Marshal(resourcesUsed)
+		db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedResources, charID)
+		
+		remainingUses := maxUses - currentUsed - 1
+		usesNote := ""
+		if remainingUses > 0 {
+			usesNote = fmt.Sprintf(" (%d use(s) remaining until rest)", remainingUses)
+		}
+		
+		return fmt.Sprintf("⚡ Action Surge! You push beyond your limits and gain an additional ACTION this turn.%s", usesNote)
+
+	case "lay_on_hands":
+		// v0.9.10: Paladin's Lay on Hands (level 1+)
+		// Action to heal from your pool (paladin level × 5 HP total).
+		// Can also cure disease or poison (costs 5 HP from pool per ailment).
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "paladin" {
+			return "Only paladins can use Lay on Hands!"
+		}
+		
+		// Check remaining pool
+		var resourcesUsedJSON []byte
+		db.QueryRow("SELECT COALESCE(class_resources_used, '{}') FROM characters WHERE id = $1", charID).Scan(&resourcesUsedJSON)
+		var resourcesUsed map[string]int
+		json.Unmarshal(resourcesUsedJSON, &resourcesUsed)
+		
+		maxPool := getMaxClassResource(class, level, "lay_on_hands", 0)
+		currentUsed := resourcesUsed["lay_on_hands"]
+		remainingPool := maxPool - currentUsed
+		
+		if remainingPool <= 0 {
+			return "Your Lay on Hands pool is empty! Take a long rest to restore it."
+		}
+		
+		// Parse amount and target from description
+		// Format: "lay_on_hands 15" or "lay_on_hands 10 on Thorn" or "lay_on_hands cure disease on self"
+		descLower := strings.ToLower(description)
+		
+		// Check for cure disease/poison
+		if strings.Contains(descLower, "cure") {
+			if remainingPool < 5 {
+				return fmt.Sprintf("Curing disease or poison costs 5 HP from your pool. You only have %d HP remaining.", remainingPool)
+			}
+			
+			// Determine target (self or another character)
+			targetID := charID // default to self
+			if !strings.Contains(descLower, "self") && !strings.Contains(descLower, "myself") {
+				parsedTarget := parseTargetFromDescription(description, charID)
+				if parsedTarget > 0 {
+					targetID = parsedTarget
+				}
+			}
+			
+			// Look for disease or poison conditions to cure
+			var targetConds []byte
+			var targetName string
+			db.QueryRow("SELECT COALESCE(conditions, '[]'), name FROM characters WHERE id = $1", targetID).Scan(&targetConds, &targetName)
+			var conds []string
+			json.Unmarshal(targetConds, &conds)
+			
+			curedAilment := ""
+			newConds := []string{}
+			for _, c := range conds {
+				cLower := strings.ToLower(c)
+				if (strings.Contains(descLower, "disease") && strings.HasPrefix(cLower, "disease:")) ||
+				   (strings.Contains(descLower, "poison") && (cLower == "poisoned" || strings.HasPrefix(cLower, "poison:"))) {
+					curedAilment = c
+					// Don't add this condition back (it's cured)
+				} else {
+					newConds = append(newConds, c)
+				}
+			}
+			
+			if curedAilment == "" {
+				ailmentType := "disease or poison"
+				if strings.Contains(descLower, "disease") {
+					ailmentType = "disease"
+				} else if strings.Contains(descLower, "poison") {
+					ailmentType = "poison"
+				}
+				return fmt.Sprintf("%s has no %s to cure!", targetName, ailmentType)
+			}
+			
+			// Update conditions and consume 5 HP from pool
+			updatedConds, _ := json.Marshal(newConds)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, targetID)
+			
+			resourcesUsed["lay_on_hands"] = currentUsed + 5
+			updatedResources, _ := json.Marshal(resourcesUsed)
+			db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedResources, charID)
+			
+			targetNote := ""
+			if targetID != charID {
+				targetNote = fmt.Sprintf(" on %s", targetName)
+			}
+			return fmt.Sprintf("🙌 Lay on Hands! Cured %s%s. Pool: %d → %d HP remaining.", curedAilment, targetNote, remainingPool, remainingPool-5)
+		}
+		
+		// Healing mode - parse amount
+		healAmount := 0
+		// Try to find a number in the description
+		words := strings.Fields(description)
+		for _, w := range words {
+			if n, err := strconv.Atoi(w); err == nil && n > 0 {
+				healAmount = n
+				break
+			}
+		}
+		
+		if healAmount == 0 {
+			return fmt.Sprintf("🙌 Lay on Hands pool: %d HP remaining. Specify amount to heal (e.g., 'lay_on_hands 10' or 'lay_on_hands 10 on Thorn'). To cure disease/poison: 'lay_on_hands cure disease on [target]'.", remainingPool)
+		}
+		
+		if healAmount > remainingPool {
+			healAmount = remainingPool
+		}
+		
+		// Determine target
+		targetID := charID
+		if !strings.Contains(descLower, "self") && !strings.Contains(descLower, "myself") {
+			parsedTarget := parseTargetFromDescription(description, charID)
+			if parsedTarget > 0 {
+				targetID = parsedTarget
+			}
+		}
+		
+		// Apply healing
+		var targetHP, targetMaxHP int
+		var targetName string
+		db.QueryRow("SELECT hp, max_hp, name FROM characters WHERE id = $1", targetID).Scan(&targetHP, &targetMaxHP, &targetName)
+		
+		newHP := targetHP + healAmount
+		if newHP > targetMaxHP {
+			newHP = targetMaxHP
+		}
+		actualHeal := newHP - targetHP
+		
+		if actualHeal == 0 {
+			if targetID == charID {
+				return fmt.Sprintf("🙌 Lay on Hands! You're already at full HP. Pool: %d HP remaining.", remainingPool)
+			}
+			return fmt.Sprintf("🙌 Lay on Hands! %s is already at full HP. Pool: %d HP remaining.", targetName, remainingPool)
+		}
+		
+		db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, targetID)
+		
+		// Consume from pool
+		resourcesUsed["lay_on_hands"] = currentUsed + actualHeal
+		updatedResources, _ := json.Marshal(resourcesUsed)
+		db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedResources, charID)
+		
+		targetNote := ""
+		if targetID != charID {
+			targetNote = fmt.Sprintf(" %s:", targetName)
+		}
+		return fmt.Sprintf("🙌 Lay on Hands!%s HP %d → %d (+%d). Pool: %d → %d HP remaining.", targetNote, targetHP, newHP, actualHeal, remainingPool, remainingPool-actualHeal)
 
 	case "ready":
 		// Ready action: hold your action for a trigger condition
