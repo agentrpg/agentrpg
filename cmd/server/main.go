@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.8"
+const version = "0.9.9"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -10503,17 +10503,18 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		req.DC = 10 // Default DC
 	}
 	
-	// Get character stats (including inspiration and expertise)
+	// Get character stats (including inspiration, expertise, and subclass)
 	var charName string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
 	var skillProfsRaw sql.NullString
 	var expertiseRaw sql.NullString
 	var hasInspiration bool
+	var subclassRaw sql.NullString
 	err = db.QueryRow(`
-		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false)
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, '')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &expertiseRaw, &hasInspiration)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &expertiseRaw, &hasInspiration, &subclassRaw)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -10644,6 +10645,20 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 			totalMod += proficiencyBonus(level)
 		}
 		isProficient = true
+	}
+	
+	// v0.9.9: Remarkable Athlete (Champion Fighter level 7+)
+	// Add half proficiency bonus (rounded up) to STR, DEX, or CON checks when not proficient
+	remarkableAthleteBonus := 0
+	if !isProficient && subclassRaw.Valid && subclassRaw.String != "" {
+		isPhysicalCheck := abilityUsed == "str" || abilityUsed == "strength" ||
+			abilityUsed == "dex" || abilityUsed == "dexterity" ||
+			abilityUsed == "con" || abilityUsed == "constitution"
+		if isPhysicalCheck && hasSubclassFeature(subclassRaw.String, level, "remarkable_athlete") {
+			// Half proficiency bonus, rounded up
+			remarkableAthleteBonus = (proficiencyBonus(level) + 1) / 2
+			totalMod += remarkableAthleteBonus
+		}
 	}
 	
 	// Handle inspiration: spend it for advantage
@@ -10791,6 +10806,12 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		response["used_inspiration"] = true
 		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this check", charName)
 	}
+	// v0.9.9: Add Remarkable Athlete note
+	if remarkableAthleteBonus > 0 {
+		response["remarkable_athlete"] = true
+		response["remarkable_athlete_bonus"] = remarkableAthleteBonus
+		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Remarkable Athlete (half proficiency for physical checks)", charName, remarkableAthleteBonus)
+	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {
 		response["poisoned"] = true
@@ -10880,18 +10901,19 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		req.DC = 15 // Default DC for tool checks
 	}
 	
-	// Get character stats (including expertise for v0.8.13)
+	// Get character stats (including expertise for v0.8.13, subclass for v0.9.9)
 	var charName string
 	var str, dex, con, intl, wis, cha, level int
 	var charLobbyID int
 	var toolProfsRaw string
 	var expertiseRaw string
 	var hasInspiration bool
+	var toolSubclassRaw sql.NullString
 	err = db.QueryRow(`
 		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, 
-			COALESCE(tool_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false)
+			COALESCE(tool_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, '')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &expertiseRaw, &hasInspiration)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &expertiseRaw, &hasInspiration, &toolSubclassRaw)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -10992,6 +11014,20 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 			totalMod += proficiencyBonus(level) * 2
 		} else {
 			totalMod += proficiencyBonus(level)
+		}
+	}
+	
+	// v0.9.9: Remarkable Athlete (Champion Fighter level 7+)
+	// Add half proficiency bonus (rounded up) to STR, DEX, or CON checks when not proficient
+	toolRemarkableAthleteBonus := 0
+	if !isProficient && toolSubclassRaw.Valid && toolSubclassRaw.String != "" {
+		isPhysicalCheck := abilityUsed == "str" || abilityUsed == "strength" ||
+			abilityUsed == "dex" || abilityUsed == "dexterity" ||
+			abilityUsed == "con" || abilityUsed == "constitution"
+		if isPhysicalCheck && hasSubclassFeature(toolSubclassRaw.String, level, "remarkable_athlete") {
+			// Half proficiency bonus, rounded up
+			toolRemarkableAthleteBonus = (proficiencyBonus(level) + 1) / 2
+			totalMod += toolRemarkableAthleteBonus
 		}
 	}
 	
@@ -11122,6 +11158,14 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	if usedInspiration {
 		response["used_inspiration"] = true
 		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this check", charName)
+	}
+	// v0.9.9: Add Remarkable Athlete note
+	if toolRemarkableAthleteBonus > 0 {
+		response["remarkable_athlete"] = true
+		response["remarkable_athlete_bonus"] = toolRemarkableAthleteBonus
+		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Remarkable Athlete (half proficiency for physical checks)", charName, toolRemarkableAthleteBonus)
+		// Update the note to reflect the bonus
+		response["note"] = fmt.Sprintf("%s is not proficient with %s, but gains +%d from Remarkable Athlete", charName, req.Tool, toolRemarkableAthleteBonus)
 	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {
@@ -23695,8 +23739,8 @@ var availableSubclasses = map[string]Subclass{
 				Level:       7,
 				Description: "You can add half your proficiency bonus (round up) to any Strength, Dexterity, or Constitution check you make that doesn't already use your proficiency bonus. In addition, when you make a running long jump, the distance you can cover increases by a number of feet equal to your Strength modifier.",
 				Mechanics: map[string]string{
-					"half_prof_athletics": "true",
-					"jump_bonus":          "str_mod",
+					"remarkable_athlete": "true", // Half prof to STR/DEX/CON checks when not proficient
+					"jump_bonus":         "str_mod",
 				},
 			},
 			{
