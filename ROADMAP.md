@@ -673,6 +673,15 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Ki Points (Monk) — equals monk level, recovers on short rest
     - [x] Rage (Barbarian) — 2-6 uses based on level, recovers on long rest
     - [x] Sorcery Points (Sorcerer) — equals sorcerer level, recovers on long rest
+    - [x] Metamagic (Sorcerer) — 2 options at level 3, +1 at 10 and 17 (v0.9.12)
+      - [x] All 8 SRD options: Careful, Distant, Empowered, Extended, Heightened, Quickened, Subtle, Twinned
+      - [x] POST /api/characters/metamagic — choose/view metamagic options
+      - [x] Metamagic keywords in cast description apply effects automatically
+      - [x] Sorcery points spent on metamagic use
+    - [x] Flexible Casting (Sorcerer) — convert sorcery points ↔ spell slots (v0.9.12)
+      - [x] POST /api/characters/flexible-casting — Font of Magic conversion
+      - [x] Create slots: 2/3/5/6/7 SP for levels 1-5
+      - [x] Convert slots: yields 1-5 SP for levels 1-5
     - [x] Bardic Inspiration (Bard) — CHA mod uses, short rest at 5+
     - [x] Channel Divinity (Cleric/Paladin) — 1-3 uses, recovers on short rest
     - [x] Lay on Hands (Paladin) — level × 5 HP pool, recovers on long rest

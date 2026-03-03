@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.10
+// @version 0.9.12
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.11"
+const version = "0.9.12"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -470,6 +470,9 @@ func main() {
 	http.HandleFunc("/api/universe/subclasses/", handleUniverseSubclass)
 	http.HandleFunc("/api/characters/subclass", handleCharacterSubclass)
 	http.HandleFunc("/api/characters/subclass-choice", handleCharacterSubclassChoice)
+	http.HandleFunc("/api/characters/metamagic", handleCharacterMetamagic)
+	http.HandleFunc("/api/characters/flexible-casting", handleFlexibleCasting)
+	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
 	http.HandleFunc("/api/universe/rules/", handleUniverseRule)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
@@ -750,6 +753,10 @@ func initDB() {
 		-- Sneak Attack tracking (v0.9.4)
 		-- Rogue feature: once per turn, bonus damage with finesse/ranged weapon when have advantage or ally adjacent to target
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS sneak_attack_used BOOLEAN DEFAULT FALSE;
+		
+		-- Metamagic choices tracking (v0.9.12)
+		-- Sorcerer feature: choose 2 at level 3, +1 at levels 10 and 17
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS metamagic_choices JSONB DEFAULT '[]';
 		
 		-- Hit Dice tracking (Short/Long Rest - Phase 8 P0)
 		-- hit_dice_spent tracks how many dice have been used (recovers half on long rest)
@@ -8155,6 +8162,37 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		characterInfo["class_resources"] = resourceList
+	}
+	
+	// Add Metamagic info for Sorcerers (v0.9.12)
+	if strings.ToLower(class) == "sorcerer" && level >= 3 {
+		knownMetamagic := getMetamagicChoices(charID)
+		maxChoices := getMaxMetamagicChoices(level)
+		
+		if len(knownMetamagic) > 0 {
+			metamagicInfo := []map[string]interface{}{}
+			for _, slug := range knownMetamagic {
+				if opt, ok := metamagicOptions[slug]; ok {
+					info := map[string]interface{}{
+						"name": opt.Name,
+						"slug": opt.Slug,
+						"cost": opt.Cost,
+					}
+					if opt.CostFormula != "" {
+						info["cost_formula"] = opt.CostFormula
+					}
+					metamagicInfo = append(metamagicInfo, info)
+				}
+			}
+			characterInfo["metamagic"] = map[string]interface{}{
+				"known":       metamagicInfo,
+				"known_count": len(knownMetamagic),
+				"max_choices": maxChoices,
+				"usage":       "Include metamagic keyword in spell description, e.g., 'quickened fireball', 'twinned haste'",
+			}
+		} else {
+			characterInfo["metamagic_prompt"] = fmt.Sprintf("You can learn %d Metamagic options! GET /api/characters/metamagic?character_id=%d to see choices", maxChoices, charID)
+		}
 	}
 	
 	// Add ASI notification if points available
@@ -19096,6 +19134,22 @@ func resolveAction(action, description string, charID int) string {
 		descLower := strings.ToLower(description)
 		isRitualCast := strings.Contains(descLower, "ritual") || strings.Contains(descLower, "as a ritual")
 		
+		// Parse metamagic from description (v0.9.12)
+		// Supports: "quickened fireball", "twinned haste", "subtle charm person", etc.
+		var usedMetamagic []string
+		var metamagicEffects []string
+		var metamagicPointsCost int
+		isSorcerer := strings.ToLower(class) == "sorcerer"
+		
+		if isSorcerer && level >= 3 {
+			metamagicKeywords := []string{"careful", "distant", "empowered", "extended", "heightened", "quickened", "subtle", "twinned"}
+			for _, mm := range metamagicKeywords {
+				if strings.Contains(descLower, mm) && hasMetamagic(charID, mm) {
+					usedMetamagic = append(usedMetamagic, mm)
+				}
+			}
+		}
+		
 		// Parse upcast slot level from description (v0.8.28)
 		// Supports: "at level 5", "at 5th level", "using a level 5 slot", "using 5th level slot"
 		requestedSlotLevel := 0
@@ -19190,6 +19244,70 @@ func resolveAction(action, description string, charID int) string {
 				slotLevel = requestedSlotLevel
 			}
 			
+			// Process Metamagic (v0.9.12)
+			if len(usedMetamagic) > 0 {
+				// Calculate costs
+				for _, mm := range usedMetamagic {
+					opt := metamagicOptions[mm]
+					cost := opt.Cost
+					if mm == "twinned" {
+						// Twinned: cost = spell level (min 1 for cantrips)
+						cost = slotLevel
+						if cost == 0 {
+							cost = 1
+						}
+					}
+					metamagicPointsCost += cost
+				}
+				
+				// Check sorcery points
+				var resourcesJSON []byte
+				db.QueryRow("SELECT COALESCE(class_resources, '{}') FROM characters WHERE id = $1", charID).Scan(&resourcesJSON)
+				var resources map[string]int
+				json.Unmarshal(resourcesJSON, &resources)
+				
+				currentPoints := resources["sorcery_points"]
+				if currentPoints < metamagicPointsCost {
+					return fmt.Sprintf("Cannot apply %v - costs %d sorcery points but you only have %d", usedMetamagic, metamagicPointsCost, currentPoints)
+				}
+				
+				// Apply metamagic effects and build notes
+				for _, mm := range usedMetamagic {
+					opt := metamagicOptions[mm]
+					cost := opt.Cost
+					if mm == "twinned" {
+						cost = slotLevel
+						if cost == 0 {
+							cost = 1
+						}
+					}
+					
+					switch mm {
+					case "quickened":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Quickened (%d SP): cast as bonus action", cost))
+					case "twinned":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Twinned (%d SP): targets a second creature", cost))
+					case "subtle":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Subtle (%d SP): no verbal/somatic components", cost))
+					case "heightened":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Heightened (%d SP): one target has disadvantage on first save", cost))
+					case "empowered":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Empowered (%d SP): reroll up to %d damage dice", cost, modifier(cha)))
+					case "extended":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Extended (%d SP): duration doubled (max 24h)", cost))
+					case "distant":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Distant (%d SP): range doubled (or 30ft if touch)", cost))
+					case "careful":
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Careful (%d SP): up to %d creatures auto-succeed on save", cost, max(1, modifier(cha))))
+					}
+				}
+				
+				// Spend sorcery points
+				resources["sorcery_points"] = currentPoints - metamagicPointsCost
+				updatedResources, _ := json.Marshal(resources)
+				db.Exec("UPDATE characters SET class_resources = $1 WHERE id = $2", updatedResources, charID)
+			}
+			
 			// Check and use spell slot (non-ritual)
 			if slotLevel > 0 {
 				slots := getSpellSlots(class, level)
@@ -19228,6 +19346,12 @@ func resolveAction(action, description string, charID int) string {
 				upcastInfo = fmt.Sprintf(" (upcast at level %d)", requestedSlotLevel)
 			}
 			
+			// Build metamagic note for output
+			metamagicNote := ""
+			if len(metamagicEffects) > 0 {
+				metamagicNote = fmt.Sprintf(" [Metamagic: %s]", strings.Join(metamagicEffects, "; "))
+			}
+			
 			if spell.DamageDice != "" {
 				// Check for upcast damage
 				damageDice := spell.DamageDice
@@ -19243,7 +19367,7 @@ func resolveAction(action, description string, charID int) string {
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s. %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, metamagicNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -19285,9 +19409,9 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
-				return fmt.Sprintf("Cast %s%s! Heals %d HP%s. %s", spell.Name, upcastInfo, heal, bonusInfo, spell.Description)
+				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, spell.Description)
 			}
-			return fmt.Sprintf("Cast %s%s! (DC %d) %s", spell.Name, upcastInfo, saveDC, spell.Description)
+			return fmt.Sprintf("Cast %s%s! (DC %d)%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, spell.Description)
 		}
 		return fmt.Sprintf("Cast spell: %s (Save DC: %d)", description, saveDC)
 	
@@ -24491,6 +24615,111 @@ var availableSubclasses = map[string]Subclass{
 			},
 		},
 	},
+}
+
+// MetamagicOption represents a Sorcerer Metamagic option (v0.9.12)
+type MetamagicOption struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Cost        int    `json:"cost"`         // Sorcery points cost (0 = variable)
+	CostFormula string `json:"cost_formula"` // For variable costs like Twinned Spell
+	Description string `json:"description"`
+}
+
+// All 8 SRD Metamagic options
+var metamagicOptions = map[string]MetamagicOption{
+	"careful": {
+		Slug:        "careful",
+		Name:        "Careful Spell",
+		Cost:        1,
+		Description: "When you cast a spell that forces other creatures to make a saving throw, you can protect some of those creatures from the spell's full force. Choose a number of creatures up to your Charisma modifier (minimum of one). A chosen creature automatically succeeds on its saving throw against the spell.",
+	},
+	"distant": {
+		Slug:        "distant",
+		Name:        "Distant Spell",
+		Cost:        1,
+		Description: "When you cast a spell that has a range of 5 feet or greater, you can double the range of the spell. When you cast a spell that has a range of touch, you can make the range of the spell 30 feet.",
+	},
+	"empowered": {
+		Slug:        "empowered",
+		Name:        "Empowered Spell",
+		Cost:        1,
+		Description: "When you roll damage for a spell, you can reroll a number of the damage dice up to your Charisma modifier (minimum of one). You must use the new rolls. You can use Empowered Spell even if you have already used a different Metamagic option during the casting of the spell.",
+	},
+	"extended": {
+		Slug:        "extended",
+		Name:        "Extended Spell",
+		Cost:        1,
+		Description: "When you cast a spell that has a duration of 1 minute or longer, you can double its duration, to a maximum duration of 24 hours.",
+	},
+	"heightened": {
+		Slug:        "heightened",
+		Name:        "Heightened Spell",
+		Cost:        3,
+		Description: "When you cast a spell that forces a creature to make a saving throw to resist its effects, you can give one target of the spell disadvantage on its first saving throw made against the spell.",
+	},
+	"quickened": {
+		Slug:        "quickened",
+		Name:        "Quickened Spell",
+		Cost:        2,
+		Description: "When you cast a spell that has a casting time of 1 action, you can change the casting time to 1 bonus action for this casting.",
+	},
+	"subtle": {
+		Slug:        "subtle",
+		Name:        "Subtle Spell",
+		Cost:        1,
+		Description: "When you cast a spell, you can cast it without any somatic or verbal components.",
+	},
+	"twinned": {
+		Slug:        "twinned",
+		Name:        "Twinned Spell",
+		Cost:        0, // Variable: spell level (minimum 1 for cantrips)
+		CostFormula: "spell_level",
+		Description: "When you cast a spell that targets only one creature and doesn't have a range of self, you can target a second creature in range with the same spell. To be eligible, a spell must be incapable of targeting more than one creature at the spell's current level.",
+	},
+}
+
+// getMaxMetamagicChoices returns how many metamagic options a sorcerer can know at a given level
+func getMaxMetamagicChoices(level int) int {
+	if level < 3 {
+		return 0
+	}
+	if level < 10 {
+		return 2
+	}
+	if level < 17 {
+		return 3
+	}
+	return 4
+}
+
+// hasMetamagic checks if a sorcerer has learned a specific metamagic option
+func hasMetamagic(charID int, slug string) bool {
+	var choicesJSON []byte
+	err := db.QueryRow("SELECT COALESCE(metamagic_choices, '[]') FROM characters WHERE id = $1", charID).Scan(&choicesJSON)
+	if err != nil {
+		return false
+	}
+	var choices []string
+	json.Unmarshal(choicesJSON, &choices)
+	for _, c := range choices {
+		if c == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// getMetamagicChoices returns the metamagic options a character has learned
+func getMetamagicChoices(charID int) []string {
+	var choicesJSON []byte
+	err := db.QueryRow("SELECT COALESCE(metamagic_choices, '[]') FROM characters WHERE id = $1", charID).Scan(&choicesJSON)
+	if err != nil {
+		return []string{}
+	}
+	var choices []string
+	json.Unmarshal(choicesJSON, &choices)
+	return choices
 }
 
 // ClassFeature represents a core class feature granted at a specific level
@@ -34376,6 +34605,523 @@ func getSubclassChoiceOptions(subclass, feature string) []map[string]interface{}
 		}
 	}
 	return []map[string]interface{}{}
+}
+
+// ============================================================================
+// Sorcerer Metamagic & Flexible Casting (v0.9.12)
+// ============================================================================
+
+// handleCharacterMetamagic godoc
+// @Summary Choose or view Metamagic options
+// @Description Sorcerers choose 2 Metamagic options at level 3, +1 at levels 10 and 17. GET to view choices, POST to learn a new option.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (for GET)"
+// @Param request body object{character_id=int,metamagic=string} false "Learn a metamagic option"
+// @Security BasicAuth
+// @Success 200 {object} object{metamagic_known=[]string,max_choices=int,can_learn_more=bool}
+// @Router /characters/metamagic [get]
+// @Router /characters/metamagic [post]
+func handleCharacterMetamagic(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		// View metamagic options (available and known)
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			// List all available metamagic options
+			options := []MetamagicOption{}
+			for _, opt := range metamagicOptions {
+				options = append(options, opt)
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"available_metamagic": options,
+				"note":                "Use character_id parameter to see a specific character's learned metamagic",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var choicesJSON []byte
+		err = db.QueryRow(`
+			SELECT class, level, COALESCE(metamagic_choices, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &choicesJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(class) != "sorcerer" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_a_sorcerer",
+				"message": "Only Sorcerers can learn Metamagic",
+			})
+			return
+		}
+		
+		var knownSlugs []string
+		json.Unmarshal(choicesJSON, &knownSlugs)
+		
+		knownOptions := []MetamagicOption{}
+		for _, slug := range knownSlugs {
+			if opt, ok := metamagicOptions[slug]; ok {
+				knownOptions = append(knownOptions, opt)
+			}
+		}
+		
+		maxChoices := getMaxMetamagicChoices(level)
+		canLearnMore := len(knownSlugs) < maxChoices
+		
+		// Available to learn
+		availableToLearn := []MetamagicOption{}
+		for slug, opt := range metamagicOptions {
+			known := false
+			for _, k := range knownSlugs {
+				if k == slug {
+					known = true
+					break
+				}
+			}
+			if !known {
+				availableToLearn = append(availableToLearn, opt)
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":       charID,
+			"level":              level,
+			"metamagic_known":    knownOptions,
+			"known_count":        len(knownSlugs),
+			"max_choices":        maxChoices,
+			"can_learn_more":     canLearnMore,
+			"available_to_learn": availableToLearn,
+			"how_to_use":         "Include metamagic keyword in spell description, e.g., 'quickened fireball', 'twinned haste', 'subtle charm person'",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Metamagic   string `json:"metamagic"` // slug: careful, distant, empowered, extended, heightened, quickened, subtle, twinned
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_json",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Validate metamagic option exists
+	metamagicSlug := strings.ToLower(strings.TrimSpace(req.Metamagic))
+	opt, validMetamagic := metamagicOptions[metamagicSlug]
+	if !validMetamagic {
+		validSlugs := []string{}
+		for slug := range metamagicOptions {
+			validSlugs = append(validSlugs, slug)
+		}
+		sort.Strings(validSlugs)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_metamagic",
+			"message":       fmt.Sprintf("'%s' is not a valid Metamagic option", req.Metamagic),
+			"valid_options": validSlugs,
+		})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var choicesJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, name, class, level, COALESCE(metamagic_choices, '[]')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &charName, &class, &level, &choicesJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_your_character",
+			"message": "You can only choose Metamagic for your own characters",
+		})
+		return
+	}
+	
+	if strings.ToLower(class) != "sorcerer" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_sorcerer",
+			"message": "Only Sorcerers can learn Metamagic",
+		})
+		return
+	}
+	
+	if level < 3 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "level_too_low",
+			"message": "Sorcerers gain Metamagic at level 3",
+			"level":   level,
+		})
+		return
+	}
+	
+	var currentChoices []string
+	json.Unmarshal(choicesJSON, &currentChoices)
+	
+	// Check if already known
+	for _, c := range currentChoices {
+		if c == metamagicSlug {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_known",
+				"message": fmt.Sprintf("%s already knows %s", charName, opt.Name),
+			})
+			return
+		}
+	}
+	
+	// Check if at capacity
+	maxChoices := getMaxMetamagicChoices(level)
+	if len(currentChoices) >= maxChoices {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":        "at_capacity",
+			"message":      fmt.Sprintf("%s has already learned %d Metamagic options (max at level %d)", charName, len(currentChoices), level),
+			"known":        currentChoices,
+			"max_choices":  maxChoices,
+			"next_at":      []int{10, 17},
+		})
+		return
+	}
+	
+	// Add the choice
+	currentChoices = append(currentChoices, metamagicSlug)
+	updatedJSON, _ := json.Marshal(currentChoices)
+	
+	_, err = db.Exec("UPDATE characters SET metamagic_choices = $1 WHERE id = $2", updatedJSON, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "database_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":        true,
+		"character_id":   req.CharacterID,
+		"character_name": charName,
+		"learned":        opt.Name,
+		"description":    opt.Description,
+		"cost":           opt.Cost,
+		"cost_formula":   opt.CostFormula,
+		"known_count":    len(currentChoices),
+		"max_choices":    maxChoices,
+		"can_learn_more": len(currentChoices) < maxChoices,
+		"all_known":      currentChoices,
+		"how_to_use":     fmt.Sprintf("Include '%s' in your spell description, e.g., '%s fireball'", metamagicSlug, metamagicSlug),
+	})
+}
+
+// handleFlexibleCasting godoc
+// @Summary Convert between sorcery points and spell slots
+// @Description Sorcerer's Font of Magic feature: create spell slots from sorcery points or convert slots to points
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param request body object{character_id=int,action=string,slot_level=int} true "Action: 'create_slot' or 'convert_slot', slot_level: 1-5"
+// @Security BasicAuth
+// @Success 200 {object} object{success=bool,sorcery_points=int,message=string}
+// @Router /characters/flexible-casting [post]
+func handleFlexibleCasting(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		// Return conversion table
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"description": "Font of Magic allows Sorcerers to convert between sorcery points and spell slots",
+			"create_slot_costs": map[string]int{
+				"1st_level": 2,
+				"2nd_level": 3,
+				"3rd_level": 5,
+				"4th_level": 6,
+				"5th_level": 7,
+			},
+			"convert_slot_yields": map[string]int{
+				"1st_level": 1,
+				"2nd_level": 2,
+				"3rd_level": 3,
+				"4th_level": 4,
+				"5th_level": 5,
+			},
+			"note":   "You can create spell slots no higher than 5th level. Cannot exceed your maximum sorcery points when converting.",
+			"usage":  "POST with character_id, action ('create_slot' or 'convert_slot'), and slot_level (1-5)",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Action      string `json:"action"`     // "create_slot" or "convert_slot"
+		SlotLevel   int    `json:"slot_level"` // 1-5
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_json",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Validate action
+	action := strings.ToLower(strings.TrimSpace(req.Action))
+	if action != "create_slot" && action != "convert_slot" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_action",
+			"message": "Action must be 'create_slot' (spend points for slot) or 'convert_slot' (spend slot for points)",
+		})
+		return
+	}
+	
+	// Validate slot level
+	if req.SlotLevel < 1 || req.SlotLevel > 5 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_slot_level",
+			"message": "Slot level must be 1-5 for Flexible Casting",
+		})
+		return
+	}
+	
+	// Sorcery point costs to CREATE a slot
+	slotCreationCosts := map[int]int{1: 2, 2: 3, 3: 5, 4: 6, 5: 7}
+	// Sorcery points GAINED from converting a slot
+	slotConversionYields := map[int]int{1: 1, 2: 2, 3: 3, 4: 4, 5: 5}
+	
+	// Get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var resourcesJSON, slotsUsedJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, name, class, level, COALESCE(class_resources, '{}'), COALESCE(spell_slots_used, '{}')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &charName, &class, &level, &resourcesJSON, &slotsUsedJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_your_character",
+			"message": "You can only use Flexible Casting for your own characters",
+		})
+		return
+	}
+	
+	if strings.ToLower(class) != "sorcerer" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_sorcerer",
+			"message": "Only Sorcerers have Font of Magic",
+		})
+		return
+	}
+	
+	if level < 2 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "level_too_low",
+			"message": "Sorcerers gain Font of Magic at level 2",
+		})
+		return
+	}
+	
+	var resources map[string]int
+	json.Unmarshal(resourcesJSON, &resources)
+	if resources == nil {
+		resources = make(map[string]int)
+	}
+	
+	var slotsUsed map[string]int
+	json.Unmarshal(slotsUsedJSON, &slotsUsed)
+	if slotsUsed == nil {
+		slotsUsed = make(map[string]int)
+	}
+	
+	currentPoints := resources["sorcery_points"]
+	maxPoints := level // Sorcery points = sorcerer level
+	
+	// Get spell slots for this level
+	spellSlots := getSpellSlots(class, level)
+	slotKey := fmt.Sprintf("%d", req.SlotLevel)
+	totalSlots := spellSlots[req.SlotLevel]
+	usedSlots := slotsUsed[slotKey]
+	availableSlots := totalSlots - usedSlots
+	
+	if action == "create_slot" {
+		// Spend sorcery points to create a spell slot
+		cost := slotCreationCosts[req.SlotLevel]
+		if currentPoints < cost {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          "insufficient_points",
+				"message":        fmt.Sprintf("Creating a level %d spell slot costs %d sorcery points, but you only have %d", req.SlotLevel, cost, currentPoints),
+				"current_points": currentPoints,
+				"cost":           cost,
+			})
+			return
+		}
+		
+		// Spend points
+		resources["sorcery_points"] = currentPoints - cost
+		// Gain a slot (reduce used count, but not below 0)
+		if usedSlots > 0 {
+			slotsUsed[slotKey] = usedSlots - 1
+		} else {
+			// Already at max slots - can't create more
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":           "slots_full",
+				"message":         fmt.Sprintf("You already have all your level %d spell slots available (%d/%d)", req.SlotLevel, availableSlots, totalSlots),
+				"available_slots": availableSlots,
+				"total_slots":     totalSlots,
+			})
+			return
+		}
+		
+		// Save
+		resourcesJSON, _ = json.Marshal(resources)
+		slotsUsedJSON, _ = json.Marshal(slotsUsed)
+		db.Exec("UPDATE characters SET class_resources = $1, spell_slots_used = $2 WHERE id = $3",
+			resourcesJSON, slotsUsedJSON, req.CharacterID)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":           true,
+			"action":            "create_slot",
+			"slot_level":        req.SlotLevel,
+			"points_spent":      cost,
+			"sorcery_points":    resources["sorcery_points"],
+			"max_sorcery_points": maxPoints,
+			"slots_available":   availableSlots + 1,
+			"total_slots":       totalSlots,
+			"message":           fmt.Sprintf("%s spent %d sorcery points to create a level %d spell slot", charName, cost, req.SlotLevel),
+		})
+		
+	} else { // convert_slot
+		// Convert a spell slot to sorcery points
+		if availableSlots <= 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":       "no_slots_available",
+				"message":     fmt.Sprintf("You have no level %d spell slots to convert (%d/%d used)", req.SlotLevel, usedSlots, totalSlots),
+				"used_slots":  usedSlots,
+				"total_slots": totalSlots,
+			})
+			return
+		}
+		
+		pointsGained := slotConversionYields[req.SlotLevel]
+		newPoints := currentPoints + pointsGained
+		if newPoints > maxPoints {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "would_exceed_max",
+				"message":          fmt.Sprintf("Converting would give you %d points, but max is %d", newPoints, maxPoints),
+				"current_points":   currentPoints,
+				"points_from_slot": pointsGained,
+				"max_points":       maxPoints,
+			})
+			return
+		}
+		
+		// Use the slot
+		slotsUsed[slotKey] = usedSlots + 1
+		// Gain points
+		resources["sorcery_points"] = newPoints
+		
+		// Save
+		resourcesJSON, _ = json.Marshal(resources)
+		slotsUsedJSON, _ = json.Marshal(slotsUsed)
+		db.Exec("UPDATE characters SET class_resources = $1, spell_slots_used = $2 WHERE id = $3",
+			resourcesJSON, slotsUsedJSON, req.CharacterID)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":           true,
+			"action":            "convert_slot",
+			"slot_level":        req.SlotLevel,
+			"points_gained":     pointsGained,
+			"sorcery_points":    resources["sorcery_points"],
+			"max_sorcery_points": maxPoints,
+			"slots_remaining":   availableSlots - 1,
+			"total_slots":       totalSlots,
+			"message":           fmt.Sprintf("%s converted a level %d spell slot into %d sorcery points", charName, req.SlotLevel, pointsGained),
+		})
+	}
+}
+
+// handleUniverseMetamagic godoc
+// @Summary List all Metamagic options
+// @Description Returns all 8 SRD Metamagic options available to Sorcerers
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} object{metamagic=[]MetamagicOption}
+// @Router /universe/metamagic [get]
+func handleUniverseMetamagic(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	options := []MetamagicOption{}
+	slugs := []string{}
+	for slug := range metamagicOptions {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	for _, slug := range slugs {
+		options = append(options, metamagicOptions[slug])
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"metamagic": options,
+		"note":      "Sorcerers choose 2 at level 3, +1 at levels 10 and 17",
+		"usage":     "Include metamagic keyword in spell description, e.g., 'quickened fireball', 'twinned healing word'",
+	})
 }
 
 // ============================================================================
