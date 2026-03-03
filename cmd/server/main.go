@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.22
+// @version 0.9.23
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.22"
+const version = "0.9.23"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -7416,6 +7416,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var equippedShield bool
 	var darkvisionRange, blindsightRange, truesightRange int
 	
+	var subclassChoicesJSON []byte // v0.9.23: For Land druid circle spells
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), COALESCE(subclass, ''), level, hp, max_hp, ac, 
 			str, dex, con, intl, wis, cha,
@@ -7434,7 +7435,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(expertise, ''), COALESCE(language_proficiencies, ''),
 			equipped_armor, COALESCE(equipped_shield, false),
 			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0),
-			COALESCE(known_spells, '[]'), COALESCE(prepared_spells, '[]'), COALESCE(feats, '[]')
+			COALESCE(known_spells, '[]'), COALESCE(prepared_spells, '[]'), COALESCE(feats, '[]'),
+			COALESCE(subclass_choices, '{}')
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &subclassRaw, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
@@ -7443,7 +7445,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
-		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON, &preparedSpellsJSON, &featsJSON)
+		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON, &preparedSpellsJSON, &featsJSON,
+		&subclassChoicesJSON)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -7825,11 +7828,23 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Domain/Subclass Spells (v0.8.72) - always prepared, don't count against limits
+	// v0.9.23: For Land druids, include Circle Spells based on chosen land type
 	if subclassRaw.Valid && subclassRaw.String != "" {
-		domainSpells := getDomainSpellsWithInfo(subclassRaw.String, level)
+		var subclassChoices map[string]string
+		json.Unmarshal(subclassChoicesJSON, &subclassChoices)
+		landType := subclassChoices["circle_land"]
+		
+		domainSpells := getDomainSpellsWithInfo(subclassRaw.String, level, landType)
 		if len(domainSpells) > 0 {
 			response["domain_spells"] = domainSpells
 			response["domain_spells_note"] = "These spells are always prepared and don't count against your prepared spell limit."
+			// v0.9.23: Show chosen land type for Land druids
+			if subclassRaw.String == "land" && landType != "" {
+				response["circle_land"] = landType
+			}
+		} else if subclassRaw.String == "land" && landType == "" {
+			// v0.9.23: Prompt Land druid to choose their land type
+			response["circle_spells_pending"] = "Use POST /api/characters/subclass-choice to choose your Circle Land type for bonus spells."
 		}
 	}
 	
@@ -8522,10 +8537,21 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Add domain/subclass spells (v0.8.72) - always prepared, don't count against limits
+	// v0.9.23: For Land druids, include Circle Spells based on chosen land type
 	if charSubclass.Valid && charSubclass.String != "" {
-		domainSpells := getDomainSpellsWithInfo(charSubclass.String, level)
+		var domainSubclassChoices map[string]string
+		json.Unmarshal(subclassChoicesJSON, &domainSubclassChoices)
+		landType := domainSubclassChoices["circle_land"]
+		domainSpells := getDomainSpellsWithInfo(charSubclass.String, level, landType)
 		if len(domainSpells) > 0 {
 			characterInfo["domain_spells"] = domainSpells
+			// v0.9.23: Show chosen land type for Land druids
+			if charSubclass.String == "land" && landType != "" {
+				characterInfo["circle_land"] = landType
+			}
+		} else if charSubclass.String == "land" && landType == "" {
+			// v0.9.23: Prompt Land druid to choose their land type
+			characterInfo["circle_spells_pending"] = "Choose your Circle Land type via POST /api/characters/subclass-choice"
 		}
 	}
 	
@@ -25731,6 +25757,14 @@ var availableSubclasses = map[string]Subclass{
 				},
 			},
 			{
+				Name:        "Circle Spells",
+				Level:       2,
+				Description: "Your mystical connection to the land infuses you with the ability to cast certain spells. Choose one land type: Arctic, Coast, Desert, Forest, Grassland, Mountain, Swamp, or Underdark. You gain access to circle spells connected to that land, which are always prepared and don't count against your prepared spells limit.",
+				Mechanics: map[string]string{
+					"circle_land": "choice", // v0.9.23: Player chooses land type for circle spells
+				},
+			},
+			{
 				Name:        "Natural Recovery",
 				Level:       2,
 				Description: "During a short rest, you can choose expended spell slots to recover. The spell slots can have a combined level that is equal to or less than half your druid level (rounded up), and none of the slots can be 6th level or higher.",
@@ -26354,10 +26388,85 @@ func getSubclassMechanic(subclassSlug string, level int, mechanic string) (strin
 	return "", false
 }
 
+// getLandCircleSpells returns circle spells for Circle of the Land druids based on land type (v0.9.23)
+// Land types: arctic, coast, desert, forest, grassland, mountain, swamp, underdark (PHB p68-69)
+func getLandCircleSpells(landType string, level int) []string {
+	// Circle spells by land type - unlocked at druid levels 3, 5, 7, 9 (for 2nd, 3rd, 4th, 5th level spells)
+	circleSpells := map[string]map[int][]string{
+		"arctic": {
+			3: {"hold-person", "spike-growth"},
+			5: {"sleet-storm", "slow"},
+			7: {"freedom-of-movement", "ice-storm"},
+			9: {"commune-with-nature", "cone-of-cold"},
+		},
+		"coast": {
+			3: {"mirror-image", "misty-step"},
+			5: {"water-breathing", "water-walk"},
+			7: {"control-water", "freedom-of-movement"},
+			9: {"conjure-elemental", "scrying"},
+		},
+		"desert": {
+			3: {"blur", "silence"},
+			5: {"create-food-and-water", "protection-from-energy"},
+			7: {"blight", "hallucinatory-terrain"},
+			9: {"insect-plague", "wall-of-stone"},
+		},
+		"forest": {
+			3: {"barkskin", "spider-climb"},
+			5: {"call-lightning", "plant-growth"},
+			7: {"divination", "freedom-of-movement"},
+			9: {"commune-with-nature", "tree-stride"},
+		},
+		"grassland": {
+			3: {"invisibility", "pass-without-trace"},
+			5: {"daylight", "haste"},
+			7: {"divination", "freedom-of-movement"},
+			9: {"dream", "insect-plague"},
+		},
+		"mountain": {
+			3: {"spider-climb", "spike-growth"},
+			5: {"lightning-bolt", "meld-into-stone"},
+			7: {"stone-shape", "stoneskin"},
+			9: {"passwall", "wall-of-stone"},
+		},
+		"swamp": {
+			3: {"darkness", "acid-arrow"}, // Melf's Acid Arrow in SRD
+			5: {"water-walk", "stinking-cloud"},
+			7: {"freedom-of-movement", "locate-creature"},
+			9: {"insect-plague", "scrying"},
+		},
+		"underdark": {
+			3: {"spider-climb", "web"},
+			5: {"gaseous-form", "stinking-cloud"},
+			7: {"greater-invisibility", "stone-shape"},
+			9: {"cloudkill", "insect-plague"},
+		},
+	}
+
+	landSpells, ok := circleSpells[strings.ToLower(landType)]
+	if !ok {
+		return nil
+	}
+
+	var spells []string
+	for spellLevel, spellList := range landSpells {
+		if level >= spellLevel {
+			spells = append(spells, spellList...)
+		}
+	}
+	return spells
+}
+
 // getDomainSpells returns the always-prepared spells for a character based on subclass (v0.8.72)
 // These spells don't count against prepared spell limits and are automatically known.
 // For clerics: domain spells, for paladins: oath spells, for warlocks: expanded spell list
-func getDomainSpells(subclassSlug string, level int) []string {
+// v0.9.23: For Circle of the Land druids, pass landType from subclass_choices
+func getDomainSpells(subclassSlug string, level int, landType ...string) []string {
+	// v0.9.23: Handle Circle of the Land druids with circle spells
+	if subclassSlug == "land" && len(landType) > 0 && landType[0] != "" {
+		return getLandCircleSpells(landType[0], level)
+	}
+
 	sub, ok := availableSubclasses[subclassSlug]
 	if !ok || sub.DomainSpells == nil {
 		return nil
@@ -26374,8 +26483,14 @@ func getDomainSpells(subclassSlug string, level int) []string {
 }
 
 // getDomainSpellsWithInfo returns domain spells with enriched SRD info (v0.8.72)
-func getDomainSpellsWithInfo(subclassSlug string, level int) []map[string]interface{} {
-	slugs := getDomainSpells(subclassSlug, level)
+// v0.9.23: For Circle of the Land druids, pass landType from subclass_choices
+func getDomainSpellsWithInfo(subclassSlug string, level int, landType ...string) []map[string]interface{} {
+	var slugs []string
+	if len(landType) > 0 && landType[0] != "" {
+		slugs = getDomainSpells(subclassSlug, level, landType[0])
+	} else {
+		slugs = getDomainSpells(subclassSlug, level)
+	}
 	if len(slugs) == 0 {
 		return nil
 	}
@@ -31836,10 +31951,13 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	var className string
 	var subclassRaw sql.NullString
 	var level, intl, wis, cha int
+	var subclassChoicesJSON []byte // v0.9.23: For Land druid circle spells
 	err = db.QueryRow(`
-		SELECT agent_id, COALESCE(prepared_spells, '[]'), class, subclass, level, intl, wis, cha
+		SELECT agent_id, COALESCE(prepared_spells, '[]'), class, subclass, level, intl, wis, cha,
+			COALESCE(subclass_choices, '{}')
 		FROM characters WHERE id = $1
-	`, charID).Scan(&ownerID, &preparedSpellsJSON, &className, &subclassRaw, &level, &intl, &wis, &cha)
+	`, charID).Scan(&ownerID, &preparedSpellsJSON, &className, &subclassRaw, &level, &intl, &wis, &cha,
+		&subclassChoicesJSON)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -31890,8 +32008,13 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 		spellAbility = "CHA"
 	}
 	
+	// v0.9.23: Parse subclass choices to get circle_land for Land druids
+	var subclassChoices map[string]string
+	json.Unmarshal(subclassChoicesJSON, &subclassChoices)
+	landType := subclassChoices["circle_land"]
+	
 	// Get domain/subclass spells (always prepared)
-	domainSpells := getDomainSpells(subclassSlug, level)
+	domainSpells := getDomainSpells(subclassSlug, level, landType)
 	
 	if r.Method == "GET" {
 		// Return current prepared spells with enriched info
@@ -31916,7 +32039,7 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 		}
 		
 		// Enriched domain spells
-		domainSpellsInfo := getDomainSpellsWithInfo(subclassSlug, level)
+		domainSpellsInfo := getDomainSpellsWithInfo(subclassSlug, level, landType)
 		
 		response := map[string]interface{}{
 			"character_id":       charID,
@@ -32056,7 +32179,7 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 			}
 		}
 		
-		domainSpellsInfo := getDomainSpellsWithInfo(subclassSlug, level)
+		domainSpellsInfo := getDomainSpellsWithInfo(subclassSlug, level, landType)
 		
 		response := map[string]interface{}{
 			"success":          true,
@@ -32070,6 +32193,10 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 		if len(domainSpellsInfo) > 0 {
 			response["domain_spells"] = domainSpellsInfo
 			response["domain_spells_note"] = "Always prepared, don't count against your limit"
+			// v0.9.23: Show land type for Land druids
+			if subclassSlug == "land" && landType != "" {
+				response["circle_land"] = landType
+			}
 		}
 		
 		json.NewEncoder(w).Encode(response)
@@ -36058,6 +36185,50 @@ func handleCharacterSubclassChoice(w http.ResponseWriter, r *http.Request) {
 // getSubclassChoiceOptions returns the valid options for a subclass feature choice
 func getSubclassChoiceOptions(subclass, feature string) []map[string]interface{} {
 	switch feature {
+	case "circle_land":
+		// v0.9.23: Circle of the Land druids choose their land type for Circle Spells (PHB p68-69)
+		return []map[string]interface{}{
+			{
+				"slug":        "arctic",
+				"name":        "Arctic",
+				"description": "Circle spells: Hold Person, Spike Growth (3rd), Sleet Storm, Slow (5th), Freedom of Movement, Ice Storm (7th), Commune with Nature, Cone of Cold (9th).",
+			},
+			{
+				"slug":        "coast",
+				"name":        "Coast",
+				"description": "Circle spells: Mirror Image, Misty Step (3rd), Water Breathing, Water Walk (5th), Control Water, Freedom of Movement (7th), Conjure Elemental, Scrying (9th).",
+			},
+			{
+				"slug":        "desert",
+				"name":        "Desert",
+				"description": "Circle spells: Blur, Silence (3rd), Create Food and Water, Protection from Energy (5th), Blight, Hallucinatory Terrain (7th), Insect Plague, Wall of Stone (9th).",
+			},
+			{
+				"slug":        "forest",
+				"name":        "Forest",
+				"description": "Circle spells: Barkskin, Spider Climb (3rd), Call Lightning, Plant Growth (5th), Divination, Freedom of Movement (7th), Commune with Nature, Tree Stride (9th).",
+			},
+			{
+				"slug":        "grassland",
+				"name":        "Grassland",
+				"description": "Circle spells: Invisibility, Pass without Trace (3rd), Daylight, Haste (5th), Divination, Freedom of Movement (7th), Dream, Insect Plague (9th).",
+			},
+			{
+				"slug":        "mountain",
+				"name":        "Mountain",
+				"description": "Circle spells: Spider Climb, Spike Growth (3rd), Lightning Bolt, Meld into Stone (5th), Stone Shape, Stoneskin (7th), Passwall, Wall of Stone (9th).",
+			},
+			{
+				"slug":        "swamp",
+				"name":        "Swamp",
+				"description": "Circle spells: Darkness, Acid Arrow (3rd), Water Walk, Stinking Cloud (5th), Freedom of Movement, Locate Creature (7th), Insect Plague, Scrying (9th).",
+			},
+			{
+				"slug":        "underdark",
+				"name":        "Underdark",
+				"description": "Circle spells: Spider Climb, Web (3rd), Gaseous Form, Stinking Cloud (5th), Greater Invisibility, Stone Shape (7th), Cloudkill, Insect Plague (9th).",
+			},
+		}
 	case "hunters_prey":
 		return []map[string]interface{}{
 			{

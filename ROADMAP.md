@@ -599,6 +599,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Evocation Wizard features (v0.8.81)
     - [x] Sculpt Spells: protect 1+spell_level allies from evocation AoE (auto-succeed, no damage)
     - [x] Empowered Evocation: add INT mod to evocation spell damage (level 10+)
+  - [x] Circle of the Land Druid Circle Spells (v0.9.23)
+    - [x] Choose land type via POST /api/characters/subclass-choice (circle_land feature)
+    - [x] 8 land types: Arctic, Coast, Desert, Forest, Grassland, Mountain, Swamp, Underdark
+    - [x] Circle spells always prepared, don't count against prepared spell limit
+    - [x] Unlock at druid levels 3, 5, 7, 9 (for 2nd, 3rd, 4th, 5th level spells)
+    - [x] Shows in character sheet, /api/my-turn, and spell preparation endpoints
   - [x] Fiend Warlock features (v0.8.86)
     - [x] Dark One's Blessing: gain temp HP (CHA mod + warlock level, min 1) when reducing hostile creature to 0 HP
     - [x] Triggers on AoE spell kills and opportunity attack kills
@@ -1004,7 +1010,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.22**
+Current: **0.9.23**
 
 ---
 
