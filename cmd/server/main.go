@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.13"
+const version = "0.9.14"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -7987,8 +7987,9 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	
 	// Build contextual rules reminder
 	rulesReminder := map[string]interface{}{}
-	if classKey == "barbarian" {
-		rulesReminder["reckless_attack"] = "You can attack recklessly for advantage, but attacks against you also have advantage until your next turn."
+	if classKey == "barbarian" && level >= 2 {
+		rulesReminder["reckless_attack"] = "You can attack recklessly (include 'reckless' in attack description) for advantage on STR melee attacks, but attacks against you also have advantage until your next turn."
+		rulesReminder["danger_sense"] = "You have advantage on DEX saving throws against effects you can see (traps, spells). Disabled if blinded, deafened, or incapacitated."
 	}
 	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
 		spellMod := 0
@@ -11422,6 +11423,27 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		req.Disadvantage = true
 	}
 	
+	// v0.9.14: Danger Sense (Barbarian level 2+)
+	// Advantage on DEX saves against effects you can see (traps, spells)
+	// Must not be blinded, deafened, or incapacitated
+	dangerSenseActive := false
+	if abilityShort == "dex" && strings.ToLower(className) == "barbarian" && level >= 2 {
+		// Check conditions that disable Danger Sense
+		charConditions := getCharConditions(req.CharacterID)
+		canUseDangerSense := true
+		for _, cond := range charConditions {
+			condLower := strings.ToLower(cond)
+			if condLower == "blinded" || condLower == "deafened" || isIncapacitated(req.CharacterID) {
+				canUseDangerSense = false
+				break
+			}
+		}
+		if canUseDangerSense {
+			req.Advantage = true
+			dangerSenseActive = true
+		}
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -11449,6 +11471,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		rollType = "advantage"
 		if usedInspiration {
 			rollType = "advantage (inspiration)"
+		} else if dangerSenseActive {
+			rollType = "advantage (Danger Sense)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
@@ -18686,6 +18710,9 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 			} else {
 				hasAdvantage = true
 			}
+		case "reckless":
+			// v0.9.14: Reckless Attack - attacks against the reckless character have advantage
+			hasAdvantage = true
 		}
 	}
 	
@@ -18770,6 +18797,55 @@ func resolveAction(action, description string, charID int) string {
 			hasDisadvantage = true
 		}
 		
+		// v0.9.14: Reckless Attack (Barbarian level 2+)
+		// "When you make your first attack on your turn, you can decide to attack recklessly"
+		// Grants advantage on STR melee attacks, but attacks against you have advantage until next turn
+		recklessNote := ""
+		if strings.Contains(descLower, "reckless") {
+			classLower := strings.ToLower(class)
+			if classLower == "barbarian" && level >= 2 {
+				// Must be a STR-based melee attack (not ranged, not finesse with DEX)
+				isSTRMelee := !isRangedAttack
+				if hasWeapon && containsProperty(weapon.Properties, "finesse") {
+					// Finesse weapons can use DEX - only grant advantage if using STR (higher mod)
+					if modifier(str) < modifier(dex) {
+						isSTRMelee = false
+					}
+				}
+				
+				if isSTRMelee {
+					hasAdvantage = true
+					recklessNote = " ⚔️ RECKLESS!"
+					
+					// Apply "reckless" condition (grants enemies advantage against you until your next turn)
+					var existingConds []byte
+					db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
+					var currentConds []string
+					json.Unmarshal(existingConds, &currentConds)
+					
+					// Check if already reckless
+					alreadyReckless := false
+					for _, c := range currentConds {
+						if c == "reckless" {
+							alreadyReckless = true
+							break
+						}
+					}
+					if !alreadyReckless {
+						currentConds = append(currentConds, "reckless")
+						updatedConds, _ := json.Marshal(currentConds)
+						db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
+					}
+				} else {
+					recklessNote = " (Reckless Attack requires STR-based melee attack)"
+				}
+			} else if classLower != "barbarian" {
+				recklessNote = " (only Barbarians can attack recklessly)"
+			} else {
+				recklessNote = " (Reckless Attack requires Barbarian level 2+)"
+			}
+		}
+		
 		// Check for auto-crit against paralyzed/unconscious targets
 		// Try to parse target from description (e.g., "attack goblin" or "attack the orc")
 		autoCrit := false
@@ -18816,6 +18892,10 @@ func resolveAction(action, description string, charID int) string {
 		rollInfo := ""
 		if rollType != "normal" {
 			rollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", rollType, roll1, roll2, attackRoll)
+		}
+		// v0.9.14: Add reckless note to roll info
+		if recklessNote != "" {
+			rollInfo = recklessNote + rollInfo
 		}
 		
 		// Auto-crit against paralyzed/unconscious targets (within 5ft assumed for melee)
@@ -28105,14 +28185,14 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	// Clear start-of-turn conditions for current character (ending their turn)
 	currentID := entries[turnIndex].ID
 	
-	// Remove "dodging" condition at end of turn
+	// Remove "dodging" and "reckless" conditions at end of turn (v0.9.14: added reckless)
 	var condJSON []byte
 	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", currentID).Scan(&condJSON)
 	var conds []string
 	json.Unmarshal(condJSON, &conds)
 	newConds := []string{}
 	for _, c := range conds {
-		if c != "dodging" {
+		if c != "dodging" && c != "reckless" {
 			newConds = append(newConds, c)
 		}
 	}

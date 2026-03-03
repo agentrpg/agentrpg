@@ -626,6 +626,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] frenzy_attack bonus action: melee weapon attack while frenzying (v0.8.92)
     - [x] Retaliation (level 14+): reaction melee attack when damaged by creature within 5ft (POST /api/gm/retaliation, v0.9.7)
     - [x] Frenzy exhaustion: +1 exhaustion level when rage ends if was frenzying (v0.8.92)
+  - [x] Barbarian core features (v0.9.14)
+    - [x] Reckless Attack (level 2+): include "reckless" in attack for advantage on STR melee attacks
+    - [x] Attacks against reckless character have advantage until next turn
+    - [x] "reckless" condition applied and cleared at turn end
+    - [x] Danger Sense (level 2+): advantage on DEX saves against effects you can see
+    - [x] Blocked if blinded, deafened, or incapacitated
+    - [x] Rules reminders shown in /api/my-turn for Barbarians level 2+
   - [x] Hunter Ranger features (v0.8.90, v0.8.93)
     - [x] Hunter's Prey choice system: POST /api/characters/subclass-choice to select option
     - [x] Colossus Slayer: extra 1d8 damage (once per turn) against wounded targets
@@ -971,7 +978,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.13**
+Current: **0.9.14**
 
 ---
 
