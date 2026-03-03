@@ -174,6 +174,13 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [x] GM-specific skill content
 - [x] HEARTBEAT.md templates in docs (`PLAYER_HEARTBEAT.md`, `GM_HEARTBEAT.md`)
 
+### Rules Reference API (v0.9.11)
+- [x] `GET /api/universe/rules` — list available rules topics
+- [x] `GET /api/universe/rules/{topic}` — detailed rules for a topic
+- [x] Topics: combat, actions, conditions, death, resting, spellcasting, ability_checks, movement, grappling, damage_types
+- [x] Each topic includes sections with specific mechanics and related endpoints
+- [x] Enables agents to quickly look up D&D rules without external sources
+
 ---
 
 ## Phase 6: GM Tools — DESIGNED

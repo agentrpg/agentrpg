@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.10"
+const version = "0.9.11"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -470,6 +470,8 @@ func main() {
 	http.HandleFunc("/api/universe/subclasses/", handleUniverseSubclass)
 	http.HandleFunc("/api/characters/subclass", handleCharacterSubclass)
 	http.HandleFunc("/api/characters/subclass-choice", handleCharacterSubclassChoice)
+	http.HandleFunc("/api/universe/rules", handleUniverseRules)
+	http.HandleFunc("/api/universe/rules/", handleUniverseRule)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
 	
 	// Admin endpoints
@@ -33520,6 +33522,243 @@ func handleUniverseSubclass(w http.ResponseWriter, r *http.Request) {
 		}
 		response["domain_spells"] = domainSpellsInfo
 		response["domain_spells_note"] = "Always prepared spells granted by this subclass at the indicated character level"
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// D&D 5e Rules Reference - comprehensive rules summaries for agents (v0.9.11)
+var rulesReference = map[string]map[string]interface{}{
+	"combat": {
+		"name":        "Combat Rules",
+		"description": "Core combat mechanics and turn structure",
+		"sections": map[string]string{
+			"turn_structure": "Each turn: Move (up to speed) + Action + Bonus Action (if available) + Free Object Interaction. Movement can be split before/after actions.",
+			"attack_roll":    "Roll d20 + ability modifier + proficiency bonus (if proficient). Meet or beat target AC to hit.",
+			"damage_roll":    "Roll weapon/spell damage dice + ability modifier (STR for melee, DEX for finesse/ranged, spellcasting mod for spells).",
+			"critical_hit":   "Natural 20 on attack roll = automatic hit + double all damage dice.",
+			"critical_miss":  "Natural 1 on attack roll = automatic miss.",
+			"advantage":      "Roll 2d20, take higher. Sources: attacking unseen target, target prone (melee within 5ft), flanking (optional), Help action, etc.",
+			"disadvantage":   "Roll 2d20, take lower. Sources: attacking at long range, near hostile creature without Crossbow Expert, target prone (ranged), etc.",
+			"cover":          "Half cover: +2 AC. Three-quarters cover: +5 AC. Total cover: can't be targeted directly.",
+			"opportunity_attack": "Reaction when hostile creature you can see leaves your reach. Make one melee attack.",
+			"two_weapon":     "When attacking with light melee weapon, bonus action to attack with different light weapon in other hand. No ability mod to damage (without Fighting Style).",
+		},
+		"related_endpoints": []string{"/api/action", "/api/gm/opportunity-attack", "/api/gm/contested-check"},
+	},
+	"actions": {
+		"name":        "Action Types",
+		"description": "Available actions in combat",
+		"sections": map[string]string{
+			"attack":    "Make one melee or ranged attack (or multiple with Extra Attack feature).",
+			"cast":      "Cast a spell with casting time of 1 action.",
+			"dash":      "Gain extra movement equal to your speed for the turn.",
+			"disengage": "Your movement doesn't provoke opportunity attacks for the rest of the turn.",
+			"dodge":     "Until your next turn: attack rolls against you have disadvantage (if you can see the attacker), and you have advantage on DEX saves. Lost if incapacitated or speed drops to 0.",
+			"help":      "Give an ally advantage on their next ability check or attack roll against a target within 5ft of you.",
+			"hide":      "Make DEX (Stealth) check to become hidden. Being hidden grants advantage on attacks and enemies have disadvantage attacking you.",
+			"ready":     "Prepare an action to trigger on a specific circumstance. Uses your reaction when triggered.",
+			"search":    "Make a WIS (Perception) or INT (Investigation) check.",
+			"use_object": "Interact with an object that requires your action (e.g., drink potion, use magic item).",
+		},
+		"related_endpoints": []string{"/api/action", "/api/gm/trigger-readied"},
+	},
+	"conditions": {
+		"name":        "Conditions Reference",
+		"description": "All standard conditions and their effects",
+		"sections": map[string]string{
+			"blinded":      "Can't see, auto-fail sight-based checks, attacks have disadvantage, attacks against have advantage.",
+			"charmed":      "Can't attack the charmer, charmer has advantage on social checks.",
+			"deafened":     "Can't hear, auto-fail hearing-based checks.",
+			"exhaustion":   "6 levels - 1: disadvantage on checks. 2: speed halved. 3: disadvantage on attacks/saves. 4: HP max halved. 5: speed 0. 6: death.",
+			"frightened":   "Disadvantage on checks/attacks while source visible, can't willingly move closer to source.",
+			"grappled":     "Speed 0, ends if grappler incapacitated or you're moved out of reach.",
+			"incapacitated": "Can't take actions or reactions.",
+			"invisible":    "Can't be seen, attacks have advantage, attacks against have disadvantage.",
+			"paralyzed":    "Incapacitated, can't move/speak, auto-fail STR/DEX saves, attacks have advantage, melee hits auto-crit.",
+			"petrified":    "Incapacitated, unaware, resistance to all damage, immune to poison/disease.",
+			"poisoned":     "Disadvantage on attacks and ability checks.",
+			"prone":        "Only movement is crawl (1ft = 2ft). Melee attacks within 5ft have advantage, ranged have disadvantage. Disadvantage on your attacks. Stand up costs half movement.",
+			"restrained":   "Speed 0, attacks have disadvantage, attacks against have advantage, disadvantage on DEX saves.",
+			"stunned":      "Incapacitated, can't move, auto-fail STR/DEX saves, attacks have advantage.",
+			"unconscious":  "Incapacitated, drop prone, can't move/speak, unaware, auto-fail STR/DEX saves, attacks have advantage, melee hits auto-crit.",
+		},
+		"related_endpoints": []string{"/api/gm/add-condition", "/api/gm/remove-condition"},
+	},
+	"death": {
+		"name":        "Death & Dying",
+		"description": "Rules for 0 HP and death saving throws",
+		"sections": map[string]string{
+			"dropping_to_0":  "Fall unconscious. If damage reduces you to 0 with excess damage >= your max HP, instant death.",
+			"death_saves":    "Start of each turn at 0 HP: roll d20. 10+ = success, 9 or less = failure. 3 successes = stable. 3 failures = death.",
+			"natural_1":      "Rolling natural 1 on death save = 2 failures.",
+			"natural_20":     "Rolling natural 20 on death save = regain 1 HP and wake up.",
+			"taking_damage":  "Taking damage at 0 HP = automatic death save failure. Critical hit = 2 failures.",
+			"stabilizing":    "Stable creature is unconscious but doesn't make death saves. After 1d4 hours, regain 1 HP. Medicine check DC 10 to stabilize.",
+			"healing":        "Any healing at 0 HP restores consciousness. You're alive if your HP is 1 or higher.",
+			"instant_death":  "Massive damage (excess >= max HP), or failing 3 death saves, or certain effects.",
+		},
+		"related_endpoints": []string{"/api/action (death_save)", "/api/gm/damage"},
+	},
+	"resting": {
+		"name":        "Rest & Recovery",
+		"description": "Short and long rest mechanics",
+		"sections": map[string]string{
+			"short_rest":       "At least 1 hour of light activity. Spend Hit Dice to heal (roll die + CON mod per die spent).",
+			"short_rest_recovery": "Warlock spell slots, Fighter's Second Wind/Action Surge, Monk's Ki, some class features.",
+			"long_rest":        "At least 8 hours (sleep 6+, light activity 2). Only one per 24 hours.",
+			"long_rest_recovery": "Regain all HP, regain all spell slots, regain half your Hit Dice (min 1), remove 1 exhaustion level (with food/water).",
+			"interruption":     "Long rest interrupted by 1+ hour of strenuous activity (walking, fighting, casting) must restart.",
+			"hit_dice":         "Total = character level. Die type = class hit die (d12 barb, d10 fighter/paladin/ranger, d8 most, d6 sorc/wiz).",
+		},
+		"related_endpoints": []string{"/api/characters/{id}/short-rest", "/api/characters/{id}/long-rest"},
+	},
+	"spellcasting": {
+		"name":        "Spellcasting Rules",
+		"description": "Casting spells, spell slots, and concentration",
+		"sections": map[string]string{
+			"spell_slots":    "Expend a slot of spell level or higher to cast. Slots recovered on long rest (short rest for Warlocks).",
+			"cantrips":       "Level 0 spells. Cast at will, no spell slot required. Damage scales with character level (5, 11, 17).",
+			"components":     "V (verbal): must speak. S (somatic): need a free hand. M (material): need focus/pouch or specific items.",
+			"concentration":  "One concentration spell at a time. Ends if: cast another concentration spell, incapacitated, or fail CON save on damage (DC = 10 or half damage, whichever higher).",
+			"ritual":         "Spells with ritual tag can be cast without slot, but casting time +10 minutes.",
+			"spell_save_dc":  "8 + proficiency bonus + spellcasting ability modifier.",
+			"spell_attack":   "d20 + proficiency bonus + spellcasting ability modifier.",
+			"upcasting":      "Cast with higher slot for increased effect. Damage/healing scales per spell description.",
+			"bonus_action":   "If you cast a bonus action spell, you can only cast a cantrip with your action that turn.",
+		},
+		"related_endpoints": []string{"/api/action (cast)", "/api/gm/aoe-cast", "/api/universe/spells"},
+	},
+	"ability_checks": {
+		"name":        "Ability Checks & Saves",
+		"description": "Rolling checks, skills, and saving throws",
+		"sections": map[string]string{
+			"ability_check":  "d20 + ability modifier + proficiency bonus (if proficient in relevant skill/tool).",
+			"skill_check":    "Ability check using a skill. Each skill ties to one ability (Athletics→STR, Stealth→DEX, etc.).",
+			"passive_check":  "10 + all modifiers. Used for noticing things without actively searching (Passive Perception).",
+			"saving_throw":   "d20 + ability modifier + proficiency bonus (if proficient in that save). Set at character creation.",
+			"difficulty_class": "Very Easy: 5. Easy: 10. Medium: 15. Hard: 20. Very Hard: 25. Nearly Impossible: 30.",
+			"contested_check": "Both roll, higher total wins. Ties favor the one being challenged (defender).",
+			"expertise":       "Rogues/Bards can have expertise (double proficiency bonus) in certain skills.",
+			"tool_check":      "Ability check using tool proficiency. Ability varies by task (thieves' tools usually DEX).",
+		},
+		"related_endpoints": []string{"/api/gm/skill-check", "/api/gm/saving-throw", "/api/gm/contested-check", "/api/gm/tool-check"},
+	},
+	"movement": {
+		"name":        "Movement & Position",
+		"description": "Moving during combat and special movement",
+		"sections": map[string]string{
+			"basic":           "Use movement up to your speed. Can split before/after actions.",
+			"difficult_terrain": "Each foot costs 2 feet of movement (or 3 if crawling while prone).",
+			"climbing":        "Costs extra movement (usually 2 per 1). Athletics check for difficult climbs.",
+			"swimming":        "Costs extra movement (usually 2 per 1). Athletics check for rough water.",
+			"crawling":        "1 foot costs 2 feet. Moving while prone.",
+			"standing":        "Costs half your speed to stand from prone.",
+			"jumping":         "Long jump: STR score feet (running) or half (standing). High jump: 3 + STR mod feet (running) or half (standing).",
+			"forced_movement": "Being pushed/pulled doesn't provoke opportunity attacks.",
+			"mount":           "Mounting/dismounting costs half your movement. Controlled mount shares your initiative.",
+		},
+		"related_endpoints": []string{"/api/action (move)", "/api/characters/mount", "/api/characters/dismount"},
+	},
+	"grappling": {
+		"name":        "Grappling & Shoving",
+		"description": "Special melee attacks to restrain or move enemies",
+		"sections": map[string]string{
+			"grapple":        "Athletics vs target's Athletics or Acrobatics. Success = target grappled (speed 0).",
+			"grapple_requirements": "Need a free hand. Target must be no more than one size larger.",
+			"escape":         "Target uses action for Athletics or Acrobatics vs your Athletics. Success = escape.",
+			"moving_grappled": "You can drag/carry the creature, but your speed is halved (unless they're 2+ sizes smaller).",
+			"shove":          "Athletics vs target's Athletics or Acrobatics. Success = push 5ft OR knock prone.",
+			"shove_requirements": "Target must be no more than one size larger and within reach.",
+		},
+		"related_endpoints": []string{"/api/gm/grapple", "/api/gm/escape-grapple", "/api/gm/shove"},
+	},
+	"damage_types": {
+		"name":        "Damage Types",
+		"description": "All damage types in 5e and common sources",
+		"sections": map[string]string{
+			"physical":   "Bludgeoning (clubs, falling), Piercing (arrows, spears), Slashing (swords, axes).",
+			"elemental":  "Acid, Cold, Fire, Lightning, Thunder (sonic).",
+			"magical":    "Force (pure magic, magic missile), Necrotic (life drain), Radiant (holy light), Psychic (mind attacks).",
+			"poison":     "Poison (venoms, toxic substances). Many creatures immune or resistant.",
+			"resistance": "Take half damage from that type.",
+			"immunity":   "Take no damage from that type.",
+			"vulnerability": "Take double damage from that type (applied before resistance).",
+		},
+		"related_endpoints": []string{"/api/gm/damage", "/api/universe/monsters/{slug}"},
+	},
+}
+
+// handleUniverseRules godoc
+// @Summary List rules topics
+// @Description Returns list of available D&D 5e rules topics with brief descriptions. Use /universe/rules/{topic} for detailed rules.
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of rules topics"
+// @Router /universe/rules [get]
+func handleUniverseRules(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	topics := []map[string]string{}
+	// Sort topics for consistent ordering
+	topicKeys := make([]string, 0, len(rulesReference))
+	for k := range rulesReference {
+		topicKeys = append(topicKeys, k)
+	}
+	sort.Strings(topicKeys)
+	
+	for _, topic := range topicKeys {
+		rule := rulesReference[topic]
+		topics = append(topics, map[string]string{
+			"topic":       topic,
+			"name":        rule["name"].(string),
+			"description": rule["description"].(string),
+		})
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"topics": topics,
+		"count":  len(topics),
+		"usage":  "GET /api/universe/rules/{topic} for detailed rules on a topic",
+		"note":   "Quick reference for D&D 5e rules. For character-specific info, use /api/my-turn.",
+	})
+}
+
+// handleUniverseRule godoc
+// @Summary Get rules for a topic
+// @Description Returns detailed D&D 5e rules for the specified topic including all relevant mechanics.
+// @Tags Universe
+// @Produce json
+// @Param topic path string true "Rules topic (e.g., combat, conditions, death, spellcasting)"
+// @Success 200 {object} map[string]interface{} "Detailed rules"
+// @Failure 404 {object} map[string]interface{} "Topic not found"
+// @Router /universe/rules/{topic} [get]
+func handleUniverseRule(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	topic := strings.TrimPrefix(r.URL.Path, "/api/universe/rules/")
+	topic = strings.ToLower(strings.TrimSpace(topic))
+	
+	rule, ok := rulesReference[topic]
+	if !ok {
+		// List available topics
+		availableTopics := make([]string, 0, len(rulesReference))
+		for t := range rulesReference {
+			availableTopics = append(availableTopics, t)
+		}
+		sort.Strings(availableTopics)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":            "topic_not_found",
+			"message":          fmt.Sprintf("Rules topic '%s' not found", topic),
+			"available_topics": availableTopics,
+		})
+		return
+	}
+	
+	response := map[string]interface{}{
+		"topic": topic,
+	}
+	for k, v := range rule {
+		response[k] = v
 	}
 	
 	json.NewEncoder(w).Encode(response)
