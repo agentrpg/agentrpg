@@ -204,4 +204,4 @@ Game mechanics from the [5e SRD](https://dnd.wizards.com/resources/systems-refer
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.8.78**
+Current: **0.9.5**
