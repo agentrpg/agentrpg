@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.18
+// @version 0.9.20
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.19"
+const version = "0.9.20"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -951,6 +951,11 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wild_shape_form VARCHAR(100);
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wild_shape_hp INT;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wild_shape_max_hp INT;
+		
+		-- Pact Magic multiclass support (v0.9.20)
+		-- Warlock pact slots are tracked separately from regular spell slots
+		-- Pact slots recover on short rest, regular slots on long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS pact_slots_used JSONB DEFAULT '{}';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -7355,7 +7360,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var tempHP, deathSuccesses, deathFailures, coverBonus, xp, pendingASI int
 	var hitDiceSpent, exhaustionLevel int
 	var isStable, isDead, hasInspiration bool
-	var conditionsJSON, slotsUsedJSON, knownSpellsJSON, preparedSpellsJSON, featsJSON []byte
+	var conditionsJSON, slotsUsedJSON, pactSlotsUsedJSON, classLevelsJSON, knownSpellsJSON, preparedSpellsJSON, featsJSON []byte
 	var concentratingOn string
 	var gold, copper, silver, electrum, platinum int
 	var inventoryJSON []byte
@@ -7375,6 +7380,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(temp_hp, 0), COALESCE(death_save_successes, 0), COALESCE(death_save_failures, 0),
 			COALESCE(is_stable, false), COALESCE(is_dead, false),
 			COALESCE(conditions, '[]'), COALESCE(spell_slots_used, '{}'),
+			COALESCE(pact_slots_used, '{}'), COALESCE(class_levels, '{}'),
 			COALESCE(concentrating_on, ''), COALESCE(cover_bonus, 0), COALESCE(xp, 0),
 			COALESCE(gold, 0), COALESCE(copper, 0), COALESCE(silver, 0), 
 			COALESCE(electrum, 0), COALESCE(platinum, 0),
@@ -7391,7 +7397,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	`, charID).Scan(&name, &class, &race, &background, &subclassRaw, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
 		&tempHP, &deathSuccesses, &deathFailures, &isStable, &isDead,
-		&conditionsJSON, &slotsUsedJSON, &concentratingOn, &coverBonus, &xp,
+		&conditionsJSON, &slotsUsedJSON, &pactSlotsUsedJSON, &classLevelsJSON, &concentratingOn, &coverBonus, &xp,
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
@@ -7410,6 +7416,27 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	
 	var inventory []interface{}
 	json.Unmarshal(inventoryJSON, &inventory)
+	
+	// v0.9.20: Parse pact slots used and class levels for multiclass Warlock support
+	var pactSlotsUsed map[string]int
+	json.Unmarshal(pactSlotsUsedJSON, &pactSlotsUsed)
+	
+	var classLevels map[string]int
+	json.Unmarshal(classLevelsJSON, &classLevels)
+	
+	// Check for Warlock levels (for pact magic tracking)
+	warlockLevel := 0
+	isMulticlass := len(classLevels) > 1
+	for c, lvl := range classLevels {
+		if strings.ToLower(c) == "warlock" {
+			warlockLevel = lvl
+			break
+		}
+	}
+	// For single-class Warlock, get level from main class
+	if !isMulticlass && strings.ToLower(class) == "warlock" {
+		warlockLevel = level
+	}
 	
 	// Get total spell slots for class/level
 	totalSlots := getSpellSlots(class, level)
@@ -7710,6 +7737,24 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["spell_save_dc"] = spellSaveDC(level, spellMod)
 		response["spell_attack_bonus"] = spellMod + proficiencyBonus(level)
 		response["spellcasting_ability"] = spellAbility
+	}
+	
+	// v0.9.20: Pact Magic slots for multiclass Warlocks
+	// Pact slots are tracked separately and recover on short rest
+	if isMulticlass && warlockLevel > 0 {
+		pactSlots := getSpellSlots("warlock", warlockLevel)
+		pactRemainingSlots := map[string]int{}
+		for lvl, total := range pactSlots {
+			key := fmt.Sprintf("%d", lvl)
+			used := pactSlotsUsed[key]
+			pactRemainingSlots[key] = total - used
+		}
+		response["pact_magic"] = map[string]interface{}{
+			"warlock_level": warlockLevel,
+			"total":         pactSlots,
+			"remaining":     pactRemainingSlots,
+			"note":          "Pact Magic slots are separate from regular spell slots. They recover on short rest, not long rest.",
+		}
 	}
 	
 	// Known spells (v0.8.63)
@@ -19704,29 +19749,85 @@ func resolveAction(action, description string, charID int) string {
 			}
 			
 			// Check and use spell slot (non-ritual)
+			// v0.9.20: Support separate pact slot tracking for multiclass Warlocks
 			if slotLevel > 0 {
-				slots := getSpellSlots(class, level)
-				totalSlots, hasSlot := slots[slotLevel]
-				if !hasSlot || totalSlots == 0 {
-					return fmt.Sprintf("Cannot cast %s - you don't have level %d spell slots!", spell.Name, slotLevel)
+				// Check if using pact slot (from description: "pact slot", "pact magic", "warlock slot")
+				usePactSlot := strings.Contains(descLower, "pact slot") || 
+					strings.Contains(descLower, "pact magic") || 
+					strings.Contains(descLower, "warlock slot")
+				
+				// Check for multiclass Warlock
+				var classLevelsJSON []byte
+				db.QueryRow("SELECT COALESCE(class_levels, '{}') FROM characters WHERE id = $1", charID).Scan(&classLevelsJSON)
+				var classLevels map[string]int
+				json.Unmarshal(classLevelsJSON, &classLevels)
+				
+				warlockLvl := 0
+				isMulticlass := len(classLevels) > 1
+				for c, lvl := range classLevels {
+					if strings.ToLower(c) == "warlock" {
+						warlockLvl = lvl
+						break
+					}
 				}
 				
-				// Get used slots
-				var usedJSON []byte
-				db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
-				var used map[string]int
-				json.Unmarshal(usedJSON, &used)
-				
-				usedKey := fmt.Sprintf("%d", slotLevel)
-				usedSlots := used[usedKey]
-				if usedSlots >= totalSlots {
-					return fmt.Sprintf("Cannot cast %s - no level %d spell slots remaining!", spell.Name, slotLevel)
+				// For multiclass Warlocks, handle pact slots separately
+				if isMulticlass && warlockLvl > 0 && usePactSlot {
+					pactSlots := getSpellSlots("warlock", warlockLvl)
+					// Warlock slots are all at same level - find the level
+					pactSlotLevel := 0
+					pactSlotCount := 0
+					for lvl, count := range pactSlots {
+						pactSlotLevel = lvl
+						pactSlotCount = count
+					}
+					
+					if slotLevel > pactSlotLevel {
+						return fmt.Sprintf("Cannot cast %s with pact slot - your pact slots are level %d!", spell.Name, pactSlotLevel)
+					}
+					
+					// Get used pact slots
+					var usedJSON []byte
+					db.QueryRow("SELECT COALESCE(pact_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+					var used map[string]int
+					json.Unmarshal(usedJSON, &used)
+					
+					usedKey := fmt.Sprintf("%d", pactSlotLevel)
+					usedSlots := used[usedKey]
+					if usedSlots >= pactSlotCount {
+						return fmt.Sprintf("Cannot cast %s - no pact magic slots remaining!", spell.Name)
+					}
+					
+					// Use the pact slot
+					used[usedKey] = usedSlots + 1
+					updatedJSON, _ := json.Marshal(used)
+					db.Exec("UPDATE characters SET pact_slots_used = $1 WHERE id = $2", updatedJSON, charID)
+					slotLevel = pactSlotLevel // Pact slots are always at their level
+				} else {
+					// Use regular spell slots
+					slots := getSpellSlots(class, level)
+					totalSlots, hasSlot := slots[slotLevel]
+					if !hasSlot || totalSlots == 0 {
+						return fmt.Sprintf("Cannot cast %s - you don't have level %d spell slots!", spell.Name, slotLevel)
+					}
+					
+					// Get used slots
+					var usedJSON []byte
+					db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+					var used map[string]int
+					json.Unmarshal(usedJSON, &used)
+					
+					usedKey := fmt.Sprintf("%d", slotLevel)
+					usedSlots := used[usedKey]
+					if usedSlots >= totalSlots {
+						return fmt.Sprintf("Cannot cast %s - no level %d spell slots remaining!", spell.Name, slotLevel)
+					}
+					
+					// Use the slot
+					used[usedKey] = usedSlots + 1
+					updatedJSON, _ := json.Marshal(used)
+					db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, charID)
 				}
-				
-				// Use the slot
-				used[usedKey] = usedSlots + 1
-				updatedJSON, _ := json.Marshal(used)
-				db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, charID)
 			}
 			
 			// Handle concentration
@@ -30447,20 +30548,25 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		req.HitDice = 0 // Default to 0 if not specified (don't spend hit dice unless requested)
 	}
 	
-	// Get character info including subclass for Natural Recovery
+	// Get character info including subclass for Natural Recovery and class_levels for multiclass
 	var class string
 	var level, hp, maxHP, con, hitDiceSpent int
 	var subclass sql.NullString
+	var classLevelsJSON []byte
 	err := db.QueryRow(`
-		SELECT class, level, hp, max_hp, con, COALESCE(hit_dice_spent, 0), subclass
+		SELECT class, level, hp, max_hp, con, COALESCE(hit_dice_spent, 0), subclass, COALESCE(class_levels, '{}')
 		FROM characters WHERE id = $1
-	`, charID).Scan(&class, &level, &hp, &maxHP, &con, &hitDiceSpent, &subclass)
+	`, charID).Scan(&class, &level, &hp, &maxHP, &con, &hitDiceSpent, &subclass, &classLevelsJSON)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "Character not found",
 		})
 		return
 	}
+	
+	// Parse class_levels for multiclass detection
+	classLevels := make(map[string]int)
+	json.Unmarshal(classLevelsJSON, &classLevels)
 	
 	// Calculate available hit dice (total = level, available = level - spent)
 	hitDiceAvailable := level - hitDiceSpent
@@ -30520,11 +30626,33 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		WHERE id = $3
 	`, newHP, req.HitDice, charID)
 	
-	// Check if warlock - recover pact magic slots
+	// v0.9.20: Check for Warlock levels - recover Pact Magic slots
+	// For multiclass, check class_levels; for single class, check primary class
 	warlockRecovery := ""
-	if strings.ToLower(class) == "warlock" {
-		db.Exec("UPDATE characters SET spell_slots_used = '{}' WHERE id = $1", charID)
-		warlockRecovery = "Pact Magic spell slots recovered!"
+	warlockLevel := 0
+	if len(classLevels) > 1 {
+		// Multiclass character - check for Warlock levels
+		for c, lvl := range classLevels {
+			if strings.ToLower(c) == "warlock" {
+				warlockLevel = lvl
+				break
+			}
+		}
+	} else if strings.ToLower(class) == "warlock" {
+		// Single class Warlock
+		warlockLevel = level
+	}
+	
+	if warlockLevel > 0 {
+		if len(classLevels) > 1 {
+			// Multiclass: only reset pact_slots_used (keep regular spell slots)
+			db.Exec("UPDATE characters SET pact_slots_used = '{}' WHERE id = $1", charID)
+			warlockRecovery = fmt.Sprintf("Pact Magic slots recovered! (Warlock %d)", warlockLevel)
+		} else {
+			// Single class Warlock: reset spell_slots_used (backward compatible)
+			db.Exec("UPDATE characters SET spell_slots_used = '{}' WHERE id = $1", charID)
+			warlockRecovery = "Pact Magic spell slots recovered!"
+		}
 	}
 	
 	// v0.8.91: Handle Arcane Recovery (Wizard) / Natural Recovery (Land Druid) slot recovery
@@ -30732,6 +30860,7 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 		UPDATE characters SET
 			hp = max_hp,
 			spell_slots_used = '{}',
+			pact_slots_used = '{}',
 			death_save_successes = 0,
 			death_save_failures = 0,
 			is_stable = false,

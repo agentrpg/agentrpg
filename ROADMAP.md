@@ -525,10 +525,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] GET /api/universe/class-spells/{class} — list all spells for a class with optional level filter
   - [x] Spell preparation validates against class spell list
   - [x] Known spell updates validate against class spell list
-- [x] **Pact Magic (Warlock)** — works for single-class warlocks
+- [x] **Pact Magic (Warlock)** — works for single-class and multiclass warlocks
   - [x] All slots same level (via warlockSlots table)
   - [x] Recover on SHORT rest (implemented in handleShortRest)
-  - [ ] Separate tracking for multiclass (needs multiclassing feature)
+  - [x] Separate tracking for multiclass (v0.9.20 - pact_slots_used column, character sheet shows pact_magic section, short rest only resets pact slots for multiclass)
 - [x] **Domain/Subclass Spells** (v0.8.72)
   - [x] Always prepared, don't count against limit
   - [x] Cleric Life domain, Paladin Devotion oath, Warlock Fiend patron
