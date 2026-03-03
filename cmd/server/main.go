@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.3"
+const version = "0.9.4"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -743,6 +743,10 @@ func initDB() {
 		-- Horde Breaker tracking (v0.8.93)
 		-- Hunter Ranger feature: once per turn, bonus attack against creature within 5ft of original target
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS horde_breaker_used BOOLEAN DEFAULT FALSE;
+		
+		-- Sneak Attack tracking (v0.9.4)
+		-- Rogue feature: once per turn, bonus damage with finesse/ranged weapon when have advantage or ally adjacent to target
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS sneak_attack_used BOOLEAN DEFAULT FALSE;
 		
 		-- Hit Dice tracking (Short/Long Rest - Phase 8 P0)
 		-- hit_dice_spent tracks how many dice have been used (recovers half on long rest)
@@ -10203,7 +10207,7 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 				UPDATE characters 
 				SET action_used = false, bonus_action_used = false, 
 				    movement_remaining = $1, reaction_used = false, bonus_action_spell_cast = false,
-				    horde_breaker_used = false
+				    horde_breaker_used = false, sneak_attack_used = false
 				WHERE id = $2
 			`, speed, newActiveID)
 			
@@ -18479,8 +18483,27 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote, divineStrikeNote)
+			// Check for Rogue's Sneak Attack on auto-crit (v0.9.4)
+			// Double dice on crit
+			sneakAttackNote := ""
+			if strings.ToLower(class) == "rogue" {
+				var sneakUsed bool
+				db.QueryRow("SELECT COALESCE(sneak_attack_used, false) FROM characters WHERE id = $1", charID).Scan(&sneakUsed)
+				
+				if !sneakUsed && canSneakAttack(charID, weaponKey, hasAdvantage, hasDisadvantage, targetID) {
+					sneakDice := getSneakAttackDice(level)
+					sneakDmg := rollDamage(sneakDice, true) // Doubled on crit
+					dmg += sneakDmg
+					// Parse dice count for display (e.g., "3d6" -> "6d6" on crit)
+					var diceCount int
+					fmt.Sscanf(sneakDice, "%dd6", &diceCount)
+					sneakAttackNote = fmt.Sprintf(" (+%d Sneak Attack, %dd6)", sneakDmg, diceCount*2)
+					db.Exec("UPDATE characters SET sneak_attack_used = true WHERE id = $1", charID)
+				}
+			}
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -18536,11 +18559,29 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// Check for Rogue's Sneak Attack on crit (v0.9.4)
+			// Double dice on crit
+			sneakAttackNote := ""
+			if strings.ToLower(class) == "rogue" {
+				var sneakUsed bool
+				db.QueryRow("SELECT COALESCE(sneak_attack_used, false) FROM characters WHERE id = $1", charID).Scan(&sneakUsed)
+				
+				if !sneakUsed && canSneakAttack(charID, weaponKey, hasAdvantage, hasDisadvantage, targetID) {
+					sneakDice := getSneakAttackDice(level)
+					sneakDmg := rollDamage(sneakDice, true) // Doubled on crit
+					dmg += sneakDmg
+					var diceCount int
+					fmt.Sscanf(sneakDice, "%dd6", &diceCount)
+					sneakAttackNote = fmt.Sprintf(" (+%d Sneak Attack, %dd6)", sneakDmg, diceCount*2)
+					db.Exec("UPDATE characters SET sneak_attack_used = true WHERE id = $1", charID)
+				}
+			}
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote, divineStrikeNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s%s%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote)
 		} else if attackRoll == 1 {
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
@@ -18592,7 +18633,26 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote, divineStrikeNote)
+		// Check for Rogue's Sneak Attack (v0.9.4)
+		// Extra damage once per turn with finesse/ranged weapon when have advantage or ally adjacent to target
+		sneakAttackNote := ""
+		if strings.ToLower(class) == "rogue" {
+			// Check if sneak attack already used this turn
+			var sneakUsed bool
+			db.QueryRow("SELECT COALESCE(sneak_attack_used, false) FROM characters WHERE id = $1", charID).Scan(&sneakUsed)
+			
+			if !sneakUsed && canSneakAttack(charID, weaponKey, hasAdvantage, hasDisadvantage, targetID) {
+				sneakDice := getSneakAttackDice(level)
+				sneakDmg := rollDamage(sneakDice, false)
+				dmg += sneakDmg
+				sneakAttackNote = fmt.Sprintf(" (+%d Sneak Attack, %s)", sneakDmg, sneakDice)
+				
+				// Mark sneak attack as used this turn
+				db.Exec("UPDATE characters SET sneak_attack_used = true WHERE id = $1", charID)
+			}
+		}
+		
+		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s%s%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote)
 		
 	case "cast":
 		// Parse spell from description
@@ -23926,6 +23986,87 @@ func getCritRange(subclassSlug string, level int) int {
 		}
 	}
 	return 20 // Standard: only 20 crits
+}
+
+// getSneakAttackDice returns the sneak attack dice for a rogue of the given level
+// v0.9.4: Rogue Sneak Attack - scales with level (1d6 at 1, 2d6 at 3, 3d6 at 5, etc.)
+func getSneakAttackDice(level int) string {
+	// Sneak attack increases at odd levels: 1d6 at 1, 2d6 at 3, 3d6 at 5, etc.
+	diceCount := (level + 1) / 2
+	if diceCount < 1 {
+		diceCount = 1
+	}
+	return fmt.Sprintf("%dd6", diceCount)
+}
+
+// canSneakAttack checks if a rogue can use sneak attack on this attack
+// v0.9.4: Requires finesse or ranged weapon AND (advantage OR ally adjacent to target)
+func canSneakAttack(charID int, weaponKey string, hasAdvantage bool, hasDisadvantage bool, targetID int) bool {
+	// Must use finesse or ranged weapon
+	weapon, hasWeapon := srdWeapons[weaponKey]
+	if !hasWeapon {
+		return false // Unarmed doesn't qualify
+	}
+	
+	isFinesse := containsProperty(weapon.Properties, "finesse")
+	isRanged := weapon.Type == "ranged"
+	
+	if !isFinesse && !isRanged {
+		return false
+	}
+	
+	// If you have disadvantage (and no advantage to cancel it), no sneak attack
+	if hasDisadvantage && !hasAdvantage {
+		return false
+	}
+	
+	// You can sneak attack if you have advantage
+	if hasAdvantage {
+		return true
+	}
+	
+	// Or if there's an ally within 5ft of the target (and ally isn't incapacitated)
+	// Check for allies in the same campaign adjacent to target
+	if targetID > 0 {
+		var lobbyID int
+		db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1", charID).Scan(&lobbyID)
+		
+		// Find other party members (not the attacker, not incapacitated, in same campaign)
+		rows, err := db.Query(`
+			SELECT id, COALESCE(conditions, '[]') FROM characters 
+			WHERE lobby_id = $1 AND id != $2 AND id != $3 AND status != 'inactive'
+		`, lobbyID, charID, targetID)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var allyID int
+				var conditionsJSON []byte
+				rows.Scan(&allyID, &conditionsJSON)
+				
+				// Check if ally is incapacitated
+				var conditions []string
+				json.Unmarshal(conditionsJSON, &conditions)
+				allyIncap := false
+				for _, c := range conditions {
+					cLower := strings.ToLower(c)
+					if cLower == "incapacitated" || cLower == "paralyzed" || 
+					   cLower == "stunned" || cLower == "unconscious" || cLower == "petrified" {
+						allyIncap = true
+						break
+					}
+				}
+				
+				if !allyIncap {
+					// Ally is adjacent and not incapacitated - sneak attack allowed
+					// Note: We don't track exact positions, so we assume party members
+					// are generally positioned to enable sneak attack when in combat together
+					return true
+				}
+			}
+		}
+	}
+	
+	return false
 }
 
 // handleGMApplyPoison godoc

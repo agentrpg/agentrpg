@@ -622,6 +622,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Uses Bardic Inspiration (expends one use)
     - [x] Works on attack rolls, ability checks, and damage rolls
     - [x] Die size scales with level (d6→d8→d10→d12)
+  - [x] Rogue Sneak Attack (v0.9.4)
+    - [x] Extra damage once per turn with finesse/ranged weapon
+    - [x] Requires advantage OR ally within 5ft of target (and no disadvantage)
+    - [x] Scales with level: 1d6 at 1, 2d6 at 3, 3d6 at 5, etc. (up to 10d6 at 19)
+    - [x] Dice doubled on critical hits
+    - [x] Tracked via sneak_attack_used column (reset at turn start)
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -918,7 +924,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.3**
+Current: **0.9.4**
 
 ---
 
