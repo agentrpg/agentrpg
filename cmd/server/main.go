@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.6
+// @version 0.9.7
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.6"
+const version = "0.9.7"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -401,6 +401,7 @@ func main() {
 	http.HandleFunc("/api/gm/recover-ammo", handleGMRecoverAmmo)
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
 	http.HandleFunc("/api/gm/giant-killer", handleGMGiantKiller)
+	http.HandleFunc("/api/gm/retaliation", handleGMRetaliation)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
 	http.HandleFunc("/api/gm/legendary-resistance", handleGMLegendaryResistance)
@@ -14170,6 +14171,276 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 	if hit {
 		response["damage"] = damage
 		response["weapon"] = weaponName
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMRetaliation godoc
+// @Summary Berserker's Retaliation reaction attack
+// @Description When a Berserker Barbarian (level 14+) takes damage from a creature within 5 feet, they can use their reaction to make a melee weapon attack against that creature.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,attacker_name=string,attacker_monster_key=string,weapon=string} true "Retaliation details"
+// @Success 200 {object} map[string]interface{} "Attack result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or requirements not met"
+// @Router /gm/retaliation [post]
+func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID       int    `json:"character_id"`        // The Berserker making the reaction attack
+		AttackerName      string `json:"attacker_name"`       // Name of attacking creature
+		AttackerMonsterKey string `json:"attacker_monster_key"` // Optional: SRD slug for AC lookup
+		Weapon            string `json:"weapon"`              // Optional: specific weapon to use
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required (the Berserker making the attack)",
+		})
+		return
+	}
+	
+	if req.AttackerName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "attacker_name required (the creature that damaged the Berserker)",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class, subclass string
+	var charLobbyID, str, dex, level int
+	var reactionUsed bool
+	var weaponProfsStr string
+	err = db.QueryRow(`
+		SELECT name, lobby_id, class, str, dex, level, 
+		       COALESCE(reaction_used, false), COALESCE(weapon_proficiencies, ''),
+		       COALESCE(subclass, '')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &charLobbyID, &class, &str, &dex, &level, 
+		&reactionUsed, &weaponProfsStr, &subclass)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Check if character has Retaliation (Berserker Barbarian level 14+)
+	if strings.ToLower(class) != "barbarian" || strings.ToLower(subclass) != "berserker" || level < 14 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_retaliation",
+			"message": fmt.Sprintf("%s is not a Berserker Barbarian level 14+ with Retaliation", charName),
+		})
+		return
+	}
+	
+	// Check if reaction is available
+	if reactionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_reaction",
+			"message": fmt.Sprintf("%s has already used their reaction this round", charName),
+		})
+		return
+	}
+	
+	// Mark reaction as used
+	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
+	
+	// Determine weapon and modifiers (melee only for Retaliation)
+	attackMod := modifier(str)
+	damageMod := modifier(str)
+	damageDice := "1d4"
+	weaponName := "unarmed strike"
+	weaponKey := ""
+	
+	// Check for weapon in request
+	if req.Weapon != "" {
+		weaponKey = strings.ToLower(strings.ReplaceAll(req.Weapon, " ", "-"))
+		if weapon, ok := srdWeapons[weaponKey]; ok {
+			// Must be melee for Retaliation
+			if weapon.Type == "melee" {
+				weaponName = weapon.Name
+				damageDice = weapon.Damage
+				// Finesse weapons can use DEX
+				if containsProperty(weapon.Properties, "finesse") && dex > str {
+					attackMod = modifier(dex)
+					damageMod = modifier(dex)
+				}
+			} else {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "not_melee",
+					"message": fmt.Sprintf("%s is not a melee weapon. Retaliation requires a melee weapon attack.", weapon.Name),
+				})
+				return
+			}
+		}
+	}
+	
+	// Add proficiency bonus only if proficient with the weapon
+	if weaponKey == "" || isWeaponProficient(weaponProfsStr, weaponKey) {
+		attackMod += proficiencyBonus(level)
+	}
+	
+	// Check for Rage damage bonus (if currently raging)
+	var conditionsJSON []byte
+	db.QueryRow(`SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1`, req.CharacterID).Scan(&conditionsJSON)
+	var conditions []interface{}
+	json.Unmarshal(conditionsJSON, &conditions)
+	isRaging := false
+	for _, c := range conditions {
+		if cond, ok := c.(map[string]interface{}); ok {
+			if name, ok := cond["name"].(string); ok && name == "raging" {
+				isRaging = true
+				break
+			}
+		}
+	}
+	rageBonus := 0
+	if isRaging {
+		// Rage damage bonus scales with level
+		if level >= 16 {
+			rageBonus = 4
+		} else if level >= 9 {
+			rageBonus = 3
+		} else {
+			rageBonus = 2
+		}
+	}
+	
+	// Get target AC (monster AC or estimate)
+	targetAC := 13 // default
+	if req.AttackerMonsterKey != "" {
+		var mAC int
+		err = db.QueryRow("SELECT COALESCE(ac, 13) FROM monsters WHERE slug = $1", req.AttackerMonsterKey).Scan(&mAC)
+		if err == nil {
+			targetAC = mAC
+		}
+	}
+	
+	// Roll the attack
+	attackRoll := rollDie(20)
+	totalAttack := attackRoll + attackMod
+	
+	var resultText string
+	var hit bool
+	var damage int
+	
+	if attackRoll == 1 {
+		// Critical miss
+		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d (nat 1 - Critical Miss!)", 
+			charName, req.AttackerName, totalAttack)
+		hit = false
+	} else if attackRoll == 20 {
+		// Critical hit - double damage dice
+		damage = rollDamage(damageDice, true) + damageMod + rageBonus
+		if damage < 1 {
+			damage = 1
+		}
+		rageText := ""
+		if isRaging {
+			rageText = fmt.Sprintf(" (+%d rage)", rageBonus)
+		}
+		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s with %s", 
+			charName, req.AttackerName, totalAttack, damage, rageText, weaponName)
+		hit = true
+	} else if totalAttack >= targetAC {
+		// Normal hit
+		damage = rollDamage(damageDice, false) + damageMod + rageBonus
+		if damage < 1 {
+			damage = 1
+		}
+		rageText := ""
+		if isRaging {
+			rageText = fmt.Sprintf(" (+%d rage)", rageBonus)
+		}
+		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d vs AC %d - HIT! Damage: %d%s with %s", 
+			charName, req.AttackerName, totalAttack, targetAC, damage, rageText, weaponName)
+		hit = true
+	} else {
+		// Miss
+		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d vs AC %d - MISS!", 
+			charName, req.AttackerName, totalAttack, targetAC)
+		hit = false
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Retaliation attack by %s against %s", charName, req.AttackerName)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'retaliation', $2, $3)
+	`, campaignID, actionDesc, resultText)
+	
+	response := map[string]interface{}{
+		"success":       true,
+		"attacker":      charName,
+		"target":        req.AttackerName,
+		"attack_roll":   attackRoll,
+		"attack_mod":    attackMod,
+		"total":         totalAttack,
+		"target_ac":     targetAC,
+		"hit":           hit,
+		"result":        resultText,
+		"reaction_used": true,
+		"note":          fmt.Sprintf("%s's reaction is now expended for this round", charName),
+	}
+	
+	if hit {
+		response["damage"] = damage
+		response["weapon"] = weaponName
+		if isRaging {
+			response["rage_bonus"] = rageBonus
+		}
 	}
 	
 	json.NewEncoder(w).Encode(response)

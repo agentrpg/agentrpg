@@ -595,12 +595,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease
   - [x] Devotion Paladin's Aura of Devotion (charm immunity at level 7+, v0.8.88)
   - [x] Paladin's Aura of Courage (frighten immunity at level 10+, v0.8.88)
-  - [x] Berserker Barbarian features (v0.8.89, v0.8.92)
+  - [x] Berserker Barbarian features (v0.8.89, v0.8.92, v0.9.7)
     - [x] Rage action: applies "raging" condition with full mechanics
     - [x] Mindless Rage (level 6+): immune to charm/frighten while raging
     - [x] end_rage action to voluntarily end rage
     - [x] Frenzy (level 3+): "frenzy" action while raging to enter frenzy mode (v0.8.92)
     - [x] frenzy_attack bonus action: melee weapon attack while frenzying (v0.8.92)
+    - [x] Retaliation (level 14+): reaction melee attack when damaged by creature within 5ft (POST /api/gm/retaliation, v0.9.7)
     - [x] Frenzy exhaustion: +1 exhaustion level when rage ends if was frenzying (v0.8.92)
   - [x] Hunter Ranger features (v0.8.90, v0.8.93)
     - [x] Hunter's Prey choice system: POST /api/characters/subclass-choice to select option
@@ -938,7 +939,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.6**
+Current: **0.9.7**
 
 ---
 
