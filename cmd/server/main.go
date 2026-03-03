@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.4"
+const version = "0.9.5"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -8630,9 +8630,14 @@ func buildBonusActions(classKey string, actionUsed, bonusActionUsed bool, condit
 	// Class-specific bonus actions
 	switch classKey {
 	case "rogue":
+		// v0.9.5: Enhanced Cunning Action for Thieves
+		cunningDesc := "Dash, Disengage, or Hide as a bonus action."
+		if subclass == "thief" && level >= 3 {
+			cunningDesc = "Dash, Disengage, Hide, OR (Fast Hands) Sleight of Hand check, Thieves' Tools to disarm trap/pick lock, or Use an Object as a bonus action."
+		}
 		bonusActions = append(bonusActions, map[string]interface{}{
 			"name":        "cunning_action",
-			"description": "Dash, Disengage, or Hide as a bonus action.",
+			"description": cunningDesc,
 		})
 	case "barbarian":
 		// Show rage if not already raging
@@ -19776,6 +19781,184 @@ func resolveAction(action, description string, charID int) string {
 		kiSaveDC := 8 + proficiencyBonus(level) + modifier(wis)
 		
 		return fmt.Sprintf("⚡ Stunning Strike! (1 ki spent, %d remaining) Target must make CON save DC %d or be STUNNED until the end of your next turn.", ssRemaining, kiSaveDC)
+
+	case "cunning_action":
+		// v0.9.5: Rogue's Cunning Action (level 2+)
+		// Take Dash, Disengage, or Hide as a bonus action
+		// Thief subclass (level 3+) via Fast Hands: also Sleight of Hand, Thieves' Tools, or Use Object
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "rogue" {
+			return "Only rogues can use Cunning Action!"
+		}
+		
+		if level < 2 {
+			return "Cunning Action requires level 2+!"
+		}
+		
+		// Parse which action from description
+		descLower := strings.ToLower(description)
+		
+		// Check for Thief subclass Fast Hands options
+		var subclass string
+		db.QueryRow("SELECT COALESCE(subclass, '') FROM characters WHERE id = $1", charID).Scan(&subclass)
+		isThief := strings.ToLower(subclass) == "thief" && level >= 3
+		
+		// Thief's Fast Hands options
+		if isThief {
+			if strings.Contains(descLower, "sleight") || strings.Contains(descLower, "pickpocket") || strings.Contains(descLower, "steal") {
+				// Sleight of Hand check - roll d20 + DEX + proficiency (if proficient)
+				var dex int
+				var skillProfs []byte
+				var expertiseList []byte
+				db.QueryRow("SELECT dex, COALESCE(skill_proficiencies, '[]'), COALESCE(expertise, '[]') FROM characters WHERE id = $1", charID).Scan(&dex, &skillProfs, &expertiseList)
+				
+				var skills, expertise []string
+				json.Unmarshal(skillProfs, &skills)
+				json.Unmarshal(expertiseList, &expertise)
+				
+				bonus := modifier(dex)
+				isProficient := false
+				hasExpertise := false
+				for _, s := range skills {
+					if strings.ToLower(s) == "sleight of hand" || strings.ToLower(s) == "sleight_of_hand" {
+						isProficient = true
+						break
+					}
+				}
+				for _, e := range expertise {
+					if strings.ToLower(e) == "sleight of hand" || strings.ToLower(e) == "sleight_of_hand" {
+						hasExpertise = true
+						break
+					}
+				}
+				
+				if hasExpertise {
+					bonus += proficiencyBonus(level) * 2
+				} else if isProficient {
+					bonus += proficiencyBonus(level)
+				}
+				
+				roll := rollDie(20)
+				total := roll + bonus
+				
+				return fmt.Sprintf("🤏 Fast Hands (Sleight of Hand)! Rolled %d + %d = %d", roll, bonus, total)
+			}
+			
+			if strings.Contains(descLower, "thieves") || strings.Contains(descLower, "lockpick") || strings.Contains(descLower, "trap") || strings.Contains(descLower, "lock") {
+				// Thieves' tools check - roll d20 + DEX + proficiency (if proficient with thieves' tools)
+				var dex int
+				var toolProfs []byte
+				var expertiseList []byte
+				db.QueryRow("SELECT dex, COALESCE(tool_proficiencies, '[]'), COALESCE(expertise, '[]') FROM characters WHERE id = $1", charID).Scan(&dex, &toolProfs, &expertiseList)
+				
+				var tools, expertise []string
+				json.Unmarshal(toolProfs, &tools)
+				json.Unmarshal(expertiseList, &expertise)
+				
+				bonus := modifier(dex)
+				isProficient := false
+				hasExpertise := false
+				for _, t := range tools {
+					if strings.Contains(strings.ToLower(t), "thieves") {
+						isProficient = true
+						break
+					}
+				}
+				for _, e := range expertise {
+					if strings.Contains(strings.ToLower(e), "thieves") {
+						hasExpertise = true
+						break
+					}
+				}
+				
+				if hasExpertise {
+					bonus += proficiencyBonus(level) * 2
+				} else if isProficient {
+					bonus += proficiencyBonus(level)
+				}
+				
+				roll := rollDie(20)
+				total := roll + bonus
+				
+				action := "disarm trap or open lock"
+				if strings.Contains(descLower, "trap") {
+					action = "disarm trap"
+				} else if strings.Contains(descLower, "lock") {
+					action = "pick lock"
+				}
+				
+				return fmt.Sprintf("🔧 Fast Hands (Thieves' Tools)! %s check: %d + %d = %d", strings.Title(action), roll, bonus, total)
+			}
+			
+			if strings.Contains(descLower, "use") && (strings.Contains(descLower, "object") || strings.Contains(descLower, "item") || strings.Contains(descLower, "potion")) {
+				return "🎒 Fast Hands (Use Object)! You use an object as a bonus action. Specify what you're using."
+			}
+		}
+		
+		// Standard Cunning Action options
+		if strings.Contains(descLower, "dash") {
+			return "💨 Cunning Action (Dash)! Your speed is doubled for this turn. You can move up to twice your normal speed."
+		}
+		
+		if strings.Contains(descLower, "disengage") {
+			return "🏃 Cunning Action (Disengage)! Your movement doesn't provoke opportunity attacks for the rest of this turn."
+		}
+		
+		if strings.Contains(descLower, "hide") {
+			// Hide check - roll d20 + DEX + stealth proficiency
+			var dex int
+			var skillProfs []byte
+			var expertiseList []byte
+			db.QueryRow("SELECT dex, COALESCE(skill_proficiencies, '[]'), COALESCE(expertise, '[]') FROM characters WHERE id = $1", charID).Scan(&dex, &skillProfs, &expertiseList)
+			
+			var skills, expertise []string
+			json.Unmarshal(skillProfs, &skills)
+			json.Unmarshal(expertiseList, &expertise)
+			
+			bonus := modifier(dex)
+			isProficient := false
+			hasExpertise := false
+			for _, s := range skills {
+				if strings.ToLower(s) == "stealth" {
+					isProficient = true
+					break
+				}
+			}
+			for _, e := range expertise {
+				if strings.ToLower(e) == "stealth" {
+					hasExpertise = true
+					break
+				}
+			}
+			
+			if hasExpertise {
+				bonus += proficiencyBonus(level) * 2
+			} else if isProficient {
+				bonus += proficiencyBonus(level)
+			}
+			
+			roll := rollDie(20)
+			total := roll + bonus
+			
+			// Add hidden condition
+			var existingConds []byte
+			db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
+			var conds []string
+			json.Unmarshal(existingConds, &conds)
+			conds = append(conds, "hidden")
+			updatedConds, _ := json.Marshal(conds)
+			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
+			
+			return fmt.Sprintf("🙈 Cunning Action (Hide)! Stealth check: %d + %d = %d. You are now hidden (attacks against you have disadvantage, you have advantage on attacks until you're revealed).", roll, bonus, total)
+		}
+		
+		// No specific action given - provide options
+		options := "Specify: dash, disengage, or hide"
+		if isThief {
+			options = "Specify: dash, disengage, hide, sleight of hand, thieves' tools, or use object"
+		}
+		return fmt.Sprintf("🗡️ Cunning Action! %s", options)
 
 	case "ready":
 		// Ready action: hold your action for a trigger condition

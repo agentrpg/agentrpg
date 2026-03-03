@@ -628,6 +628,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Scales with level: 1d6 at 1, 2d6 at 3, 3d6 at 5, etc. (up to 10d6 at 19)
     - [x] Dice doubled on critical hits
     - [x] Tracked via sneak_attack_used column (reset at turn start)
+  - [x] Rogue Cunning Action (v0.9.5)
+    - [x] Level 2+: Dash, Disengage, or Hide as bonus action
+    - [x] Hide applies "hidden" condition and rolls Stealth check
+    - [x] Respects expertise for double proficiency bonus
+  - [x] Thief Fast Hands (v0.9.5)
+    - [x] Level 3+ Thief subclass: extends Cunning Action
+    - [x] Sleight of Hand check as bonus action
+    - [x] Thieves' Tools (disarm trap/pick lock) as bonus action
+    - [x] Use an Object as bonus action
+    - [x] /api/my-turn shows expanded options for Thieves
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
