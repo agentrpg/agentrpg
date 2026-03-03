@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.21
+// @version 0.9.22
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.21"
+const version = "0.9.22"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2432,6 +2432,39 @@ func isArmorProficient(armorProfsStr string, armorCategory string) bool {
 	return false
 }
 
+// isWearingNonProficientArmor checks if a character is wearing armor they're not proficient with
+// PHB p144: "If you wear armor that you lack proficiency with, you have disadvantage on any
+// ability check, saving throw, or attack roll that involves Strength or Dexterity, and you can't cast spells."
+// v0.9.22: Armor proficiency penalty enforcement
+func isWearingNonProficientArmor(charID int) bool {
+	var equippedArmor sql.NullString
+	var equippedShield bool
+	var armorProfs string
+	
+	err := db.QueryRow(`SELECT COALESCE(equipped_armor, ''), COALESCE(equipped_shield, false), COALESCE(armor_proficiencies, '')
+		FROM characters WHERE id = $1`, charID).Scan(&equippedArmor, &equippedShield, &armorProfs)
+	if err != nil {
+		return false
+	}
+	
+	// Check equipped armor
+	if equippedArmor.Valid && equippedArmor.String != "" {
+		armorInfo, err := getArmorInfo(equippedArmor.String)
+		if err == nil && armorInfo != nil {
+			if !isArmorProficient(armorProfs, armorInfo.Type) {
+				return true
+			}
+		}
+	}
+	
+	// Check equipped shield
+	if equippedShield && !strings.Contains(strings.ToLower(armorProfs), "shield") {
+		return true
+	}
+	
+	return false
+}
+
 // Cover bonuses for AC
 // Half cover: +2 AC, Three-quarters cover: +5 AC, Full cover: can't be targeted
 var coverBonuses = map[string]int{
@@ -2650,6 +2683,7 @@ func isAutoCrit(targetID int) bool {
 // getSaveDisadvantage checks if conditions impose disadvantage on saves
 // Exhaustion 3+ gives disadvantage on all saves
 // Restrained gives disadvantage on DEX saves
+// v0.9.22: Non-proficient armor gives disadvantage on STR/DEX saves
 func getSaveDisadvantage(charID int, ability string) bool {
 	// Exhaustion level 3+
 	var exhaustion int
@@ -2658,8 +2692,16 @@ func getSaveDisadvantage(charID int, ability string) bool {
 		return true
 	}
 	
-	// Restrained: disadvantage on DEX saves
 	ability = strings.ToLower(ability)
+	
+	// v0.9.22: Non-proficient armor: disadvantage on STR/DEX saves
+	if ability == "str" || ability == "strength" || ability == "dex" || ability == "dexterity" {
+		if isWearingNonProficientArmor(charID) {
+			return true
+		}
+	}
+	
+	// Restrained: disadvantage on DEX saves
 	if ability == "dex" || ability == "dexterity" {
 		if hasCondition(charID, "restrained") {
 			return true
@@ -8801,6 +8843,21 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.22: Warn about non-proficient armor penalties (PHB p144)
+	if isWearingNonProficientArmor(charID) {
+		response["armor_penalty_warning"] = map[string]interface{}{
+			"warning":          "⚠️ You are wearing armor you are not proficient with!",
+			"penalties":        []string{
+				"Disadvantage on all attack rolls (STR and DEX based)",
+				"Disadvantage on STR and DEX ability checks",
+				"Disadvantage on STR and DEX saving throws",
+				"You cannot cast spells",
+			},
+			"how_to_resolve":   "Unequip the armor (POST /api/characters/unequip-armor) or gain proficiency through multiclassing/feats.",
+			"phb_reference":    "PHB p144: 'If you wear armor that you lack proficiency with, you have disadvantage on any ability check, saving throw, or attack roll that involves Strength or Dexterity, and you can't cast spells.'",
+		}
+	}
+	
 	// Add recent campaign messages (last 6 hours)
 	if len(recentMessages) > 0 {
 		response["campaign_messages"] = recentMessages
@@ -10946,6 +11003,14 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		exhaustionDisadvantage = true
 	}
 	
+	// v0.9.22: Non-proficient armor gives disadvantage on STR/DEX ability checks (PHB p144)
+	armorDisadvantage := false
+	isStrOrDexCheck := abilityUsed == "str" || abilityUsed == "strength" || abilityUsed == "dex" || abilityUsed == "dexterity"
+	if isStrOrDexCheck && isWearingNonProficientArmor(req.CharacterID) {
+		req.Disadvantage = true
+		armorDisadvantage = true
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -10962,12 +11027,19 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
 		rollType = "disadvantage"
-		if poisonedDisadvantage && exhaustionDisadvantage {
-			rollType = "disadvantage (poisoned, exhaustion)"
-		} else if poisonedDisadvantage {
-			rollType = "disadvantage (poisoned)"
-		} else if exhaustionDisadvantage {
-			rollType = "disadvantage (exhaustion)"
+		// Build descriptive reason for disadvantage
+		reasons := []string{}
+		if poisonedDisadvantage {
+			reasons = append(reasons, "poisoned")
+		}
+		if exhaustionDisadvantage {
+			reasons = append(reasons, "exhaustion")
+		}
+		if armorDisadvantage {
+			reasons = append(reasons, "non-proficient armor")
+		}
+		if len(reasons) > 0 {
+			rollType = "disadvantage (" + strings.Join(reasons, ", ") + ")"
 		}
 	} else {
 		finalRoll = rollDie(20)
@@ -11322,6 +11394,14 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		exhaustionDisadvantage = true
 	}
 	
+	// v0.9.22: Non-proficient armor gives disadvantage on STR/DEX ability checks (PHB p144)
+	armorDisadvantage := false
+	isStrOrDexTool := abilityUsed == "str" || abilityUsed == "strength" || abilityUsed == "dex" || abilityUsed == "dexterity"
+	if isStrOrDexTool && isWearingNonProficientArmor(req.CharacterID) {
+		req.Disadvantage = true
+		armorDisadvantage = true
+	}
+	
 	// Roll the die
 	var roll1, roll2, finalRoll int
 	rollType := "normal"
@@ -11335,12 +11415,19 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
 		rollType = "disadvantage"
-		if poisonedDisadvantage && exhaustionDisadvantage {
-			rollType = "disadvantage (poisoned, exhaustion)"
-		} else if poisonedDisadvantage {
-			rollType = "disadvantage (poisoned)"
-		} else if exhaustionDisadvantage {
-			rollType = "disadvantage (exhaustion)"
+		// Build descriptive reason for disadvantage
+		toolReasons := []string{}
+		if poisonedDisadvantage {
+			toolReasons = append(toolReasons, "poisoned")
+		}
+		if exhaustionDisadvantage {
+			toolReasons = append(toolReasons, "exhaustion")
+		}
+		if armorDisadvantage {
+			toolReasons = append(toolReasons, "non-proficient armor")
+		}
+		if len(toolReasons) > 0 {
+			rollType = "disadvantage (" + strings.Join(toolReasons, ", ") + ")"
 		}
 	} else {
 		finalRoll = rollDie(20)
@@ -19077,6 +19164,12 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 		}
 	}
 	
+	// v0.9.22: Non-proficient armor imposes disadvantage on all attack rolls (PHB p144)
+	// All weapon attacks involve either STR or DEX, so this always applies
+	if isWearingNonProficientArmor(charID) {
+		hasDisadvantage = true
+	}
+	
 	return hasAdvantage, hasDisadvantage
 }
 
@@ -19599,6 +19692,11 @@ func resolveAction(action, description string, charID int) string {
 		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s%s%s%s%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
 		
 	case "cast":
+		// v0.9.22: Non-proficient armor blocks spellcasting entirely (PHB p144)
+		if isWearingNonProficientArmor(charID) {
+			return "Cannot cast spells while wearing armor you are not proficient with (PHB p144)"
+		}
+		
 		// Parse spell from description
 		spellKey := parseSpellFromDescription(description)
 		spell, hasSpell := srdSpellsMemory[spellKey]

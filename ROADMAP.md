@@ -730,7 +730,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] GET /api/universe/backgrounds to list all backgrounds
   - [x] GET /api/universe/backgrounds/{slug} for details
   - [x] 13 PHB backgrounds: acolyte, charlatan, criminal, entertainer, folk_hero, guild_artisan, hermit, noble, outlander, sage, sailor, soldier, urchin
-- [ ] **Proficiencies** (partial)
+- [x] **Proficiencies** (v0.9.22)
   - [x] Skill proficiencies (add prof bonus when proficient, v0.8.9)
     - [x] Character creation accepts skill_proficiencies array
     - [x] Validates against class available skills from SRD
@@ -751,10 +751,17 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Attack rolls only add proficiency bonus when proficient with weapon
     - [x] Opportunity attacks also check weapon proficiency
     - [x] isWeaponProficient() helper handles "simple", "martial", and specific weapon names
-  - [x] Armor proficiencies (v0.8.12)
+  - [x] Armor proficiencies (v0.8.12, v0.9.22 penalty enforcement)
     - [x] Character creation auto-populates from class (light, medium, heavy, shields, all armor)
     - [x] Character sheet shows armor_proficiencies
-    - [x] isArmorProficient() helper for future armor penalty checks
+    - [x] isArmorProficient() helper for armor penalty checks
+    - [x] **Non-proficient armor penalties (v0.9.22 PHB p144):**
+      - [x] Disadvantage on all attack rolls (all weapon attacks use STR or DEX)
+      - [x] Disadvantage on STR/DEX ability checks (skill checks, tool checks)
+      - [x] Disadvantage on STR/DEX saving throws
+      - [x] Cannot cast spells while wearing non-proficient armor
+      - [x] Warning shown in /api/my-turn when penalties active
+      - [x] isWearingNonProficientArmor() helper checks equipped armor + shield
   - [x] Expertise (double prof bonus) for Rogues/Bards (v0.8.13)
     - [x] Character creation accepts expertise array (Rogues get 2 at level 1, Bards get 0 at creation)
     - [x] Expertise must be from skill proficiencies OR thieves' tools
@@ -969,9 +976,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 
 ### P1 — Needed for Real Campaigns
 5. ~~**Subclasses** — Characters need mechanical identity~~ ✅ (v0.8.67)
-6. **Class Features** — Ki, Rage, etc.
-7. **Proficiencies** — Skills ✅ (v0.8.9), tools, weapons, armor (partial)
-8. **Spell Components** — Material component tracking
+6. ~~**Class Features** — Ki, Rage, etc.~~ ✅ (v0.8.69)
+7. ~~**Proficiencies** — Skills, tools, weapons, armor~~ ✅ (v0.9.22 - all complete including armor penalty enforcement)
+8. ~~**Spell Components** — Material component tracking~~ ✅ (v0.8.17, v0.9.13)
 
 ### P2 — Polish for Full Experience
 9. ~~**Legendary Actions/Resistances** — Boss fights~~ ✅ (Resistances v0.8.29, Actions v0.8.30)
@@ -997,7 +1004,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.21**
+Current: **0.9.22**
 
 ---
 
