@@ -695,6 +695,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Second Wind (Fighter) — 1 use, recovers on short rest
     - [x] Action Surge (Fighter) — 1-2 uses, recovers on short rest
     - [x] Wild Shape (Druid) — 2 uses, recovers on short rest
+    - [x] Wild Shape Transformation (v0.9.15)
+      - [x] `wild_shape` action: transform into a beast from monsters table
+      - [x] CR limits: 1/4 at level 2, 1/2 at level 4, 1 at level 8
+      - [x] Beast HP tracking (wild_shape_hp, wild_shape_max_hp columns)
+      - [x] Damage absorption: beast HP absorbs damage, excess carries to normal form
+      - [x] `revert_wild_shape` action to return to normal form (bonus action)
+      - [x] Beast stats shown in /api/my-turn when transformed
+      - [x] Handles Archdruid (level 20) unlimited uses
     - [x] Arcane Recovery (Wizard) — 1 use per day, recovers spell slots on short rest (v0.8.91)
     - [x] Natural Recovery (Circle of the Land Druid) — 1 use per day, recovers spell slots on short rest (v0.8.91)
     - [x] POST /api/characters/{id}/use-resource endpoint
@@ -978,7 +986,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.14**
+Current: **0.9.15**
 
 ---
 

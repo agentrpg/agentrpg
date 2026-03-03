@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.14"
+const version = "0.9.15"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -931,6 +931,12 @@ func initDB() {
 		-- Used by prepared casters (Cleric, Druid, Paladin, Wizard)
 		-- Known casters (Bard, Ranger, Sorcerer, Warlock) use known_spells instead
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS prepared_spells JSONB DEFAULT '[]';
+		
+		-- Wild Shape (v0.9.15 - Druid transformation)
+		-- Tracks current beast form, HP in beast form, and max HP of beast
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wild_shape_form VARCHAR(100);
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wild_shape_hp INT;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wild_shape_max_hp INT;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -7826,6 +7832,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var mountedOnCreature sql.NullString
 	var mountIsControlled sql.NullBool
 	var attacksRemaining sql.NullInt32
+	var wildShapeForm sql.NullString
+	var wildShapeHP, wildShapeMaxHP sql.NullInt64
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, COALESCE(c.subclass, ''), c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
@@ -7840,7 +7848,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			COALESCE(l.campaign_document, '{}'),
 			c.mounted_on_creature, c.mount_is_controlled,
 			c.attacks_remaining,
-			COALESCE(c.subclass_choices, '{}'), COALESCE(c.horde_breaker_used, false)
+			COALESCE(c.subclass_choices, '{}'), COALESCE(c.horde_breaker_used, false),
+			c.wild_shape_form, c.wild_shape_hp, c.wild_shape_max_hp
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -7852,7 +7861,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&deathSuccesses, &deathFailures, &isStable, &isDead, &reactionUsed, &charXP, &charGold, &charCopper, &charSilver,
 		&charElectrum, &charPlatinum, &pendingASI,
 		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw,
-		&mountedOnCreature, &mountIsControlled, &attacksRemaining, &subclassChoicesJSON, &hordeUsed)
+		&mountedOnCreature, &mountIsControlled, &attacksRemaining, &subclassChoicesJSON, &hordeUsed,
+		&wildShapeForm, &wildShapeHP, &wildShapeMaxHP)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -7967,6 +7977,24 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		actions = append(actions, map[string]interface{}{
 			"name": "Sneak Attack", "description": "Deal extra damage when you have advantage or an ally is adjacent to your target.",
 		})
+	}
+	if classKey == "druid" && level >= 2 {
+		// v0.9.15: Wild Shape action for Druids
+		if wildShapeForm.Valid && wildShapeForm.String != "" {
+			actions = append(actions, map[string]interface{}{
+				"name": "Revert Wild Shape", "description": "Return to your normal form (bonus action). Any remaining beast HP is lost.",
+			})
+		} else {
+			maxCR := 0.25
+			if level >= 8 {
+				maxCR = 1.0
+			} else if level >= 4 {
+				maxCR = 0.5
+			}
+			actions = append(actions, map[string]interface{}{
+				"name": "Wild Shape", "description": fmt.Sprintf("Transform into a beast of CR %.2g or lower. Use: 'wild_shape wolf' or 'wild_shape brown-bear'.", maxCR),
+			})
+		}
 	}
 	
 	// Build tactical suggestions based on situation
@@ -8163,6 +8191,60 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		characterInfo["class_resources"] = resourceList
+	}
+	
+	// v0.9.15: Add Wild Shape info for Druids
+	if wildShapeForm.Valid && wildShapeForm.String != "" {
+		// Character is in Wild Shape - fetch beast details
+		var beastName, beastSize, beastType string
+		var beastAC, beastSpeed, beastStr, beastDex, beastCon int
+		var beastActionsJSON []byte
+		db.QueryRow(`
+			SELECT name, size, type, ac, speed, str, dex, con, COALESCE(actions, '[]')
+			FROM monsters WHERE slug = $1
+		`, wildShapeForm.String).Scan(&beastName, &beastSize, &beastType, &beastAC, &beastSpeed,
+			&beastStr, &beastDex, &beastCon, &beastActionsJSON)
+		
+		var beastActions []map[string]interface{}
+		json.Unmarshal(beastActionsJSON, &beastActions)
+		actionNames := []string{}
+		for _, a := range beastActions {
+			if name, ok := a["name"].(string); ok {
+				actionNames = append(actionNames, name)
+			}
+		}
+		
+		characterInfo["wild_shape"] = map[string]interface{}{
+			"active":  true,
+			"form":    beastName,
+			"slug":    wildShapeForm.String,
+			"hp":      wildShapeHP.Int64,
+			"max_hp":  wildShapeMaxHP.Int64,
+			"ac":      beastAC,
+			"speed":   beastSpeed,
+			"stats": map[string]interface{}{
+				"str": beastStr, "dex": beastDex, "con": beastCon,
+				"str_mod": modifier(beastStr), "dex_mod": modifier(beastDex), "con_mod": modifier(beastCon),
+			},
+			"actions": actionNames,
+			"note":    "You use the beast's physical stats (STR, DEX, CON), AC, HP, and speed. You keep your INT, WIS, CHA, proficiencies, and class features. You can't cast spells unless you have Beast Spells (level 18).",
+		}
+		
+		// Override displayed HP/AC for beast form
+		characterInfo["wild_shape_warning"] = fmt.Sprintf("⚠️ You are currently in %s form! Beast HP: %d/%d", beastName, wildShapeHP.Int64, wildShapeMaxHP.Int64)
+	} else if strings.ToLower(class) == "druid" && level >= 2 {
+		// Show Wild Shape as available action
+		maxCR := 0.25
+		if level >= 8 {
+			maxCR = 1.0
+		} else if level >= 4 {
+			maxCR = 0.5
+		}
+		characterInfo["wild_shape_available"] = map[string]interface{}{
+			"max_cr":   maxCR,
+			"cr_limit": fmt.Sprintf("CR %.2g or lower", maxCR),
+			"usage":    "Use 'wild_shape' action with beast name (e.g., 'wild_shape wolf' or 'wild_shape brown-bear')",
+		}
 	}
 	
 	// Add Metamagic info for Sorcerers (v0.9.12)
@@ -19730,6 +19812,191 @@ func resolveAction(action, description string, charID int) string {
 		updatedConds, _ := json.Marshal(newConds)
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
 		return result
+
+	case "wild_shape":
+		// v0.9.15: Druid Wild Shape - transform into a beast
+		// PHB p66: Use action to assume beast form, can do so twice per short/long rest
+		// CR limits: 1/4 at level 2, 1/2 at level 4, 1 at level 8
+		// Movement restrictions: no flying until level 8, no swimming until level 4
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "druid" {
+			return "Only druids can use Wild Shape!"
+		}
+		if level < 2 {
+			return "Wild Shape requires Druid level 2+!"
+		}
+		
+		// Check if already in Wild Shape
+		var currentForm sql.NullString
+		db.QueryRow("SELECT wild_shape_form FROM characters WHERE id = $1", charID).Scan(&currentForm)
+		if currentForm.Valid && currentForm.String != "" {
+			return fmt.Sprintf("You are already in Wild Shape as a %s! Use 'revert_wild_shape' to return to your normal form first.", currentForm.String)
+		}
+		
+		// Check Wild Shape uses
+		var resourcesJSON []byte
+		db.QueryRow("SELECT COALESCE(class_resources_used, '{}') FROM characters WHERE id = $1", charID).Scan(&resourcesJSON)
+		var resourcesUsed map[string]int
+		json.Unmarshal(resourcesJSON, &resourcesUsed)
+		
+		currentUsed := resourcesUsed["wild_shape"]
+		maxUses := 2 // Standard Wild Shape uses
+		if level >= 20 {
+			maxUses = 999 // Archdruid: unlimited
+		}
+		
+		if currentUsed >= maxUses && level < 20 {
+			return fmt.Sprintf("No Wild Shape uses remaining! (%d/%d used). Recover uses on short or long rest.", currentUsed, maxUses)
+		}
+		
+		// Parse beast from description
+		descLower := strings.ToLower(description)
+		beastSlug := ""
+		
+		// Common beast mappings
+		beastMappings := map[string]string{
+			"wolf": "wolf", "dire wolf": "dire-wolf", "brown bear": "brown-bear", "black bear": "black-bear",
+			"giant spider": "giant-spider", "giant wolf spider": "giant-wolf-spider", "giant rat": "giant-rat",
+			"cat": "cat", "hawk": "hawk", "owl": "owl", "raven": "raven", "bat": "bat",
+			"boar": "boar", "giant boar": "giant-boar", "elk": "elk", "giant elk": "giant-elk",
+			"panther": "panther", "lion": "lion", "tiger": "tiger", "giant eagle": "giant-eagle",
+			"crocodile": "crocodile", "giant crocodile": "giant-crocodile", "giant toad": "giant-toad",
+			"constrictor snake": "constrictor-snake", "giant constrictor snake": "giant-constrictor-snake",
+			"mastiff": "mastiff", "warhorse": "warhorse", "pony": "pony", "mule": "mule",
+			"ape": "ape", "giant ape": "giant-ape", "baboon": "baboon",
+		}
+		
+		for name, slug := range beastMappings {
+			if strings.Contains(descLower, name) {
+				beastSlug = slug
+				break
+			}
+		}
+		
+		// If not found in mappings, try using description directly as slug
+		if beastSlug == "" {
+			beastSlug = strings.ReplaceAll(strings.TrimSpace(description), " ", "-")
+			beastSlug = strings.ToLower(beastSlug)
+		}
+		
+		// Look up beast in monsters table
+		var beastName, beastSize, beastType, beastCR string
+		var beastAC, beastHP, beastSpeed, beastStr, beastDex, beastCon int
+		var actionsJSON []byte
+		err := db.QueryRow(`
+			SELECT name, size, type, ac, hp, speed, str, dex, con, cr, COALESCE(actions, '[]')
+			FROM monsters WHERE slug = $1
+		`, beastSlug).Scan(&beastName, &beastSize, &beastType, &beastAC, &beastHP, &beastSpeed, &beastStr, &beastDex, &beastCon, &beastCR, &actionsJSON)
+		
+		if err != nil {
+			return fmt.Sprintf("Beast '%s' not found in monster database. Try common beasts: wolf, brown-bear, dire-wolf, giant-spider, panther, etc.", beastSlug)
+		}
+		
+		// Verify it's a beast
+		if strings.ToLower(beastType) != "beast" {
+			return fmt.Sprintf("%s is not a beast (type: %s). Wild Shape only works with beasts!", beastName, beastType)
+		}
+		
+		// Parse CR and check limits
+		crFloat := 0.0
+		if beastCR == "1/8" {
+			crFloat = 0.125
+		} else if beastCR == "1/4" {
+			crFloat = 0.25
+		} else if beastCR == "1/2" {
+			crFloat = 0.5
+		} else {
+			crFloat, _ = strconv.ParseFloat(beastCR, 64)
+		}
+		
+		maxCR := 0.25 // Level 2-3: CR 1/4
+		if level >= 8 {
+			maxCR = 1.0 // Level 8+: CR 1
+		} else if level >= 4 {
+			maxCR = 0.5 // Level 4-7: CR 1/2
+		}
+		
+		if crFloat > maxCR {
+			return fmt.Sprintf("%s (CR %s) exceeds your maximum CR of %.2g. Druid level %d can transform into beasts of CR %.2g or lower.", beastName, beastCR, maxCR, level, maxCR)
+		}
+		
+		// Note: Full movement restrictions (swim/fly) would need speed parsing from SRD
+		// For now, we'll trust the GM and note it in the response
+		
+		// Expend Wild Shape use
+		resourcesUsed["wild_shape"] = currentUsed + 1
+		updatedResources, _ := json.Marshal(resourcesUsed)
+		db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedResources, charID)
+		
+		// Set Wild Shape form
+		db.Exec(`
+			UPDATE characters 
+			SET wild_shape_form = $1, wild_shape_hp = $2, wild_shape_max_hp = $2 
+			WHERE id = $3
+		`, beastSlug, beastHP, charID)
+		
+		// Parse actions for display
+		var actions []map[string]interface{}
+		json.Unmarshal(actionsJSON, &actions)
+		actionNames := []string{}
+		for _, a := range actions {
+			if name, ok := a["name"].(string); ok {
+				actionNames = append(actionNames, name)
+			}
+		}
+		actionsStr := "None"
+		if len(actionNames) > 0 {
+			actionsStr = strings.Join(actionNames, ", ")
+		}
+		
+		usesRemaining := maxUses - currentUsed - 1
+		usesInfo := fmt.Sprintf("%d/%d uses remaining", usesRemaining, maxUses)
+		if level >= 20 {
+			usesInfo = "unlimited (Archdruid)"
+		}
+		
+		return fmt.Sprintf("🐺 WILD SHAPE! You transform into a %s!\n"+
+			"Beast Stats: AC %d, HP %d/%d, Speed %dft\n"+
+			"Physical: STR %d (%+d), DEX %d (%+d), CON %d (%+d)\n"+
+			"Actions: %s\n"+
+			"Wild Shape: %s\n"+
+			"Note: You keep your INT, WIS, CHA, proficiencies, and class features. You can't cast spells (except with Beast Spells at level 18). When beast HP drops to 0, excess damage carries over to your normal form.",
+			beastName, beastAC, beastHP, beastHP, beastSpeed,
+			beastStr, modifier(beastStr), beastDex, modifier(beastDex), beastCon, modifier(beastCon),
+			actionsStr, usesInfo)
+
+	case "revert_wild_shape":
+		// v0.9.15: Revert from Wild Shape to normal form
+		// Can be done as bonus action (PHB p66)
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "druid" {
+			return "Only druids can revert from Wild Shape!"
+		}
+		
+		var currentForm sql.NullString
+		var beastHP sql.NullInt64
+		db.QueryRow("SELECT wild_shape_form, wild_shape_hp FROM characters WHERE id = $1", charID).Scan(&currentForm, &beastHP)
+		
+		if !currentForm.Valid || currentForm.String == "" {
+			return "You are not currently in Wild Shape!"
+		}
+		
+		// Get beast name for message
+		var beastName string
+		db.QueryRow("SELECT name FROM monsters WHERE slug = $1", currentForm.String).Scan(&beastName)
+		if beastName == "" {
+			beastName = currentForm.String
+		}
+		
+		// Clear Wild Shape form
+		db.Exec("UPDATE characters SET wild_shape_form = NULL, wild_shape_hp = NULL, wild_shape_max_hp = NULL WHERE id = $1", charID)
+		
+		hpInfo := ""
+		if beastHP.Valid {
+			hpInfo = fmt.Sprintf(" (had %d HP remaining)", beastHP.Int64)
+		}
+		
+		return fmt.Sprintf("🧑 You revert from %s form back to your normal shape%s. You can use Wild Shape again if you have uses remaining.", beastName, hpInfo)
 	
 	case "use_item":
 		// Parse item from description
@@ -29008,10 +29275,13 @@ func handleDamage(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	var hp, maxHP, tempHP int
 	var concentratingOn string
+	var wildShapeForm sql.NullString
+	var wildShapeHP, wildShapeMaxHP sql.NullInt64
 	err := db.QueryRow(`
-		SELECT hp, max_hp, COALESCE(temp_hp, 0), COALESCE(concentrating_on, '')
+		SELECT hp, max_hp, COALESCE(temp_hp, 0), COALESCE(concentrating_on, ''),
+		       wild_shape_form, wild_shape_hp, wild_shape_max_hp
 		FROM characters WHERE id = $1
-	`, charID).Scan(&hp, &maxHP, &tempHP, &concentratingOn)
+	`, charID).Scan(&hp, &maxHP, &tempHP, &concentratingOn, &wildShapeForm, &wildShapeHP, &wildShapeMaxHP)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -29031,6 +29301,55 @@ func handleDamage(w http.ResponseWriter, r *http.Request, charID int) {
 		result["damage_dealt"] = damage
 	} else {
 		result["damage_dealt"] = damage
+	}
+	
+	// v0.9.15: Wild Shape HP absorption
+	// If in Wild Shape, damage goes to beast HP first. Excess carries over to normal form.
+	if wildShapeForm.Valid && wildShapeForm.String != "" && wildShapeHP.Valid {
+		beastHP := int(wildShapeHP.Int64)
+		
+		if damage <= beastHP {
+			// Beast absorbs all damage
+			beastHP -= damage
+			db.Exec("UPDATE characters SET wild_shape_hp = $1 WHERE id = $2", beastHP, charID)
+			
+			var beastName string
+			db.QueryRow("SELECT name FROM monsters WHERE slug = $1", wildShapeForm.String).Scan(&beastName)
+			if beastName == "" {
+				beastName = wildShapeForm.String
+			}
+			
+			result["wild_shape_absorbed"] = damage
+			result["wild_shape_form"] = beastName
+			result["wild_shape_hp"] = beastHP
+			result["wild_shape_max_hp"] = int(wildShapeMaxHP.Int64)
+			result["status"] = "wild_shape_damaged"
+			result["hp"] = hp
+			result["max_hp"] = maxHP
+			result["message"] = fmt.Sprintf("Beast form absorbs all damage. %s: %d/%d HP", beastName, beastHP, int(wildShapeMaxHP.Int64))
+			
+			json.NewEncoder(w).Encode(result)
+			return
+		} else {
+			// Beast form drops, excess damage carries over
+			excessDamage := damage - beastHP
+			damage = excessDamage
+			
+			var beastName string
+			db.QueryRow("SELECT name FROM monsters WHERE slug = $1", wildShapeForm.String).Scan(&beastName)
+			if beastName == "" {
+				beastName = wildShapeForm.String
+			}
+			
+			// Clear Wild Shape
+			db.Exec("UPDATE characters SET wild_shape_form = NULL, wild_shape_hp = NULL, wild_shape_max_hp = NULL WHERE id = $1", charID)
+			
+			result["wild_shape_reverted"] = true
+			result["wild_shape_form"] = beastName
+			result["wild_shape_absorbed"] = beastHP
+			result["excess_damage"] = excessDamage
+			result["message"] = fmt.Sprintf("%s form destroyed! %d excess damage carries over to normal form.", beastName, excessDamage)
+		}
 	}
 	
 	// Apply to temp HP first
