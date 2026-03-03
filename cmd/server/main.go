@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.7
+// @version 0.9.8
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.7"
+const version = "0.9.8"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -18800,8 +18800,37 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s%s%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote)
+			// Check for Divine Smite on auto-crit (v0.9.8)
+			divineSmiteNote := ""
+			wantsSmite, smiteSlot := parseDivineSmiteSlot(description)
+			if wantsSmite {
+				canSmite, smiteErr := canUseDivineSmite(charID, smiteSlot)
+				if canSmite {
+					isUndead := isUndeadOrFiend(targetID)
+					smiteDmg, smiteDice := calculateDivineSmiteDamage(smiteSlot, isUndead, true) // true = crit
+					dmg += smiteDmg
+					consumeSpellSlotForSmite(charID, smiteSlot)
+					undeadBonus := ""
+					if isUndead {
+						undeadBonus = " +undead/fiend"
+					}
+					divineSmiteNote = fmt.Sprintf(" (+%d Divine Smite, %s radiant%s)", smiteDmg, smiteDice, undeadBonus)
+				} else {
+					divineSmiteNote = fmt.Sprintf(" [Smite failed: %s]", smiteErr)
+				}
+			}
+			
+			// Check for Improved Divine Smite on auto-crit (v0.9.8)
+			// Paladin 11+: automatic +1d8 radiant on all melee hits (doubled on crit)
+			improvedSmiteNote := ""
+			if strings.ToLower(class) == "paladin" && level >= 11 && !isRangedAttack {
+				improvedSmiteDmg := rollDie(8) + rollDie(8) // 2d8 on crit
+				dmg += improvedSmiteDmg
+				improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 2d8 radiant)", improvedSmiteDmg)
+			}
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s%s%s%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -18875,11 +18904,40 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// Check for Divine Smite on crit (v0.9.8)
+			divineSmiteNote := ""
+			wantsSmite, smiteSlot := parseDivineSmiteSlot(description)
+			if wantsSmite {
+				canSmite, smiteErr := canUseDivineSmite(charID, smiteSlot)
+				if canSmite {
+					isUndead := isUndeadOrFiend(targetID)
+					smiteDmg, smiteDice := calculateDivineSmiteDamage(smiteSlot, isUndead, true) // true = crit
+					dmg += smiteDmg
+					consumeSpellSlotForSmite(charID, smiteSlot)
+					undeadBonus := ""
+					if isUndead {
+						undeadBonus = " +undead/fiend"
+					}
+					divineSmiteNote = fmt.Sprintf(" (+%d Divine Smite, %s radiant%s)", smiteDmg, smiteDice, undeadBonus)
+				} else {
+					divineSmiteNote = fmt.Sprintf(" [Smite failed: %s]", smiteErr)
+				}
+			}
+			
+			// Check for Improved Divine Smite on crit (v0.9.8)
+			// Paladin 11+: automatic +1d8 radiant on all melee hits (doubled on crit)
+			improvedSmiteNote := ""
+			if strings.ToLower(class) == "paladin" && level >= 11 && !isRangedAttack {
+				improvedSmiteDmg := rollDie(8) + rollDie(8) // 2d8 on crit
+				dmg += improvedSmiteDmg
+				improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 2d8 radiant)", improvedSmiteDmg)
+			}
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s%s%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s%s%s%s%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
 		} else if attackRoll == 1 {
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
@@ -18950,7 +19008,38 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s%s%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote)
+		// Check for Divine Smite on normal hit (v0.9.8)
+		// Paladin feature: expend spell slot for 2d8 + (slot-1)d8 radiant damage (max 5d8)
+		// +1d8 vs undead or fiend
+		divineSmiteNote := ""
+		wantsSmite, smiteSlot := parseDivineSmiteSlot(description)
+		if wantsSmite {
+			canSmite, smiteErr := canUseDivineSmite(charID, smiteSlot)
+			if canSmite {
+				isUndead := isUndeadOrFiend(targetID)
+				smiteDmg, smiteDice := calculateDivineSmiteDamage(smiteSlot, isUndead, false) // false = not crit
+				dmg += smiteDmg
+				consumeSpellSlotForSmite(charID, smiteSlot)
+				undeadBonus := ""
+				if isUndead {
+					undeadBonus = " +undead/fiend"
+				}
+				divineSmiteNote = fmt.Sprintf(" (+%d Divine Smite, %s radiant%s)", smiteDmg, smiteDice, undeadBonus)
+			} else {
+				divineSmiteNote = fmt.Sprintf(" [Smite failed: %s]", smiteErr)
+			}
+		}
+		
+		// Check for Improved Divine Smite on normal hit (v0.9.8)
+		// Paladin 11+: automatic +1d8 radiant on all melee weapon hits
+		improvedSmiteNote := ""
+		if strings.ToLower(class) == "paladin" && level >= 11 && !isRangedAttack {
+			improvedSmiteDmg := rollDie(8)
+			dmg += improvedSmiteDmg
+			improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 1d8 radiant)", improvedSmiteDmg)
+		}
+		
+		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s%s%s%s%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
 		
 	case "cast":
 		// Parse spell from description
@@ -21280,6 +21369,168 @@ func isUnderwaterExemptWeapon(weaponKey string) bool {
 		"dart":           true,
 	}
 	return exemptWeapons[strings.ToLower(weaponKey)]
+}
+
+// getTargetCreatureType returns the creature type for a character/monster ID
+// Used for Divine Smite bonus damage against undead/fiend
+func getTargetCreatureType(targetID int) string {
+	// First check if it's a combat participant with a monster key
+	var monsterKey sql.NullString
+	err := db.QueryRow(`
+		SELECT cc.monster_key 
+		FROM combat_combatants cc 
+		WHERE cc.combatant_id = $1 AND cc.is_monster = true
+	`, targetID).Scan(&monsterKey)
+	
+	if err == nil && monsterKey.Valid && monsterKey.String != "" {
+		// Look up monster type from monsters table
+		var monsterType string
+		db.QueryRow("SELECT COALESCE(type, '') FROM monsters WHERE slug = $1", monsterKey.String).Scan(&monsterType)
+		return strings.ToLower(monsterType)
+	}
+	
+	// Check if there's a creature_type stored on the character (for custom NPCs)
+	var creatureType string
+	db.QueryRow("SELECT COALESCE(creature_type, '') FROM characters WHERE id = $1", targetID).Scan(&creatureType)
+	return strings.ToLower(creatureType)
+}
+
+// isUndeadOrFiend checks if target is undead or fiend for Divine Smite bonus
+func isUndeadOrFiend(targetID int) bool {
+	if targetID <= 0 {
+		return false
+	}
+	creatureType := getTargetCreatureType(targetID)
+	return creatureType == "undead" || creatureType == "fiend"
+}
+
+// parseDivineSmiteSlot parses Divine Smite request from description
+// Returns (wantsSmite bool, slotLevel int)
+// Supports: "smite", "divine smite", "smite 2", "smite with 2nd level"
+func parseDivineSmiteSlot(description string) (bool, int) {
+	descLower := strings.ToLower(description)
+	
+	if !strings.Contains(descLower, "smite") {
+		return false, 0
+	}
+	
+	// Default to 1st level slot
+	slotLevel := 1
+	
+	// Parse slot level from description
+	patterns := []string{
+		`smite (?:at |with )?(?:a )?(\d+)(?:st|nd|rd|th)?(?: level)?`,
+		`smite (?:using )?(?:a )?level (\d+)`,
+		`divine smite (\d+)`,
+	}
+	
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		if matches := re.FindStringSubmatch(descLower); len(matches) > 1 {
+			if lvl, err := strconv.Atoi(matches[1]); err == nil && lvl >= 1 && lvl <= 5 {
+				slotLevel = lvl
+			}
+			break
+		}
+	}
+	
+	return true, slotLevel
+}
+
+// calculateDivineSmiteDamage calculates Divine Smite damage
+// Base: 2d8, +1d8 per slot level above 1st (max 5d8), +1d8 vs undead/fiend
+// isCrit doubles the dice
+func calculateDivineSmiteDamage(slotLevel int, isUndeadOrFiend bool, isCrit bool) (int, string) {
+	// Calculate number of d8s: 2 + (slotLevel - 1), max 5
+	numDice := 2 + (slotLevel - 1)
+	if numDice > 5 {
+		numDice = 5
+	}
+	
+	// Extra d8 vs undead/fiend (this can exceed the 5d8 cap)
+	if isUndeadOrFiend {
+		numDice++
+	}
+	
+	// Double dice on crit
+	if isCrit {
+		numDice *= 2
+	}
+	
+	// Roll the damage
+	total := 0
+	for i := 0; i < numDice; i++ {
+		total += rollDie(8)
+	}
+	
+	diceStr := fmt.Sprintf("%dd8", numDice)
+	return total, diceStr
+}
+
+// canUseDivineSmite checks if character can use Divine Smite
+// Returns (canSmite bool, errorMessage string)
+func canUseDivineSmite(charID int, slotLevel int) (bool, string) {
+	var class string
+	var level int
+	db.QueryRow("SELECT class, level FROM characters WHERE id = $1", charID).Scan(&class, &level)
+	
+	// Must be Paladin level 2+
+	if strings.ToLower(class) != "paladin" {
+		return false, "Only Paladins can use Divine Smite"
+	}
+	if level < 2 {
+		return false, "Divine Smite requires Paladin level 2+"
+	}
+	
+	// Check available spell slots
+	slots := getSpellSlots(class, level)
+	maxSlots := slots[slotLevel]
+	if maxSlots == 0 {
+		return false, fmt.Sprintf("No %s level spell slots available for Divine Smite", ordinal(slotLevel))
+	}
+	
+	// Check used slots
+	var usedJSON []byte
+	db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+	var used map[string]int
+	json.Unmarshal(usedJSON, &used)
+	
+	usedKey := strconv.Itoa(slotLevel)
+	if used[usedKey] >= maxSlots {
+		return false, fmt.Sprintf("No %s level spell slots remaining for Divine Smite", ordinal(slotLevel))
+	}
+	
+	return true, ""
+}
+
+// consumeSpellSlotForSmite uses a spell slot for Divine Smite
+func consumeSpellSlotForSmite(charID int, slotLevel int) {
+	var usedJSON []byte
+	db.QueryRow("SELECT COALESCE(spell_slots_used, '{}') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+	var used map[string]int
+	if err := json.Unmarshal(usedJSON, &used); err != nil {
+		used = make(map[string]int)
+	}
+	
+	usedKey := strconv.Itoa(slotLevel)
+	used[usedKey]++
+	
+	updatedJSON, _ := json.Marshal(used)
+	db.Exec("UPDATE characters SET spell_slots_used = $1 WHERE id = $2", updatedJSON, charID)
+}
+
+// ordinal returns the ordinal suffix for a number (1st, 2nd, 3rd, etc.)
+func ordinal(n int) string {
+	switch n {
+	case 1:
+		return "1st"
+	case 2:
+		return "2nd"
+	case 3:
+		return "3rd"
+	default:
+		return fmt.Sprintf("%dth", n)
+	}
 }
 
 // getCampaignLighting returns the current lighting level for a campaign (v0.8.50)

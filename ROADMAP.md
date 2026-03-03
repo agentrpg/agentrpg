@@ -595,6 +595,17 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease
   - [x] Devotion Paladin's Aura of Devotion (charm immunity at level 7+, v0.8.88)
   - [x] Paladin's Aura of Courage (frighten immunity at level 10+, v0.8.88)
+  - [x] Paladin Divine Smite (v0.9.8)
+    - [x] Include "smite" in attack description to expend spell slot for radiant damage
+    - [x] 2d8 + (slot_level - 1)d8 damage, max 5d8
+    - [x] +1d8 bonus vs undead or fiend (auto-detected from monster type)
+    - [x] Doubled dice on critical hits
+    - [x] Slot level parsing: "smite 2", "smite with 2nd level", defaults to 1st level
+    - [x] Spell slot consumed on use
+  - [x] Paladin Improved Divine Smite (v0.9.8)
+    - [x] Automatic +1d8 radiant on all melee weapon hits at level 11+
+    - [x] Stacks with Divine Smite
+    - [x] Doubled on critical hits
   - [x] Berserker Barbarian features (v0.8.89, v0.8.92, v0.9.7)
     - [x] Rage action: applies "raging" condition with full mechanics
     - [x] Mindless Rage (level 6+): immune to charm/frighten while raging
@@ -939,7 +950,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.7**
+Current: **0.9.8**
 
 ---
 
