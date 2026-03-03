@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.15"
+const version = "0.9.16"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -393,6 +393,7 @@ func main() {
 	http.HandleFunc("/api/gm/grapple", handleGMGrapple)
 	http.HandleFunc("/api/gm/escape-grapple", handleGMEscapeGrapple)
 	http.HandleFunc("/api/gm/release-grapple", handleGMReleaseGrapple)
+	http.HandleFunc("/api/gm/forced-movement", handleGMForcedMovement)
 	http.HandleFunc("/api/gm/disarm", handleGMDisarm)
 	http.HandleFunc("/api/gm/update-character", handleGMUpdateCharacter)
 	http.HandleFunc("/api/gm/award-xp", handleGMAwardXP)
@@ -2705,6 +2706,55 @@ func releaseAllGrapplesFrom(grapplerID int) []string {
 	}
 	
 	return released
+}
+
+// breakGrapplesOnTarget removes all grappled conditions FROM a character (v0.9.16)
+// Called when a grappled creature is forcibly moved out of reach (shove, Thunderwave, etc.)
+// Returns list of grappler names whose grapples were broken
+func breakGrapplesOnTarget(targetID int) []string {
+	broken := []string{}
+	
+	// Get target's current conditions
+	var condJSON []byte
+	var targetName string
+	err := db.QueryRow(`SELECT name, COALESCE(conditions, '[]') FROM characters WHERE id = $1`, targetID).Scan(&targetName, &condJSON)
+	if err != nil {
+		return broken
+	}
+	
+	var conditions []string
+	json.Unmarshal(condJSON, &conditions)
+	
+	// Find and remove all grappled conditions
+	newConditions := []string{}
+	for _, c := range conditions {
+		if strings.HasPrefix(c, "grappled:") {
+			// Extract grappler ID and get their name
+			parts := strings.Split(c, ":")
+			if len(parts) == 2 {
+				grapplerID, _ := strconv.Atoi(parts[1])
+				var grapplerName string
+				err := db.QueryRow(`SELECT name FROM characters WHERE id = $1`, grapplerID).Scan(&grapplerName)
+				if err == nil {
+					broken = append(broken, grapplerName)
+				} else {
+					broken = append(broken, fmt.Sprintf("unknown(id:%d)", grapplerID))
+				}
+			}
+		} else if strings.ToLower(c) == "grappled" {
+			// Generic grappled without specific grappler
+			broken = append(broken, "unknown")
+		} else {
+			newConditions = append(newConditions, c)
+		}
+	}
+	
+	if len(broken) > 0 {
+		updated, _ := json.Marshal(newConditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, targetID)
+	}
+	
+	return broken
 }
 
 // isIncapacitatingCondition checks if a condition prevents taking actions
@@ -12096,6 +12146,14 @@ func handleGMShove(w http.ResponseWriter, r *http.Request) {
 			response["effect_applied"] = "push"
 			response["push_distance"] = "5ft"
 			response["message"] = fmt.Sprintf("%s shoves %s back 5 feet!", attackerName, targetName)
+			
+			// v0.9.16: Forced movement breaks grapples (5e PHB: "The condition also ends if an effect removes the grappled creature from the reach of the grappler")
+			brokenGrapples := breakGrapplesOnTarget(req.TargetID)
+			if len(brokenGrapples) > 0 {
+				response["grapples_broken"] = brokenGrapples
+				resultText += fmt.Sprintf(" Grapples broken: %s", strings.Join(brokenGrapples, ", "))
+				response["message"] = response["message"].(string) + fmt.Sprintf(" %s's grapple(s) by %s are broken!", targetName, strings.Join(brokenGrapples, ", "))
+			}
 		}
 	} else {
 		resultText += fmt.Sprintf(" → %s resists the shove!", targetName)
@@ -12659,6 +12717,116 @@ func handleGMReleaseGrapple(w http.ResponseWriter, r *http.Request) {
 		"target_id":   req.TargetID,
 		"message":     fmt.Sprintf("%s releases %s from their grapple (no action cost)", grapplerName, targetName),
 	})
+}
+
+// handleGMForcedMovement godoc
+// @Summary Break grapples due to forced movement
+// @Description GM reports that a creature was forcibly moved (by spell, shove, etc.), breaking any grapples on it. Per 5e PHB: "The condition also ends if an effect removes the grappled creature from the reach of the grappler or grappling creature."
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{target_id=int,cause=string,distance=string} true "Forced movement details"
+// @Success 200 {object} map[string]interface{} "Result with broken grapples"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /gm/forced-movement [post]
+func handleGMForcedMovement(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Find campaign where this agent is the DM
+	var campaignID int
+	err = db.QueryRow(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1`, agentID).Scan(&campaignID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		TargetID int    `json:"target_id"`
+		Cause    string `json:"cause"`    // e.g., "Thunderwave", "Eldritch Blast with Repelling Blast", "gust of wind"
+		Distance string `json:"distance"` // e.g., "10ft", "15 feet"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_id required"})
+		return
+	}
+	
+	// Verify target is in this campaign
+	var targetName string
+	var targetLobby int
+	err = db.QueryRow(`SELECT name, lobby_id FROM characters WHERE id = $1`, req.TargetID).Scan(&targetName, &targetLobby)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_found"})
+		return
+	}
+	
+	if targetLobby != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "target_not_in_campaign"})
+		return
+	}
+	
+	// Break any grapples on the target
+	brokenGrapples := breakGrapplesOnTarget(req.TargetID)
+	
+	// Build cause description
+	cause := req.Cause
+	if cause == "" {
+		cause = "forced movement"
+	}
+	distance := req.Distance
+	if distance == "" {
+		distance = "out of reach"
+	}
+	
+	response := map[string]interface{}{
+		"target_id":   req.TargetID,
+		"target_name": targetName,
+		"cause":       cause,
+		"distance":    distance,
+	}
+	
+	if len(brokenGrapples) > 0 {
+		response["grapples_broken"] = brokenGrapples
+		response["message"] = fmt.Sprintf("%s was moved %s by %s, breaking grapples from: %s", 
+			targetName, distance, cause, strings.Join(brokenGrapples, ", "))
+		
+		// Record the action
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description, result) VALUES ($1, $2, 'forced_movement', $3, $4)`,
+			campaignID, req.TargetID, 
+			fmt.Sprintf("%s forced movement (%s)", targetName, cause),
+			fmt.Sprintf("%s moved %s, grapples broken: %s", targetName, distance, strings.Join(brokenGrapples, ", ")))
+	} else {
+		response["grapples_broken"] = []string{}
+		response["message"] = fmt.Sprintf("%s was moved %s by %s (no grapples to break)", targetName, distance, cause)
+	}
+	
+	response["rules_note"] = "Per 5e PHB: 'The [grappled] condition also ends if an effect removes the grappled creature from the reach of the grappler or grappling creature.'"
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleGMDisarm godoc
@@ -25491,7 +25659,7 @@ func applyOpenHandEffect(charID int, effect string, level int) string {
 	case "prone":
 		return fmt.Sprintf("[Open Hand: Target must make DEX save DC %d or be knocked PRONE]", kiSaveDC)
 	case "push":
-		return fmt.Sprintf("[Open Hand: Target must make STR save DC %d or be pushed up to 15 feet away]", kiSaveDC)
+		return fmt.Sprintf("[Open Hand: Target must make STR save DC %d or be pushed up to 15 feet away. If pushed, call POST /api/gm/forced-movement to break any grapples]", kiSaveDC)
 	case "no_reactions":
 		return "[Open Hand: Target can't take REACTIONS until the end of your next turn (no save)]"
 	default:

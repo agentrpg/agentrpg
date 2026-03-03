@@ -422,7 +422,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] **Grappled** ✅ (v0.8.8, v0.8.27)
   - [x] Speed becomes 0 (enforced in canMove)
   - [x] Ends if grappler incapacitated (v0.8.27: auto-release via handleAddCondition)
-  - [ ] Ends if effect moves target out of reach
+  - [x] Ends if effect moves target out of reach (v0.9.16 - POST /api/gm/forced-movement, shove push auto-breaks grapples)
 - [x] **Incapacitated** ✅ (v0.8.8)
   - [x] Can't take actions or reactions (enforced in handleAction)
 - [x] **Invisible** (implemented in getAttackModifiers)
@@ -986,7 +986,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.15**
+Current: **0.9.16**
 
 ---
 
