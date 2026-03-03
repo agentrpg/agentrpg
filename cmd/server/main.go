@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.12
+// @version 0.9.13
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.12"
+const version = "0.9.13"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -19189,14 +19189,17 @@ func resolveAction(action, description string, charID int) string {
 		saveDC := spellSaveDC(level, spellMod)
 		
 		if hasSpell {
-			// Check spell components (V, S, M) - v0.8.17
+			// Check spell components (V, S, M) - v0.8.17, v0.9.13: added somatic enforcement
 			conditions := getCharConditions(charID)
-			var inventoryJSON []byte
-			db.QueryRow("SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1", charID).Scan(&inventoryJSON)
+			var inventoryJSON, featsJSON []byte
+			var equippedShield bool
+			db.QueryRow("SELECT COALESCE(inventory, '[]'), COALESCE(equipped_shield, false), COALESCE(feats, '[]') FROM characters WHERE id = $1", charID).Scan(&inventoryJSON, &equippedShield, &featsJSON)
 			var inventory []map[string]interface{}
+			var feats []string
 			json.Unmarshal(inventoryJSON, &inventory)
+			json.Unmarshal(featsJSON, &feats)
 			
-			if compErr := checkSpellComponents(spell.Components, conditions, inventory); compErr != "" {
+			if compErr := checkSpellComponents(spell.Components, conditions, inventory, equippedShield, feats, usedMetamagic, classKey, level); compErr != "" {
 				return compErr
 			}
 			
@@ -20831,15 +20834,51 @@ func parseSpellFromDescription(desc string) string {
 	return ""
 }
 
+// hasFeatFeature checks if any of the character's feats grants a specific feature
+// v0.9.13: Used for War Caster somatic component bypass, etc.
+func hasFeatFeature(feats []string, feature string) bool {
+	for _, slug := range feats {
+		if feat, ok := availableFeats[slug]; ok {
+			if _, hasFeature := feat.Features[feature]; hasFeature {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkSpellComponents validates if character can cast spell with V, S, M components
+// v0.9.13: Added somatic component enforcement with shield/War Caster check
+// Parameters:
+//   - components: spell components string (e.g., "V, S, M")
+//   - conditions: character's current conditions
+//   - inventory: character's inventory items
+//   - equippedShield: whether character has a shield equipped
+//   - feats: array of feat slugs the character has
+//   - usedMetamagic: array of metamagic options being used (e.g., "subtle")
+//   - classKey: character's class (e.g., "druid")
+//   - level: character's level (for Archdruid check)
 // Returns: error message if blocked, empty string if OK
-func checkSpellComponents(components string, conditions []string, inventory []map[string]interface{}) string {
+func checkSpellComponents(components string, conditions []string, inventory []map[string]interface{}, equippedShield bool, feats []string, usedMetamagic []string, classKey string, level int) string {
 	compLower := strings.ToLower(components)
 	hasV := strings.Contains(compLower, "v")
+	hasS := strings.Contains(compLower, "s")
 	hasM := strings.Contains(compLower, "m")
 
-	// V (Verbal): Can't cast if silenced
-	if hasV {
+	// Check for Subtle Spell metamagic - bypasses V and S components
+	isSubtle := false
+	for _, mm := range usedMetamagic {
+		if mm == "subtle" {
+			isSubtle = true
+			break
+		}
+	}
+
+	// Check for Archdruid feature (Druid level 20) - ignores V, S, and non-costly M
+	isArchdruid := strings.ToLower(classKey) == "druid" && level >= 20
+
+	// V (Verbal): Can't cast if silenced (unless Subtle Spell or Archdruid)
+	if hasV && !isSubtle && !isArchdruid {
 		for _, c := range conditions {
 			if strings.ToLower(c) == "silenced" {
 				return "Cannot cast - you are silenced and the spell requires verbal components (V)!"
@@ -20847,12 +20886,20 @@ func checkSpellComponents(components string, conditions []string, inventory []ma
 		}
 	}
 
-	// S (Somatic): Can't cast if both hands restrained (simplified: check for bound/restrained with no free hand)
-	// For now, we'll be lenient - just note if somatic is required but don't block
-	// Full implementation would track hand usage (weapon, shield, focus)
+	// S (Somatic): Need a free hand (unless Subtle Spell, Archdruid, or War Caster)
+	// v0.9.13: If shield is equipped, both hands are occupied (weapon + shield)
+	// War Caster feat allows somatic components with hands full
+	if hasS && !isSubtle && !isArchdruid {
+		if equippedShield {
+			// Check for War Caster feat
+			if !hasFeatFeature(feats, "somatic_with_hands_full") {
+				return "Cannot cast - spell requires somatic components (S) but you have a shield equipped and no free hand! Either unequip your shield (POST /api/characters/unequip-armor) or take the War Caster feat to cast with hands full."
+			}
+		}
+	}
 
-	// M (Material): Need arcane focus, component pouch, or specific material
-	if hasM {
+	// M (Material): Need arcane focus, component pouch, or specific material (Archdruid ignores non-costly/non-consumed)
+	if hasM && !isArchdruid {
 		// Check inventory for spellcasting focus or component pouch
 		hasFocus := false
 		for _, item := range inventory {

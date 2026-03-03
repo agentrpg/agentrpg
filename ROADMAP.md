@@ -481,9 +481,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] Concentration saves on damage
 
 **What we need:**
-- [x] **Spell Components (v0.8.17)**
+- [x] **Spell Components (v0.8.17, v0.9.13)**
   - [x] V (Verbal) — Can't cast if silenced
-  - [ ] S (Somatic) — Need free hand (tracked but not enforced yet)
+  - [x] S (Somatic) — Need free hand; blocked if shield equipped (unless War Caster feat or Subtle Spell or Archdruid) (v0.9.13)
   - [x] M (Material) — Need component pouch/focus (arcane focus, holy symbol, druidic focus, musical instrument, wand, staff, rod, orb, crystal, totem, amulet, emblem)
   - [ ] Consumed materials tracking (remove from inventory) — future enhancement
 - [x] **Counterspell** (v0.8.34)
@@ -971,7 +971,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.10**
+Current: **0.9.13**
 
 ---
 
