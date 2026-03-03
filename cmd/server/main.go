@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.16"
+const version = "0.9.17"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2432,7 +2432,7 @@ var conditionEffects = map[string]string{
 	"frightened":   "Disadvantage on ability checks and attacks while source is visible. Can't willingly move closer.",
 	"grappled":     "Speed becomes 0. Ends if grappler incapacitated or moved out of reach.",
 	"incapacitated": "Can't take actions or reactions.",
-	"invisible":    "Impossible to see without magic. Attacks against have disadvantage, attacks have advantage.",
+	"invisible":    "Impossible to see without special senses. Attacks against have disadvantage, attacks have advantage. Creatures with blindsight or truesight can see invisible creatures normally.",
 	"paralyzed":    "Incapacitated, can't move or speak. Auto-fail STR/DEX saves. Attacks have advantage, hits from 5ft are crits.",
 	"petrified":    "Transformed to stone. Weight x10. Incapacitated, unaware. Resistant to all damage. Immune to poison/disease.",
 	"poisoned":     "Disadvantage on attack rolls and ability checks.",
@@ -18925,7 +18925,17 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 		condLower := strings.ToLower(cond)
 		switch condLower {
 		case "invisible":
-			hasAdvantage = true
+			// v0.9.17: Invisible attacker gets advantage unless defender has blindsight/truesight
+			if len(targetID) > 0 && targetID[0] > 0 {
+				_, defenderBlindsight, defenderTruesight := getCharacterVision(targetID[0])
+				if defenderBlindsight == 0 && defenderTruesight == 0 {
+					hasAdvantage = true
+				}
+				// If defender has special senses, no advantage (they can see the invisible attacker)
+			} else {
+				// No specific target, grant advantage by default
+				hasAdvantage = true
+			}
 		case "blinded", "frightened", "poisoned", "prone", "restrained":
 			hasDisadvantage = true
 		}
@@ -18952,7 +18962,14 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 		case "blinded", "paralyzed", "stunned", "unconscious", "restrained":
 			hasAdvantage = true
 		case "invisible":
-			hasDisadvantage = true
+			// v0.9.17: Check if attacker has special senses that can see invisible creatures
+			// Blindsight and truesight allow seeing invisible creatures (PHB)
+			_, attackerBlindsight, attackerTruesight := getCharacterVision(charID)
+			if attackerBlindsight == 0 && attackerTruesight == 0 {
+				// Attacker can't see invisible: disadvantage
+				hasDisadvantage = true
+			}
+			// If attacker has blindsight or truesight, no disadvantage (they can see the invisible creature)
 		case "prone":
 			// Prone: advantage from within 5ft (melee), disadvantage from further (ranged)
 			if isRanged {

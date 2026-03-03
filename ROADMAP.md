@@ -426,9 +426,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - [x] **Incapacitated** ✅ (v0.8.8)
   - [x] Can't take actions or reactions (enforced in handleAction)
 - [x] **Invisible** (implemented in getAttackModifiers)
-  - [ ] Impossible to see without special sense
-  - [x] Attacks against have disadvantage
-  - [x] Attack rolls have advantage
+  - [x] Impossible to see without special sense (v0.9.17 - blindsight/truesight negates advantage/disadvantage)
+  - [x] Attacks against have disadvantage (unless attacker has blindsight/truesight)
+  - [x] Attack rolls have advantage (unless defender has blindsight/truesight)
 - [x] **Paralyzed** ✅ (v0.8.8)
   - [x] Incapacitated, can't move or speak (enforced)
   - [x] Auto-fail STR/DEX saves (enforced in handleGMSavingThrow)
@@ -707,7 +707,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Natural Recovery (Circle of the Land Druid) — 1 use per day, recovers spell slots on short rest (v0.8.91)
     - [x] POST /api/characters/{id}/use-resource endpoint
   - [x] Extra Attack at level 5 (Fighter, Paladin, Ranger, Monk, Barbarian) (v0.8.68)
-  - [ ] Spellcasting feature at class-specific levels
+  - [x] Spellcasting feature at class-specific levels (implemented in classFeatures map - Bard/Cleric/Druid/Sorcerer/Wizard at 1, Paladin/Ranger at 2, Warlock has Pact Magic at 1)
 - [x] **Feats (v0.8.66)**
   - [x] Alternative to ASI (costs 2 points)
   - [x] 10 feats: Grappler (SRD), Alert, Lucky, Tough, Sentinel, War Caster, Mobile, Observant, Resilient, Savage Attacker
@@ -780,7 +780,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Recover all HP
   - [x] Recover all spell slots
   - [x] Recover half hit dice (minimum 1)
-  - [ ] Recover most class features - future class features
+  - [x] Recover most class features (recoverClassResources handles Ki, Rage, Sorcery Points, Bardic Inspiration, Channel Divinity, Lay on Hands, Second Wind, Action Surge, Wild Shape with proper short/long rest rules)
   - [x] Remove 1 exhaustion level (with food/drink assumed)
   - [x] Only 1 per 24 hours (tracked via last_long_rest column)
 - [x] **Hit Dice Tracking (v0.8.7)**
@@ -986,7 +986,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.16**
+Current: **0.9.17**
 
 ---
 
