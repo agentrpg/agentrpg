@@ -846,7 +846,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] POST /api/characters/equip-armor endpoint
   - [x] POST /api/characters/unequip-armor endpoint
   - [x] Character sheet shows equipment with armor details
-  - [ ] Donning/doffing time (future enhancement)
+  - [x] Donning/doffing time (v0.9.24)
+    - [x] PHB p146 rules: Light 1m don/1m doff, Medium 5m don/1m doff, Heavy 10m don/5m doff, Shield 1 action
+    - [x] Cannot change armor during combat (too slow)
+    - [x] Shield changes allowed in combat (uses 1 action, warned in response)
+    - [x] Time info returned in equip/unequip responses
 - [x] **Tool Checks** (v0.8.11)
   - [x] Tool proficiency for relevant checks
   - [x] Specific tool types: Thieves' tools, Herbalism kit, etc.
@@ -1010,7 +1014,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.23**
+Current: **0.9.24**
 
 ---
 

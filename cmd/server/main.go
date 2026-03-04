@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.23
+// @version 0.9.24
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.23"
+const version = "0.9.24"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2265,6 +2265,54 @@ func getArmorInfo(armorSlug string) (*ArmorInfo, error) {
 		return nil, err
 	}
 	return &info, nil
+}
+
+// getArmorDonDoffTime returns donning and doffing times in minutes for an armor type (PHB p146)
+// Shield: 1 action to don, 1 action to doff (represented as 0 minutes, handled specially in combat)
+// Light armor: 1 minute don, 1 minute doff
+// Medium armor: 5 minutes don, 1 minute doff
+// Heavy armor: 10 minutes don, 5 minutes doff
+func getArmorDonDoffTime(armorType string) (donMinutes, doffMinutes int) {
+	switch strings.ToLower(armorType) {
+	case "shield":
+		return 0, 0 // Handled as action in combat
+	case "light":
+		return 1, 1
+	case "medium":
+		return 5, 1
+	case "heavy":
+		return 10, 5
+	default:
+		return 1, 1 // Default to light armor timing
+	}
+}
+
+// isCharacterInCombat checks if a character is currently in an active combat
+// Returns campaign ID, in-combat status, and any error
+func isCharacterInCombat(characterID int) (campaignID int, inCombat bool, err error) {
+	// Get character's campaign
+	var campID sql.NullInt64
+	err = db.QueryRow(`SELECT lobby_id FROM characters WHERE id = $1`, characterID).Scan(&campID)
+	if err != nil {
+		return 0, false, err
+	}
+	if !campID.Valid {
+		return 0, false, nil // Not in a campaign
+	}
+	
+	// Check if campaign is in combat (has turn_order set)
+	var turnOrder sql.NullString
+	err = db.QueryRow(`SELECT turn_order FROM combat_state WHERE lobby_id = $1`, campID.Int64).Scan(&turnOrder)
+	if err == sql.ErrNoRows {
+		return int(campID.Int64), false, nil // No combat state = exploration mode
+	}
+	if err != nil {
+		return int(campID.Int64), false, err
+	}
+	
+	// Combat is active if turn_order is not empty
+	inCombat = turnOrder.Valid && turnOrder.String != "" && turnOrder.String != "[]"
+	return int(campID.Int64), inCombat, nil
 }
 
 // calculateArmorAC calculates AC based on equipped armor, shield, and DEX modifier
@@ -16793,9 +16841,13 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// Check if in combat (v0.9.24 - donning/doffing time)
+	_, inCombat, _ := isCharacterInCombat(req.CharacterID)
+	
 	newArmor := currentArmor.String
 	newShield := currentShield
 	warnings := []string{}
+	timeInfo := map[string]interface{}{}
 	
 	// Handle armor change
 	if req.Armor != "" {
@@ -16804,6 +16856,18 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		if err != nil || armorInfo == nil {
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "armor_not_found", "armor": req.Armor})
+			return
+		}
+		
+		// Block armor changes during combat (PHB p146 - takes too long)
+		if inCombat {
+			w.WriteHeader(http.StatusBadRequest)
+			donTime, _ := getArmorDonDoffTime(armorInfo.Type)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":              "cannot_change_armor_in_combat",
+				"reason":             fmt.Sprintf("Donning %s armor takes %d minutes. You cannot change armor during combat.", armorInfo.Type, donTime),
+				"suggestion":         "Wait until combat ends, or use shield changes only (1 action to don/doff shield).",
+			})
 			return
 		}
 		
@@ -16822,6 +16886,22 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 			warnings = append(warnings, "stealth_disadvantage")
 		}
 		
+		// Calculate donning time
+		donTime, doffTime := getArmorDonDoffTime(armorInfo.Type)
+		timeInfo["armor_type"] = armorInfo.Type
+		timeInfo["don_time_minutes"] = donTime
+		timeInfo["doff_time_minutes"] = doffTime
+		
+		// If changing FROM existing armor, need to account for doff time too
+		if currentArmor.Valid && currentArmor.String != "" && currentArmor.String != req.Armor {
+			oldArmor, _ := getArmorInfo(currentArmor.String)
+			if oldArmor != nil {
+				_, oldDoffTime := getArmorDonDoffTime(oldArmor.Type)
+				timeInfo["total_time_minutes"] = oldDoffTime + donTime
+				timeInfo["note"] = fmt.Sprintf("Doffing %s (%d min) + donning %s (%d min)", oldArmor.Type, oldDoffTime, armorInfo.Type, donTime)
+			}
+		}
+		
 		newArmor = req.Armor
 	}
 	
@@ -16830,6 +16910,16 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		newShield = *req.Shield
 		if newShield && !strings.Contains(strings.ToLower(armorProfs), "shield") {
 			warnings = append(warnings, "not_proficient_with_shields")
+		}
+		
+		// Shield is 1 action to don/doff (PHB p146) - allowed in combat
+		if inCombat {
+			if newShield != currentShield {
+				timeInfo["shield_change"] = "1 action"
+				warnings = append(warnings, "shield_change_uses_action")
+			}
+		} else {
+			timeInfo["shield_time"] = "1 action to don or doff"
 		}
 	}
 	
@@ -16864,6 +16954,9 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(warnings) > 0 {
 		response["warnings"] = warnings
+	}
+	if len(timeInfo) > 0 {
+		response["time_required"] = timeInfo
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -16933,14 +17026,56 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// Check if in combat (v0.9.24 - donning/doffing time)
+	_, inCombat, _ := isCharacterInCombat(req.CharacterID)
+	
 	newArmor := currentArmor.String
 	newShield := currentShield
+	warnings := []string{}
+	timeInfo := map[string]interface{}{}
 	
-	if req.Armor {
+	// Handle armor removal
+	if req.Armor && currentArmor.Valid && currentArmor.String != "" {
+		// Block armor removal during combat (PHB p146 - takes too long)
+		if inCombat {
+			armorInfo, _ := getArmorInfo(currentArmor.String)
+			armorType := "armor"
+			doffTime := 1
+			if armorInfo != nil {
+				armorType = armorInfo.Type
+				_, doffTime = getArmorDonDoffTime(armorInfo.Type)
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":              "cannot_remove_armor_in_combat",
+				"reason":             fmt.Sprintf("Doffing %s armor takes %d minutes. You cannot remove armor during combat.", armorType, doffTime),
+				"suggestion":         "Wait until combat ends, or remove shield only (1 action to doff shield).",
+			})
+			return
+		}
+		
+		// Calculate doff time
+		armorInfo, _ := getArmorInfo(currentArmor.String)
+		if armorInfo != nil {
+			_, doffTime := getArmorDonDoffTime(armorInfo.Type)
+			timeInfo["armor_type"] = armorInfo.Type
+			timeInfo["doff_time_minutes"] = doffTime
+		}
+		
 		newArmor = ""
 	}
-	if req.Shield {
+	
+	// Handle shield removal
+	if req.Shield && currentShield {
 		newShield = false
+		
+		// Shield is 1 action to doff (PHB p146) - allowed in combat
+		if inCombat {
+			timeInfo["shield_change"] = "1 action"
+			warnings = append(warnings, "shield_doff_uses_action")
+		} else {
+			timeInfo["shield_time"] = "1 action to doff"
+		}
 	}
 	
 	// Update database
@@ -16965,13 +17100,21 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 	// Update stored AC
 	db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, newAC, req.CharacterID)
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":         true,
 		"character":       charName,
 		"equipped_armor":  newArmor,
 		"equipped_shield": newShield,
 		"new_ac":          newAC,
-	})
+	}
+	if len(warnings) > 0 {
+		response["warnings"] = warnings
+	}
+	if len(timeInfo) > 0 {
+		response["time_required"] = timeInfo
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleCharacterDowntime godoc
