@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.34"
+const version = "0.9.35"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -15232,8 +15232,26 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 		if isRaging {
 			rageText = fmt.Sprintf(" (+%d rage)", rageBonus)
 		}
-		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s with %s", 
-			charName, req.AttackerName, totalAttack, damage, rageText, weaponName)
+		// v0.9.35: Brutal Critical on Retaliation crits
+		brutalCritText := ""
+		brutalDice := getBrutalCriticalDice(class, level)
+		if brutalDice > 0 {
+			// Parse weapon damage die
+			parts := strings.Split(strings.ToLower(damageDice), "d")
+			if len(parts) == 2 {
+				sides, _ := strconv.Atoi(parts[1])
+				if sides > 0 {
+					brutalDmg := 0
+					for i := 0; i < brutalDice; i++ {
+						brutalDmg += rollDie(sides)
+					}
+					damage += brutalDmg
+					brutalCritText = fmt.Sprintf(" (+%d Brutal Critical)", brutalDmg)
+				}
+			}
+		}
+		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s%s with %s", 
+			charName, req.AttackerName, totalAttack, damage, rageText, brutalCritText, weaponName)
 		hit = true
 	} else if totalAttack >= targetAC {
 		// Normal hit
@@ -19926,8 +19944,30 @@ func resolveAction(action, description string, charID int) string {
 				improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 2d8 radiant)", improvedSmiteDmg)
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
+			// Check for Barbarian's Brutal Critical on auto-crit (v0.9.35)
+			// Extra weapon damage dice on melee critical hits: +1 at 9, +2 at 13, +3 at 17
+			brutalCritNote := ""
+			if !isRangedAttack {
+				brutalDice := getBrutalCriticalDice(class, level)
+				if brutalDice > 0 && hasWeapon {
+					// Parse weapon damage die (e.g., "1d12" -> 12, "2d6" -> 6)
+					parts := strings.Split(strings.ToLower(weapon.Damage), "d")
+					if len(parts) == 2 {
+						sides, _ := strconv.Atoi(parts[1])
+						if sides > 0 {
+							brutalDmg := 0
+							for i := 0; i < brutalDice; i++ {
+								brutalDmg += rollDie(sides)
+							}
+							dmg += brutalDmg
+							brutalCritNote = fmt.Sprintf(" (+%d Brutal Critical, %dd%d)", brutalDmg, brutalDice, sides)
+						}
+					}
+				}
+			}
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -20051,11 +20091,33 @@ func resolveAction(action, description string, charID int) string {
 				improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 2d8 radiant)", improvedSmiteDmg)
 			}
 			
+			// Check for Barbarian's Brutal Critical on crit (v0.9.35)
+			// Extra weapon damage dice on melee critical hits: +1 at 9, +2 at 13, +3 at 17
+			brutalCritNote := ""
+			if !isRangedAttack {
+				brutalDice := getBrutalCriticalDice(class, level)
+				if brutalDice > 0 && hasWeapon {
+					// Parse weapon damage die (e.g., "1d12" -> 12, "2d6" -> 6)
+					parts := strings.Split(strings.ToLower(weapon.Damage), "d")
+					if len(parts) == 2 {
+						sides, _ := strconv.Atoi(parts[1])
+						if sides > 0 {
+							brutalDmg := 0
+							for i := 0; i < brutalDice; i++ {
+								brutalDmg += rollDie(sides)
+							}
+							dmg += brutalDmg
+							brutalCritNote = fmt.Sprintf(" (+%d Brutal Critical, %dd%d)", brutalDmg, brutalDice, sides)
+						}
+					}
+				}
+			}
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote)
 		} else if attackRoll == 1 {
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
@@ -21333,8 +21395,25 @@ func resolveAction(action, description string, charID int) string {
 		// Critical hit
 		if frenzyRoll >= critThreshold {
 			frenzyDmg := rollDamage(weapon.Damage, true) + frenzyDamageMod // crit = double dice
-			return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d (nat %d CRITICAL!)%s Damage: %d (%s + %d STR + %d rage)",
-				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRoll, frenzyRollInfo, frenzyDmg, weapon.Damage, modifier(str), rageDamageBonus)
+			// v0.9.35: Brutal Critical on frenzy attack crits (Barbarians get extra dice at 9/13/17)
+			brutalCritText := ""
+			brutalDice := getBrutalCriticalDice(class, level)
+			if brutalDice > 0 {
+				parts := strings.Split(strings.ToLower(weapon.Damage), "d")
+				if len(parts) == 2 {
+					sides, _ := strconv.Atoi(parts[1])
+					if sides > 0 {
+						brutalDmg := 0
+						for i := 0; i < brutalDice; i++ {
+							brutalDmg += rollDie(sides)
+						}
+						frenzyDmg += brutalDmg
+						brutalCritText = fmt.Sprintf(" (+%d Brutal Critical)", brutalDmg)
+					}
+				}
+			}
+			return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d (nat %d CRITICAL!)%s Damage: %d%s (%s + %d STR + %d rage)",
+				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRoll, frenzyRollInfo, frenzyDmg, brutalCritText, weapon.Damage, modifier(str), rageDamageBonus)
 		}
 
 		// Critical miss
@@ -28919,6 +28998,22 @@ func getCritRange(subclassSlug string, level int) int {
 		}
 	}
 	return 20 // Standard: only 20 crits
+}
+
+// getBrutalCriticalDice returns the number of extra weapon damage dice for Barbarian's Brutal Critical
+// v0.9.35: Barbarian level 9+ gets extra damage dice on melee critical hits
+func getBrutalCriticalDice(class string, level int) int {
+	if strings.ToLower(class) != "barbarian" {
+		return 0
+	}
+	if level >= 17 {
+		return 3 // Brutal Critical (3 dice)
+	} else if level >= 13 {
+		return 2 // Brutal Critical (2 dice)
+	} else if level >= 9 {
+		return 1 // Brutal Critical (1 die)
+	}
+	return 0
 }
 
 // getSneakAttackDice returns the sneak attack dice for a rogue of the given level
