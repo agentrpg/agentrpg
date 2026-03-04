@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.33
+// @version 0.9.36
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.35"
+const version = "0.9.36"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -404,6 +404,7 @@ func main() {
 	http.HandleFunc("/api/gm/giant-killer", handleGMGiantKiller)
 	http.HandleFunc("/api/gm/retaliation", handleGMRetaliation)
 	http.HandleFunc("/api/gm/intimidating-presence", handleGMIntimidatingPresence)
+	http.HandleFunc("/api/gm/quivering-palm", handleGMQuiveringPalm)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
 	http.HandleFunc("/api/gm/legendary-resistance", handleGMLegendaryResistance)
@@ -971,6 +972,12 @@ func initDB() {
 		-- Tracks chosen fighting styles for Fighter, Paladin, Ranger (level 1/2)
 		-- Champion Fighters get additional style at level 10
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS fighting_styles JSONB DEFAULT '[]';
+		
+		-- Quivering Palm tracking (v0.9.36)
+		-- Way of the Open Hand Monk level 17 feature
+		-- Stores the character_id of the creature currently under Quivering Palm effect
+		-- Only one creature can be quivering at a time
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS quivering_palm_target INT;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -26969,6 +26976,476 @@ func handleGMIntimidatingPresence(w http.ResponseWriter, r *http.Request) {
 			response["disadvantage"] = true
 		}
 		json.NewEncoder(w).Encode(response)
+	}
+}
+
+// handleGMQuiveringPalm godoc
+// @Summary Way of the Open Hand Monk uses Quivering Palm (level 17)
+// @Description When a Monk hits with an unarmed strike, they can spend 3 ki points to start imperceptible vibrations in the target. Use action="setup" to set this up. Later, the Monk can use their action to trigger the effect with action="trigger" - the target makes a CON save or drops to 0 HP (on success: 10d10 necrotic damage). Only one creature can be under Quivering Palm at a time. (v0.9.36)
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{monk_id=integer,target_id=integer,action=string} true "Quivering Palm request"
+// @Success 200 {object} map[string]interface{} "Quivering Palm result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not an Open Hand Monk"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/quivering-palm [post]
+func handleGMQuiveringPalm(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	_, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		MonkID   int    `json:"monk_id"`   // Character using Quivering Palm
+		TargetID int    `json:"target_id"` // Target creature ID
+		Action   string `json:"action"`    // "setup" (after hit, costs 3 ki) or "trigger" (costs action)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.MonkID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "monk_id required (the Way of the Open Hand Monk using Quivering Palm)",
+		})
+		return
+	}
+	
+	if req.Action == "" {
+		req.Action = "setup"
+	}
+	
+	if req.Action != "setup" && req.Action != "trigger" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_action",
+			"message": "action must be 'setup' (after hitting with unarmed strike, costs 3 ki) or 'trigger' (costs action)",
+		})
+		return
+	}
+	
+	// Verify monk is Way of the Open Hand level 17+
+	var monkName, className, subclass string
+	var monkLevel, wisScore int
+	var lobbyID int
+	var classResourcesJSON, classResourcesUsedJSON []byte
+	var currentTarget sql.NullInt64
+	var actionUsed bool
+	err = db.QueryRow(`
+		SELECT c.name, c.class, COALESCE(c.subclass, ''), c.level, c.wis, c.lobby_id, 
+		       COALESCE(c.class_resources, '{}'), COALESCE(c.class_resources_used, '{}'),
+		       c.quivering_palm_target, COALESCE(c.action_used, false)
+		FROM characters c
+		WHERE c.id = $1
+	`, req.MonkID).Scan(&monkName, &className, &subclass, &monkLevel, &wisScore, &lobbyID,
+		&classResourcesJSON, &classResourcesUsedJSON, &currentTarget, &actionUsed)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Monk character not found",
+		})
+		return
+	}
+	
+	if strings.ToLower(className) != "monk" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_monk",
+			"message": fmt.Sprintf("%s is a %s, not a Monk. Quivering Palm is a Way of the Open Hand Monk feature.", monkName, className),
+		})
+		return
+	}
+	
+	if strings.ToLower(subclass) != "open_hand" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_open_hand",
+			"message": fmt.Sprintf("%s is not a Way of the Open Hand Monk. Quivering Palm requires the Way of the Open Hand subclass.", monkName),
+		})
+		return
+	}
+	
+	if monkLevel < 17 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_level",
+			"message": fmt.Sprintf("%s is level %d. Quivering Palm requires Way of the Open Hand Monk level 17+.", monkName, monkLevel),
+		})
+		return
+	}
+	
+	// Parse ki resources
+	var classResources map[string]int
+	var classResourcesUsed map[string]int
+	json.Unmarshal(classResourcesJSON, &classResources)
+	json.Unmarshal(classResourcesUsedJSON, &classResourcesUsed)
+	
+	maxKi := monkLevel // Ki points = monk level
+	kiUsed := classResourcesUsed["ki"]
+	kiRemaining := maxKi - kiUsed
+	
+	if req.Action == "setup" {
+		// Setting up the quivering palm after a hit
+		if req.TargetID == 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_request",
+				"message": "target_id required for setup (the creature hit with an unarmed strike)",
+			})
+			return
+		}
+		
+		// Check ki cost (3 ki points)
+		if kiRemaining < 3 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "insufficient_ki",
+				"message": fmt.Sprintf("%s has %d ki points remaining but Quivering Palm requires 3 ki points.", monkName, kiRemaining),
+				"ki_remaining": kiRemaining,
+				"ki_required": 3,
+			})
+			return
+		}
+		
+		// Get target name
+		var targetName string
+		isMonster := req.TargetID < 0
+		
+		if isMonster {
+			var turnOrderJSON string
+			db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+			type CombatEntry struct {
+				Name string `json:"name"`
+				ID   int    `json:"id"`
+			}
+			var entries []CombatEntry
+			json.Unmarshal([]byte(turnOrderJSON), &entries)
+			for _, e := range entries {
+				if e.ID == req.TargetID {
+					targetName = e.Name
+					break
+				}
+			}
+			if targetName == "" {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "target_not_found",
+					"message": "Target monster not found in combat",
+				})
+				return
+			}
+		} else {
+			err = db.QueryRow(`SELECT name FROM characters WHERE id = $1`, req.TargetID).Scan(&targetName)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "target_not_found",
+					"message": "Target character not found",
+				})
+				return
+			}
+		}
+		
+		// Check if already has a different target (only one at a time)
+		if currentTarget.Valid && currentTarget.Int64 != int64(req.TargetID) {
+			var oldTargetName string
+			if currentTarget.Int64 < 0 {
+				var turnOrderJSON string
+				db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+				type CombatEntry struct {
+					Name string `json:"name"`
+					ID   int    `json:"id"`
+				}
+				var entries []CombatEntry
+				json.Unmarshal([]byte(turnOrderJSON), &entries)
+				for _, e := range entries {
+					if e.ID == int(currentTarget.Int64) {
+						oldTargetName = e.Name
+						break
+					}
+				}
+			} else {
+				db.QueryRow(`SELECT name FROM characters WHERE id = $1`, currentTarget.Int64).Scan(&oldTargetName)
+			}
+			if oldTargetName == "" {
+				oldTargetName = "a previous target"
+			}
+			
+			// Warn but allow - the vibrations in the old target fade
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"warning":    fmt.Sprintf("The vibrations in %s fade as %s focuses on %s.", oldTargetName, monkName, targetName),
+				"old_target": oldTargetName,
+			})
+		}
+		
+		// Spend ki and set target
+		classResourcesUsed["ki"] = kiUsed + 3
+		newUsedJSON, _ := json.Marshal(classResourcesUsed)
+		
+		db.Exec(`UPDATE characters SET class_resources_used = $1, quivering_palm_target = $2 WHERE id = $3`,
+			string(newUsedJSON), req.TargetID, req.MonkID)
+		
+		// Log the action
+		actionDesc := fmt.Sprintf("%s sets up Quivering Palm on %s", monkName, targetName)
+		actionResult := fmt.Sprintf("Spent 3 ki points. Imperceptible vibrations begin in %s's body. %s can use an action to end them at any time.", targetName, monkName)
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.MonkID, "quivering_palm_setup", actionDesc, actionResult)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"action":        "setup",
+			"monk":          monkName,
+			"target":        targetName,
+			"target_id":     req.TargetID,
+			"ki_spent":      3,
+			"ki_remaining":  kiRemaining - 3,
+			"message":       fmt.Sprintf("🔔 %s strikes %s and sets imperceptible vibrations thrumming through their body! (3 ki spent, %d remaining)", monkName, targetName, kiRemaining-3),
+			"rules_note":    "The vibrations are harmless unless you use your action to end them. You can trigger at any point before your next long rest. Use action='trigger' when ready.",
+			"trigger_effects": []string{
+				"Target makes CON save (DC = 8 + prof + WIS mod)",
+				"On FAILURE: Target drops to 0 HP",
+				"On SUCCESS: Target takes 10d10 necrotic damage",
+			},
+		})
+		return
+	}
+	
+	// Action = "trigger"
+	if !currentTarget.Valid {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_target",
+			"message": fmt.Sprintf("%s has no creature under the effect of Quivering Palm. Use action='setup' after hitting with an unarmed strike first.", monkName),
+		})
+		return
+	}
+	
+	// Check action economy
+	if actionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "action_used",
+			"message": fmt.Sprintf("%s has already used their action this turn. Triggering Quivering Palm requires an action.", monkName),
+		})
+		return
+	}
+	
+	targetID := int(currentTarget.Int64)
+	
+	// Get target info
+	var targetName string
+	var targetCon int
+	isMonster := targetID < 0
+	
+	if isMonster {
+		var turnOrderJSON string
+		db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+		type CombatEntry struct {
+			Name   string `json:"name"`
+			ID     int    `json:"id"`
+			ConMod int    `json:"con_mod"`
+			HP     int    `json:"hp"`
+		}
+		var entries []CombatEntry
+		json.Unmarshal([]byte(turnOrderJSON), &entries)
+		found := false
+		for _, e := range entries {
+			if e.ID == targetID {
+				targetName = e.Name
+				targetCon = 10 + e.ConMod*2 // Approximate CON score
+				found = true
+				break
+			}
+		}
+		if !found {
+			// Target no longer in combat - clear and allow new setup
+			db.Exec(`UPDATE characters SET quivering_palm_target = NULL WHERE id = $1`, req.MonkID)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "target_gone",
+				"message": "The target is no longer in combat. The vibrations have faded. Set up on a new target.",
+			})
+			return
+		}
+	} else {
+		var hp int
+		err = db.QueryRow(`SELECT name, con, hp FROM characters WHERE id = $1`, targetID).Scan(&targetName, &targetCon, &hp)
+		if err != nil {
+			db.Exec(`UPDATE characters SET quivering_palm_target = NULL WHERE id = $1`, req.MonkID)
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "target_gone",
+				"message": "The target no longer exists. The vibrations have faded.",
+			})
+			return
+		}
+	}
+	
+	// Calculate save DC (8 + proficiency + WIS modifier)
+	wisMod := modifier(wisScore)
+	profBonus := proficiencyBonus(monkLevel)
+	saveDC := 8 + profBonus + wisMod
+	
+	// Target makes CON save
+	conMod := modifier(targetCon)
+	_, roll := rollDice(1, 20)
+	total := roll + conMod
+	saved := total >= saveDC
+	
+	// Consume action
+	db.Exec(`UPDATE characters SET action_used = true, quivering_palm_target = NULL WHERE id = $1`, req.MonkID)
+	
+	if saved {
+		// Target takes 10d10 necrotic damage
+		_, totalDamage := rollDice(10, 10)
+		
+		// Apply damage
+		if isMonster {
+			var turnOrderJSON string
+			db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+			type CombatEntry struct {
+				Name       string `json:"name"`
+				ID         int    `json:"id"`
+				Initiative int    `json:"initiative"`
+				Type       string `json:"type"`
+				HP         int    `json:"hp"`
+				MaxHP      int    `json:"max_hp"`
+				AC         int    `json:"ac,omitempty"`
+				ConMod     int    `json:"con_mod,omitempty"`
+				WisMod     int    `json:"wis_mod,omitempty"`
+				Conditions string `json:"conditions,omitempty"`
+			}
+			var entries []CombatEntry
+			json.Unmarshal([]byte(turnOrderJSON), &entries)
+			for i, e := range entries {
+				if e.ID == targetID {
+					entries[i].HP = e.HP - totalDamage
+					if entries[i].HP < 0 {
+						entries[i].HP = 0
+					}
+					break
+				}
+			}
+			newTurnOrder, _ := json.Marshal(entries)
+			db.Exec("UPDATE combat_state SET turn_order = $1 WHERE lobby_id = $2", string(newTurnOrder), lobbyID)
+		} else {
+			db.Exec(`UPDATE characters SET hp = GREATEST(0, hp - $1) WHERE id = $2`, totalDamage, targetID)
+		}
+		
+		// Log the action
+		actionDesc := fmt.Sprintf("%s triggers Quivering Palm on %s", monkName, targetName)
+		actionResult := fmt.Sprintf("CON save: d20(%d) + %d = %d vs DC %d - SAVED! Takes %d necrotic damage instead of instant death.", roll, conMod, total, saveDC, totalDamage)
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.MonkID, "quivering_palm_trigger", actionDesc, actionResult)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"action":       "trigger",
+			"monk":         monkName,
+			"target":       targetName,
+			"target_id":    targetID,
+			"save_dc":      saveDC,
+			"roll":         roll,
+			"con_modifier": conMod,
+			"total":        total,
+			"saved":        true,
+			"damage":       totalDamage,
+			"damage_type":  "necrotic",
+			"action_used":  true,
+			"message":      fmt.Sprintf("🔔💥 %s ends the vibrations! %s convulses but survives! CON save: d20(%d) + %d = %d vs DC %d - SAVED! Takes %d necrotic damage!", monkName, targetName, roll, conMod, total, saveDC, totalDamage),
+			"rules_note":   "On a successful save, the creature takes 10d10 necrotic damage instead of dying.",
+		})
+	} else {
+		// Target drops to 0 HP!
+		if isMonster {
+			var turnOrderJSON string
+			db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+			type CombatEntry struct {
+				Name       string `json:"name"`
+				ID         int    `json:"id"`
+				Initiative int    `json:"initiative"`
+				Type       string `json:"type"`
+				HP         int    `json:"hp"`
+				MaxHP      int    `json:"max_hp"`
+				AC         int    `json:"ac,omitempty"`
+				ConMod     int    `json:"con_mod,omitempty"`
+				WisMod     int    `json:"wis_mod,omitempty"`
+				Conditions string `json:"conditions,omitempty"`
+			}
+			var entries []CombatEntry
+			json.Unmarshal([]byte(turnOrderJSON), &entries)
+			for i, e := range entries {
+				if e.ID == targetID {
+					entries[i].HP = 0
+					if entries[i].Conditions != "" {
+						entries[i].Conditions += ",unconscious"
+					} else {
+						entries[i].Conditions = "unconscious"
+					}
+					break
+				}
+			}
+			newTurnOrder, _ := json.Marshal(entries)
+			db.Exec("UPDATE combat_state SET turn_order = $1 WHERE lobby_id = $2", string(newTurnOrder), lobbyID)
+		} else {
+			// Character drops to 0, add unconscious condition
+			var condJSON []byte
+			db.QueryRow(`SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1`, targetID).Scan(&condJSON)
+			var conds []map[string]interface{}
+			json.Unmarshal(condJSON, &conds)
+			conds = append(conds, map[string]interface{}{
+				"name":   "unconscious",
+				"source": fmt.Sprintf("Quivering Palm from %s", monkName),
+			})
+			newCondJSON, _ := json.Marshal(conds)
+			db.Exec(`UPDATE characters SET hp = 0, conditions = $1 WHERE id = $2`, string(newCondJSON), targetID)
+		}
+		
+		// Log the action
+		actionDesc := fmt.Sprintf("%s triggers Quivering Palm on %s", monkName, targetName)
+		actionResult := fmt.Sprintf("CON save: d20(%d) + %d = %d vs DC %d - FAILED! %s DROPS TO 0 HP!", roll, conMod, total, saveDC, targetName)
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.MonkID, "quivering_palm_trigger", actionDesc, actionResult)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"action":       "trigger",
+			"monk":         monkName,
+			"target":       targetName,
+			"target_id":    targetID,
+			"save_dc":      saveDC,
+			"roll":         roll,
+			"con_modifier": conMod,
+			"total":        total,
+			"saved":        false,
+			"instant_death": true,
+			"action_used":  true,
+			"message":      fmt.Sprintf("🔔💀 %s ends the vibrations! %s's body ruptures from within! CON save: d20(%d) + %d = %d vs DC %d - FAILED! %s DROPS TO 0 HP!", monkName, targetName, roll, conMod, total, saveDC, targetName),
+			"rules_note":   "On a failed save, the creature is reduced to 0 hit points. For monsters, this typically means death. For player characters, they begin making death saving throws.",
+		})
 	}
 }
 

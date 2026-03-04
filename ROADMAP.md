@@ -677,6 +677,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] step_of_the_wind action: Dash/Disengage + doubled jump for 1 ki
     - [x] stunning_strike action: CON save (DC 8+prof+WIS) or stunned for 1 ki
     - [x] Open Hand Technique: impose effects on Flurry hits (prone/push/no reactions)
+    - [x] Quivering Palm (level 17): POST /api/gm/quivering-palm (v0.9.36)
+      - [x] Setup: after unarmed strike hit, spend 3 ki to set vibrations
+      - [x] Trigger: use action - CON save or drop to 0 HP (success: 10d10 necrotic)
+      - [x] Only one creature can be quivering at a time
     - [x] Monk Martial Arts damage die scales with level (d4→d6→d8→d10)
   - [x] Lore Bard Cutting Words (v0.9.3)
   - [x] Lore Bard Peerless Skill (v0.9.32)
@@ -1056,7 +1060,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.35**
+Current: **0.9.36**
 
 ---
 
