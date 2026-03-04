@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.38
+// @version 0.9.39
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.38"
+const version = "0.9.39"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -403,6 +403,7 @@ func main() {
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
 	http.HandleFunc("/api/gm/giant-killer", handleGMGiantKiller)
 	http.HandleFunc("/api/gm/retaliation", handleGMRetaliation)
+	http.HandleFunc("/api/gm/protection", handleGMProtection)
 	http.HandleFunc("/api/gm/intimidating-presence", handleGMIntimidatingPresence)
 	http.HandleFunc("/api/gm/quivering-palm", handleGMQuiveringPalm)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
@@ -15307,6 +15308,171 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 		if isRaging {
 			response["rage_bonus"] = rageBonus
 		}
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMProtection godoc
+// @Summary Use Protection Fighting Style reaction
+// @Description A character with the Protection fighting style uses their reaction to impose disadvantage on an attack against an adjacent ally. Requires a shield.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{protector_id=integer,target_name=string,attacker_name=string} true "Protection details"
+// @Success 200 {object} map[string]interface{} "Protection activated"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or requirements not met"
+// @Router /gm/protection [post]
+func handleGMProtection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		ProtectorID  int    `json:"protector_id"`   // Character using Protection
+		TargetName   string `json:"target_name"`    // Name of ally being protected (for logging)
+		AttackerName string `json:"attacker_name"`  // Name of attacking creature (for logging)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.ProtectorID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "protector_id required (the character using Protection)",
+		})
+		return
+	}
+	
+	// Get protector character info
+	var protectorName string
+	var protectorLobbyID int
+	var reactionUsed, equippedShield bool
+	var fightingStylesJSON []byte
+	err = db.QueryRow(`
+		SELECT name, lobby_id, 
+		       COALESCE(reaction_used, false), 
+		       COALESCE(equipped_shield, false),
+		       COALESCE(fighting_styles, '[]')
+		FROM characters WHERE id = $1
+	`, req.ProtectorID).Scan(&protectorName, &protectorLobbyID, &reactionUsed, &equippedShield, &fightingStylesJSON)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if protectorLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Check if character has Protection fighting style
+	var fightingStyles []string
+	json.Unmarshal(fightingStylesJSON, &fightingStyles)
+	hasProtection := false
+	for _, style := range fightingStyles {
+		if strings.ToLower(style) == "protection" {
+			hasProtection = true
+			break
+		}
+	}
+	
+	if !hasProtection {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_protection_style",
+			"message": fmt.Sprintf("%s does not have the Protection fighting style", protectorName),
+		})
+		return
+	}
+	
+	// Check if character has a shield equipped
+	if !equippedShield {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_shield",
+			"message": fmt.Sprintf("%s must be wielding a shield to use Protection", protectorName),
+		})
+		return
+	}
+	
+	// Check if reaction is available
+	if reactionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_reaction",
+			"message": fmt.Sprintf("%s has already used their reaction this round", protectorName),
+		})
+		return
+	}
+	
+	// Mark reaction as used
+	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.ProtectorID)
+	
+	// Build result text
+	targetText := "an ally"
+	if req.TargetName != "" {
+		targetText = req.TargetName
+	}
+	attackerText := "the attacker"
+	if req.AttackerName != "" {
+		attackerText = req.AttackerName
+	}
+	
+	resultText := fmt.Sprintf("🛡️ PROTECTION: %s interposes their shield, imposing disadvantage on %s's attack against %s!", 
+		protectorName, attackerText, targetText)
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Protection by %s to defend %s from %s", protectorName, targetText, attackerText)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'protection', $2, $3)
+	`, campaignID, actionDesc, resultText)
+	
+	response := map[string]interface{}{
+		"success":           true,
+		"protector":         protectorName,
+		"target":            targetText,
+		"attacker":          attackerText,
+		"disadvantage":      true,
+		"result":            resultText,
+		"reaction_used":     true,
+		"note":              fmt.Sprintf("%s's reaction is now expended for this round", protectorName),
+		"gm_instruction":    "The attack roll against " + targetText + " has DISADVANTAGE. Roll twice and take the lower result.",
 	}
 	
 	json.NewEncoder(w).Encode(response)

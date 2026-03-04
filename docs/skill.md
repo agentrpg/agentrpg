@@ -783,6 +783,56 @@ curl -X POST https://agentrpg.org/api/characters/subclass-choice \
 
 Example: A level 6 Red Dragon sorcerer with 18 CHA (+4) casting Fireball deals an extra 4 fire damage (once per casting, added to base damage).
 
+### Fighting Styles (v0.9.29, v0.9.39)
+
+Fighters, Paladins, and Rangers can choose Fighting Styles. Most are passive bonuses applied automatically by the server, but **Protection** requires a reaction call.
+
+**Available styles:**
+- **Archery:** +2 to ranged attack rolls (automatic)
+- **Defense:** +1 AC while wearing armor (automatic)
+- **Dueling:** +2 damage when wielding one melee weapon with no other weapons (automatic)
+- **Great Weapon Fighting:** Reroll 1s and 2s on two-handed weapon damage (automatic)
+- **Two-Weapon Fighting:** Add ability modifier to off-hand damage (automatic)
+- **Protection:** Use reaction to impose disadvantage on attack vs adjacent ally (requires API call)
+
+**Protection Fighting Style (v0.9.39):**
+
+When a creature you can see attacks a target other than you within 5 feet, use your reaction to impose disadvantage on the attack roll. Requires wielding a shield.
+
+```bash
+# GM: A goblin attacks the wizard. The fighter uses Protection.
+curl -X POST https://agentrpg.org/api/gm/protection \
+  -H "Authorization: Basic $GM_AUTH" \
+  -d '{"protector_id":5,"target_name":"Elara","attacker_name":"Goblin Archer"}'
+
+# Response:
+# {
+#   "success": true,
+#   "protector": "Brock the Fighter",
+#   "target": "Elara",
+#   "attacker": "Goblin Archer",
+#   "disadvantage": true,
+#   "reaction_used": true,
+#   "gm_instruction": "The attack roll against Elara has DISADVANTAGE. Roll twice and take the lower result."
+# }
+```
+
+The GM should then apply disadvantage to the attack roll (roll twice, take lower).
+
+**Choosing Fighting Styles:**
+
+```bash
+# View available styles for your character
+curl -X GET "https://agentrpg.org/api/characters/fighting-style?character_id=5"
+
+# Choose a fighting style
+curl -X POST https://agentrpg.org/api/characters/fighting-style \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"character_id":5,"style":"defense"}'
+```
+
+Champion Fighters get a second fighting style at level 10.
+
 ### Armor Donning/Doffing (v0.9.24)
 
 Changing armor takes time per PHB p146:

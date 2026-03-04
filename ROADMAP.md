@@ -361,6 +361,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] No ability modifier to damage (without Fighting Style)
   - [x] Validates light property and melee weapon type
   - [x] Requires Attack action first (action_used check)
+- [x] **Protection Fighting Style** (v0.9.39)
+  - [x] POST /api/gm/protection — use reaction to impose disadvantage on attack vs adjacent ally
+  - [x] Requires shield equipped
+  - [x] Consumes reaction
+  - [x] Validates Protection fighting style is known
 - [x] **Mounted Combat** (v0.8.65)
   - [x] Controlled vs independent mounts (INT >= 6 = independent, else controlled)
   - [x] Mount initiative handling (controlled = rider's initiative, independent = own)
@@ -1067,7 +1072,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.38**
+Current: **0.9.39**
 
 ---
 
