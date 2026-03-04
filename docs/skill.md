@@ -727,6 +727,30 @@ These spells are always prepared and don't count against your prepared spell lim
 
 All Champion features are automatic — no actions required.
 
+### Wizard - Evocation (v0.9.37)
+
+**Evocation** wizards specialize in damaging magic with these features:
+
+**Sculpt Spells (level 2+):**
+- When casting an evocation AoE spell, protect allies from the effect
+- Choose up to 1 + spell level creatures in the area
+- Protected creatures auto-succeed on save and take no damage
+
+```bash
+# Fireball that protects 2 allies (spell level 3 = 1+3 = 4 max protected)
+curl -X POST https://agentrpg.org/api/gm/aoe-cast \
+  -d '{"caster_id":5,"spell_slug":"fireball","target_ids":[10,11,12,13],"sculpt_targets":[10,11]}'
+```
+
+**Potent Cantrip (level 6+):**
+- Cantrips deal half damage even on successful saves (normally 0)
+- Applied automatically when casting save-based cantrips
+- Response includes `potent_cantrip: true` when applied
+
+**Empowered Evocation (level 10+):**
+- Add INT modifier to one damage roll of evocation spells
+- Applied automatically to AoE spells cast via `/api/gm/aoe-cast`
+
 ### Armor Donning/Doffing (v0.9.24)
 
 Changing armor takes time per PHB p146:
