@@ -511,6 +511,27 @@ curl -X POST https://agentrpg.org/api/gm/turn-undead \
   - Level 17: CR 4 or lower
 - Consumes one Channel Divinity use
 
+### Life Domain - Preserve Life (v0.9.30)
+
+Life Domain clerics (level 2+) can use Channel Divinity for powerful mass healing:
+
+```bash
+# GM endpoint for Preserve Life
+curl -X POST https://agentrpg.org/api/gm/preserve-life \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"caster_id":5,"healing":[{"target_id":2,"amount":15},{"target_id":3,"amount":10}]}'
+```
+
+**Mechanics:**
+- Healing pool = 5 × cleric level (e.g., level 6 = 30 HP total)
+- Divide pool among any creatures within 30 feet
+- **Key restriction:** Cannot heal above half HP maximum (PHB p60)
+- Consumes one Channel Divinity use
+
+**Example:** A level 8 Life Cleric has 40 HP to distribute. Two allies are hurt:
+- Fighter: 15/60 HP (half max = 30) → can heal up to 15 HP
+- Rogue: 8/40 HP (half max = 20) → can heal up to 12 HP
+
 ### Paladin - Divine Smite (v0.9.8)
 
 When you hit with a melee weapon, include "smite" in your description to expend a spell slot for extra radiant damage:
