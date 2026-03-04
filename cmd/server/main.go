@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.39
+// @version 0.9.40
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -22505,6 +22505,86 @@ func resolveAction(action, description string, charID int) string {
 		
 		return fmt.Sprintf("Readied action: When '%s' → %s (%s). Use your REACTION to trigger when the condition occurs, or it will be lost at the start of your next turn.", 
 			trigger, readyAction, readyDesc)
+
+	case "search":
+		// v0.9.40: Search action - roll Perception (WIS) or Investigation (INT) check
+		// Parse skill from description, default to Perception
+		searchDescLower := strings.ToLower(description)
+		
+		searchSkill := "perception"
+		searchAbilityMod := modifier(wis)
+		searchAbilityName := "WIS"
+		
+		// Check for Investigation keywords
+		if strings.Contains(searchDescLower, "investigate") || strings.Contains(searchDescLower, "investigation") ||
+			strings.Contains(searchDescLower, "deduce") || strings.Contains(searchDescLower, "analyze") ||
+			strings.Contains(searchDescLower, "examine closely") || strings.Contains(searchDescLower, "study") ||
+			strings.Contains(searchDescLower, "look for clues") {
+			searchSkill = "investigation"
+			searchAbilityMod = modifier(intl)
+			searchAbilityName = "INT"
+		}
+		
+		// Check proficiency
+		var searchSkillProfs string
+		db.QueryRow("SELECT COALESCE(skill_proficiencies, '') FROM characters WHERE id = $1", charID).Scan(&searchSkillProfs)
+		
+		searchProfBonus := 0
+		searchIsProficient := false
+		if strings.Contains(strings.ToLower(searchSkillProfs), searchSkill) {
+			searchIsProficient = true
+			searchProfBonus = proficiencyBonus(level)
+		}
+		
+		// Check expertise (Rogues/Bards)
+		var searchExpertiseStr string
+		db.QueryRow("SELECT COALESCE(expertise, '') FROM characters WHERE id = $1", charID).Scan(&searchExpertiseStr)
+		searchHasExpertise := false
+		if searchIsProficient && strings.Contains(strings.ToLower(searchExpertiseStr), searchSkill) {
+			searchHasExpertise = true
+			searchProfBonus = proficiencyBonus(level) * 2
+		}
+		
+		// v0.9.21: Jack of All Trades (Bard level 2+) - add half proficiency to unproficient checks
+		searchJoATNote := ""
+		if !searchIsProficient && strings.ToLower(class) == "bard" && level >= 2 {
+			searchProfBonus = proficiencyBonus(level) / 2
+			searchJoATNote = " (Jack of All Trades)"
+		}
+		
+		// v0.9.9: Remarkable Athlete (Champion Fighter level 7+) - half prof for unproficient STR/DEX/CON checks
+		// Investigation is INT, Perception is WIS - neither benefits from Remarkable Athlete
+		
+		// Check for Reliable Talent (Rogue 11+)
+		searchHasReliableTalent := searchIsProficient && strings.ToLower(class) == "rogue" && level >= 11
+		
+		// Roll the check
+		searchRoll := rollDie(20)
+		searchOriginalRoll := searchRoll
+		
+		// Reliable Talent: treat rolls of 9 or lower as 10
+		searchReliableTalentNote := ""
+		if searchHasReliableTalent && searchRoll <= 9 {
+			searchRoll = 10
+			searchReliableTalentNote = fmt.Sprintf(" (Reliable Talent: %d→10)", searchOriginalRoll)
+		}
+		
+		searchTotal := searchRoll + searchAbilityMod + searchProfBonus
+		
+		// Build response
+		searchProfNote := ""
+		if searchHasExpertise {
+			searchProfNote = " (expertise)"
+		} else if searchIsProficient {
+			searchProfNote = " (proficient)"
+		} else if searchJoATNote != "" {
+			searchProfNote = searchJoATNote
+		}
+		
+		searchSkillTitle := strings.ToUpper(searchSkill[:1]) + searchSkill[1:]
+		return fmt.Sprintf("🔍 Search (%s/%s)%s: %d (d20: %d%s + %d %s + %d prof). %s",
+			searchSkillTitle, searchAbilityName, searchProfNote, searchTotal, searchRoll, searchReliableTalentNote, 
+			searchAbilityMod, searchAbilityName, searchProfBonus, description)
 	
 	default:
 		return fmt.Sprintf("Action: %s", description)
