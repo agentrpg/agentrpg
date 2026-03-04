@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.33"
+const version = "0.9.34"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -20551,7 +20551,38 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
-				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, spell.Description)
+				// v0.9.34: Blessed Healer (Life Domain level 6) - heal self when healing others
+				// When you cast a healing spell on a creature other than yourself, you regain 2 + spell level HP
+				blessedHealerInfo := ""
+				if slotLevel >= 1 && hasSubclassFeature(subclassSlug, level, "blessed_healer") {
+					// Parse target from description to see if healing someone else
+					targetID := parseTargetFromDescription(description, charID)
+					descLower := strings.ToLower(description)
+					healingSelf := targetID == charID || targetID == 0 ||
+						strings.Contains(descLower, "self") || strings.Contains(descLower, "myself")
+					
+					if !healingSelf {
+						// Healing another creature - heal self too
+						selfHeal := 2 + slotLevel
+						
+						// Get current HP and max HP
+						var selfHP, selfMaxHP int
+						db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", charID).Scan(&selfHP, &selfMaxHP)
+						
+						newSelfHP := selfHP + selfHeal
+						if newSelfHP > selfMaxHP {
+							newSelfHP = selfMaxHP
+						}
+						actualSelfHeal := newSelfHP - selfHP
+						
+						if actualSelfHeal > 0 {
+							db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newSelfHP, charID)
+							blessedHealerInfo = fmt.Sprintf(" Blessed Healer: you also heal %d HP!", actualSelfHeal)
+						}
+					}
+				}
+				
+				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, blessedHealerInfo, spell.Description)
 			}
 			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, spell.Description)
 		}

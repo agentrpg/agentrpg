@@ -600,6 +600,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Fighter (Champion) level 18+ feature
   - [x] Life Domain's Disciple of Life (+2+spell_level healing, v0.8.71)
   - [x] Life Domain's Supreme Healing (max dice on healing spells, v0.8.71)
+  - [x] Life Domain's Blessed Healer (heal self when healing others at level 6+, v0.9.34)
   - [x] Life Domain's Divine Strike (1d8 radiant at level 8, 2d8 at level 14, v0.9.1)
   - [x] Life Domain's Preserve Life Channel Divinity (v0.9.30)
     - [x] POST /api/gm/preserve-life — mass healing within 30 feet
