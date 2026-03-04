@@ -611,8 +611,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Draconic Sorcerer's Draconic Resilience (v0.8.79)
     - [x] +1 HP per sorcerer level (applied when choosing subclass and on level-up)
     - [x] Natural AC 13 + DEX when unarmored (affects character sheet, equip/unequip armor)
-  - [x] Evocation Wizard features (v0.8.81)
+  - [x] Evocation Wizard features (v0.8.81, v0.9.37)
     - [x] Sculpt Spells: protect 1+spell_level allies from evocation AoE (auto-succeed, no damage)
+    - [x] Potent Cantrip: cantrips deal half damage on successful save (level 6+, v0.9.37)
     - [x] Empowered Evocation: add INT mod to evocation spell damage (level 10+)
   - [x] Circle of the Land Druid Circle Spells (v0.9.23)
     - [x] Choose land type via POST /api/characters/subclass-choice (circle_land feature)
@@ -1060,7 +1061,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.36**
+Current: **0.9.37**
 
 ---
 

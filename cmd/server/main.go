@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.36
+// @version 0.9.37
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.36"
+const version = "0.9.37"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -15512,6 +15512,22 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.37: Check for Potent Cantrip (Evocation Wizard level 6+)
+	// Potent Cantrip: when a creature succeeds on save against your cantrip, they take half damage
+	hasPotentCantrip := false
+	if req.CasterID > 0 && spellLevel == 0 {
+		// Potent Cantrip only applies to cantrips (level 0 spells)
+		var subclass sql.NullString
+		var casterLevel int
+		db.QueryRow(`SELECT COALESCE(subclass, ''), level FROM characters WHERE id = $1`, req.CasterID).Scan(&subclass, &casterLevel)
+		
+		if subclass.Valid && subclass.String != "" {
+			if hasSubclassFeature(subclass.String, casterLevel, "potent_cantrip") {
+				hasPotentCantrip = true
+			}
+		}
+	}
+	
 	// Validate sculpt targets if provided
 	sculptTargetSet := make(map[int]bool)
 	if hasSculptSpells && len(req.SculptTargets) > 0 {
@@ -15592,8 +15608,10 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		
 		// Calculate damage (half on save for most AoE spells)
 		// v0.9.6: Check for Evasion (Monk 7+, Rogue 7+) - DEX saves only
+		// v0.9.37: Potent Cantrip - cantrips do half damage on successful save
 		damage := baseDamage
 		evasionApplied := false
+		potentCantripApplied := false
 		isDEXSave := strings.ToUpper(savingThrow) == "DEX"
 		targetHasEvasion := targetID > 0 && isDEXSave && hasEvasion(targetID)
 		
@@ -15603,8 +15621,16 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			} else if targetHasEvasion {
 				damage = 0 // Evasion: no damage on successful DEX save
 				evasionApplied = true
+			} else if spellLevel == 0 {
+				// Cantrips: normally 0 damage on save, but Potent Cantrip gives half
+				if hasPotentCantrip {
+					damage = baseDamage / 2
+					potentCantripApplied = true
+				} else {
+					damage = 0 // Cantrips do no damage on successful save
+				}
 			} else {
-				damage = baseDamage / 2
+				damage = baseDamage / 2 // Most AoE spells do half on save
 			}
 		} else if targetHasEvasion {
 			// Evasion: half damage on failed DEX save (instead of full)
@@ -15637,6 +15663,12 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			} else {
 				result["evasion_info"] = "Evasion: Failed DEX save - took half damage instead of full"
 			}
+		}
+		
+		// Add Potent Cantrip info to result (v0.9.37)
+		if potentCantripApplied {
+			result["potent_cantrip"] = true
+			result["potent_cantrip_info"] = "Potent Cantrip: Succeeded on save against cantrip - took half damage instead of none"
 		}
 		
 		// Apply damage to characters or monsters
