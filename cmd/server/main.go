@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.31
+// @version 0.9.33
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.32"
+const version = "0.9.33"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -403,6 +403,7 @@ func main() {
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
 	http.HandleFunc("/api/gm/giant-killer", handleGMGiantKiller)
 	http.HandleFunc("/api/gm/retaliation", handleGMRetaliation)
+	http.HandleFunc("/api/gm/intimidating-presence", handleGMIntimidatingPresence)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
 	http.HandleFunc("/api/gm/inspiration", handleGMInspiration)
 	http.HandleFunc("/api/gm/legendary-resistance", handleGMLegendaryResistance)
@@ -26362,6 +26363,502 @@ func handleGMFacing(w http.ResponseWriter, r *http.Request) {
 			"valid_directions":   []string{"N", "NE", "E", "SE", "S", "SW", "W", "NW"},
 			"rules_note":         "Facing (DMG p252): Enable to track creature facing. Rear attacks get advantage. Shield only protects from frontal arc.",
 		})
+	}
+}
+
+// handleGMIntimidatingPresence godoc
+// @Summary Berserker Barbarian uses Intimidating Presence (level 10)
+// @Description A Berserker Barbarian uses their action to frighten someone with their menacing presence. Choose one creature within 30 feet. The creature must succeed on a Wisdom saving throw (DC = 8 + proficiency + CHA modifier) or be frightened of the barbarian until the end of their next turn. On subsequent turns, the frightened creature can use its action to make a new saving throw to end the effect. (v0.9.33)
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{barbarian_id=integer,target_id=integer} true "Intimidating Presence request"
+// @Success 200 {object} map[string]interface{} "Intimidating Presence result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not a Berserker Barbarian"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/intimidating-presence [post]
+func handleGMIntimidatingPresence(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		BarbarianID int  `json:"barbarian_id"` // Character using Intimidating Presence
+		TargetID    int  `json:"target_id"`    // Target creature ID (positive = character, negative = monster combatant)
+		Retry       bool `json:"retry"`        // True if this is the frightened creature's action to retry the save
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.BarbarianID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "barbarian_id required (the Berserker Barbarian using Intimidating Presence)",
+		})
+		return
+	}
+	
+	if req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_id required (creature within 30 feet to frighten)",
+		})
+		return
+	}
+	
+	// Verify barbarian is a Berserker level 10+
+	var barbarianName, className, subclass string
+	var barbarianLevel, chaScore int
+	var lobbyID int
+	var actionUsed bool
+	err = db.QueryRow(`
+		SELECT c.name, c.class, COALESCE(c.subclass, ''), c.level, c.cha, c.lobby_id, COALESCE(c.action_used, false)
+		FROM characters c
+		WHERE c.id = $1
+	`, req.BarbarianID).Scan(&barbarianName, &className, &subclass, &barbarianLevel, &chaScore, &lobbyID, &actionUsed)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Barbarian character not found",
+		})
+		return
+	}
+	
+	if strings.ToLower(className) != "barbarian" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_barbarian",
+			"message": fmt.Sprintf("%s is a %s, not a Barbarian. Intimidating Presence is a Berserker Barbarian feature.", barbarianName, className),
+		})
+		return
+	}
+	
+	if strings.ToLower(subclass) != "berserker" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_berserker",
+			"message": fmt.Sprintf("%s is not a Berserker. Intimidating Presence requires the Berserker subclass.", barbarianName),
+		})
+		return
+	}
+	
+	if barbarianLevel < 10 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_level",
+			"message": fmt.Sprintf("%s is level %d. Intimidating Presence requires Berserker level 10+.", barbarianName, barbarianLevel),
+		})
+		return
+	}
+	
+	// Verify agent is GM of this campaign
+	var dmID int
+	err = db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+	if err != nil || dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You must be the GM of this campaign to use this endpoint",
+		})
+		return
+	}
+	
+	// Handle retry case (frightened creature uses action to retry save)
+	if req.Retry {
+		// The target is the frightened creature retrying the save
+		var targetName string
+		var targetWis int
+		var targetConditions string
+		isMonster := req.TargetID < 0
+		
+		if isMonster {
+			// Get monster from turn order
+			var turnOrderJSON string
+			db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+			type CombatEntry struct {
+				Name       string `json:"name"`
+				ID         int    `json:"id"`
+				WisMod     int    `json:"wis_mod"`
+				Conditions string `json:"conditions"`
+			}
+			var entries []CombatEntry
+			json.Unmarshal([]byte(turnOrderJSON), &entries)
+			for _, e := range entries {
+				if e.ID == req.TargetID {
+					targetName = e.Name
+					targetWis = 10 + e.WisMod*2 // Approximate WIS score
+					targetConditions = e.Conditions
+					break
+				}
+			}
+		} else {
+			var condJSON []byte
+			err = db.QueryRow(`SELECT name, wis, COALESCE(conditions, '[]') FROM characters WHERE id = $1`, req.TargetID).Scan(&targetName, &targetWis, &condJSON)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "target_not_found",
+					"message": "Target character not found",
+				})
+				return
+			}
+			var conds []map[string]interface{}
+			json.Unmarshal(condJSON, &conds)
+			for _, c := range conds {
+				if name, ok := c["name"].(string); ok {
+					if targetConditions != "" {
+						targetConditions += ","
+					}
+					targetConditions += name
+				}
+			}
+		}
+		
+		// Check if actually frightened of this barbarian
+		frightenedCond := fmt.Sprintf("frightened:%d", req.BarbarianID)
+		if !strings.Contains(targetConditions, frightenedCond) && !strings.Contains(targetConditions, "frightened") {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_frightened",
+				"message": fmt.Sprintf("%s is not frightened of %s. No retry needed.", targetName, barbarianName),
+			})
+			return
+		}
+		
+		// Calculate save DC
+		chaMod := modifier(chaScore)
+		profBonus := proficiencyBonus(barbarianLevel)
+		saveDC := 8 + profBonus + chaMod
+		
+		// Target makes WIS save
+		wisMod := modifier(targetWis)
+		_, roll := rollDice(1, 20)
+		total := roll + wisMod
+		saved := total >= saveDC
+		
+		if saved {
+			// Remove frightened condition
+			if isMonster {
+				// Remove from turn_order conditions
+				var turnOrderJSON string
+				db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+				type CombatEntry struct {
+					Name       string `json:"name"`
+					ID         int    `json:"id"`
+					Initiative int    `json:"initiative"`
+					Type       string `json:"type"`
+					HP         int    `json:"hp,omitempty"`
+					MaxHP      int    `json:"max_hp,omitempty"`
+					AC         int    `json:"ac,omitempty"`
+					WisMod     int    `json:"wis_mod,omitempty"`
+					Conditions string `json:"conditions,omitempty"`
+				}
+				var entries []CombatEntry
+				json.Unmarshal([]byte(turnOrderJSON), &entries)
+				for i, e := range entries {
+					if e.ID == req.TargetID {
+						// Remove frightened condition
+						conds := strings.Split(e.Conditions, ",")
+						var newConds []string
+						for _, c := range conds {
+							c = strings.TrimSpace(c)
+							if c != "" && c != "frightened" && !strings.HasPrefix(c, "frightened:") {
+								newConds = append(newConds, c)
+							}
+						}
+						entries[i].Conditions = strings.Join(newConds, ",")
+						break
+					}
+				}
+				newTurnOrder, _ := json.Marshal(entries)
+				db.Exec("UPDATE combat_state SET turn_order = $1 WHERE lobby_id = $2", string(newTurnOrder), lobbyID)
+			} else {
+				// Remove from character conditions
+				var condJSON []byte
+				db.QueryRow(`SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1`, req.TargetID).Scan(&condJSON)
+				var conds []map[string]interface{}
+				json.Unmarshal(condJSON, &conds)
+				var newConds []map[string]interface{}
+				for _, c := range conds {
+					if name, ok := c["name"].(string); ok {
+						if name != "frightened" && !strings.HasPrefix(name, "frightened:") {
+							newConds = append(newConds, c)
+						}
+					}
+				}
+				newCondJSON, _ := json.Marshal(newConds)
+				db.Exec(`UPDATE characters SET conditions = $1 WHERE id = $2`, string(newCondJSON), req.TargetID)
+			}
+			
+			// Log the action
+			actionDesc := fmt.Sprintf("%s overcomes Intimidating Presence", targetName)
+			actionResult := fmt.Sprintf("WIS save: d20(%d) + %d = %d vs DC %d - SUCCESS! No longer frightened of %s", roll, wisMod, total, saveDC, barbarianName)
+			db.Exec(`
+				INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+				VALUES ($1, $2, $3, $4, $5)
+			`, lobbyID, req.TargetID, "intimidating_presence_resist", actionDesc, actionResult)
+			
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      true,
+				"target":       targetName,
+				"target_id":    req.TargetID,
+				"save_dc":      saveDC,
+				"roll":         roll,
+				"wis_modifier": wisMod,
+				"total":        total,
+				"saved":        true,
+				"frightened":   false,
+				"message":      fmt.Sprintf("💪 %s steels their resolve! WIS save: d20(%d) + %d = %d vs DC %d - SUCCESS! They are no longer frightened of %s.", targetName, roll, wisMod, total, saveDC, barbarianName),
+				"rules_note":   "Intimidating Presence ends when the frightened creature succeeds on their save (using their action).",
+			})
+		} else {
+			// Still frightened
+			actionDesc := fmt.Sprintf("%s fails to resist Intimidating Presence", targetName)
+			actionResult := fmt.Sprintf("WIS save: d20(%d) + %d = %d vs DC %d - FAILED! Still frightened of %s", roll, wisMod, total, saveDC, barbarianName)
+			db.Exec(`
+				INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+				VALUES ($1, $2, $3, $4, $5)
+			`, lobbyID, req.TargetID, "intimidating_presence_resist", actionDesc, actionResult)
+			
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      true,
+				"target":       targetName,
+				"target_id":    req.TargetID,
+				"save_dc":      saveDC,
+				"roll":         roll,
+				"wis_modifier": wisMod,
+				"total":        total,
+				"saved":        false,
+				"frightened":   true,
+				"message":      fmt.Sprintf("😰 %s cannot shake the fear! WIS save: d20(%d) + %d = %d vs DC %d - FAILED! They remain frightened of %s until the end of their next turn.", targetName, roll, wisMod, total, saveDC, barbarianName),
+				"rules_note":   "The frightened creature can use their action on subsequent turns to retry the save.",
+			})
+		}
+		return
+	}
+	
+	// Initial use of Intimidating Presence - check action economy
+	if actionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "action_used",
+			"message": fmt.Sprintf("%s has already used their action this turn. Intimidating Presence requires an action.", barbarianName),
+		})
+		return
+	}
+	
+	// Get target info
+	var targetName string
+	var targetWis int
+	var targetConditions string
+	isMonster := req.TargetID < 0
+	
+	if isMonster {
+		// Get monster from turn order
+		var turnOrderJSON string
+		db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+		type CombatEntry struct {
+			Name       string `json:"name"`
+			ID         int    `json:"id"`
+			WisMod     int    `json:"wis_mod"`
+			Conditions string `json:"conditions"`
+		}
+		var entries []CombatEntry
+		json.Unmarshal([]byte(turnOrderJSON), &entries)
+		found := false
+		for _, e := range entries {
+			if e.ID == req.TargetID {
+				targetName = e.Name
+				targetWis = 10 + e.WisMod*2 // Approximate WIS score
+				targetConditions = e.Conditions
+				found = true
+				break
+			}
+		}
+		if !found {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "target_not_found",
+				"message": "Target monster not found in combat",
+			})
+			return
+		}
+	} else {
+		var condJSON []byte
+		err = db.QueryRow(`SELECT name, wis, COALESCE(conditions, '[]') FROM characters WHERE id = $1`, req.TargetID).Scan(&targetName, &targetWis, &condJSON)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "target_not_found",
+				"message": "Target character not found",
+			})
+			return
+		}
+		var conds []map[string]interface{}
+		json.Unmarshal(condJSON, &conds)
+		for _, c := range conds {
+			if name, ok := c["name"].(string); ok {
+				if targetConditions != "" {
+					targetConditions += ","
+				}
+				targetConditions += name
+			}
+		}
+	}
+	
+	// Calculate save DC (8 + proficiency + CHA modifier)
+	chaMod := modifier(chaScore)
+	profBonus := proficiencyBonus(barbarianLevel)
+	saveDC := 8 + profBonus + chaMod
+	
+	// Target makes WIS save
+	wisMod := modifier(targetWis)
+	_, roll := rollDice(1, 20)
+	total := roll + wisMod
+	
+	// Check for save disadvantage (frightened already)
+	hasDisadvantage := false
+	if strings.Contains(targetConditions, "frightened") {
+		hasDisadvantage = true
+		_, roll2 := rollDice(1, 20)
+		if roll2 < roll {
+			roll = roll2
+		}
+		total = roll + wisMod
+	}
+	
+	saved := total >= saveDC
+	
+	// Consume action
+	db.Exec(`UPDATE characters SET action_used = true WHERE id = $1`, req.BarbarianID)
+	
+	if saved {
+		// Target resists
+		actionDesc := fmt.Sprintf("%s uses Intimidating Presence on %s", barbarianName, targetName)
+		actionResult := fmt.Sprintf("WIS save: d20(%d) + %d = %d vs DC %d - Resisted!", roll, wisMod, total, saveDC)
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.BarbarianID, "intimidating_presence", actionDesc, actionResult)
+		
+		response := map[string]interface{}{
+			"success":      true,
+			"barbarian":    barbarianName,
+			"target":       targetName,
+			"target_id":    req.TargetID,
+			"save_dc":      saveDC,
+			"roll":         roll,
+			"wis_modifier": wisMod,
+			"total":        total,
+			"saved":        true,
+			"frightened":   false,
+			"action_used":  true,
+			"message":      fmt.Sprintf("😤 %s glares menacingly at %s, but they stand firm! WIS save: d20(%d) + %d = %d vs DC %d - RESISTED!", barbarianName, targetName, roll, wisMod, total, saveDC),
+		}
+		if hasDisadvantage {
+			response["disadvantage"] = true
+			response["message"] = fmt.Sprintf("😤 %s glares menacingly at %s (already frightened, disadvantage), but they stand firm! WIS save: d20(%d) + %d = %d vs DC %d - RESISTED!", barbarianName, targetName, roll, wisMod, total, saveDC)
+		}
+		json.NewEncoder(w).Encode(response)
+	} else {
+		// Target is frightened
+		frightenedCond := fmt.Sprintf("frightened:%d", req.BarbarianID)
+		
+		if isMonster {
+			// Add to turn_order conditions
+			var turnOrderJSON string
+			db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&turnOrderJSON)
+			type CombatEntry struct {
+				Name       string `json:"name"`
+				ID         int    `json:"id"`
+				Initiative int    `json:"initiative"`
+				Type       string `json:"type"`
+				HP         int    `json:"hp,omitempty"`
+				MaxHP      int    `json:"max_hp,omitempty"`
+				AC         int    `json:"ac,omitempty"`
+				WisMod     int    `json:"wis_mod,omitempty"`
+				Conditions string `json:"conditions,omitempty"`
+			}
+			var entries []CombatEntry
+			json.Unmarshal([]byte(turnOrderJSON), &entries)
+			for i, e := range entries {
+				if e.ID == req.TargetID {
+					if e.Conditions != "" {
+						entries[i].Conditions = e.Conditions + "," + frightenedCond
+					} else {
+						entries[i].Conditions = frightenedCond
+					}
+					break
+				}
+			}
+			newTurnOrder, _ := json.Marshal(entries)
+			db.Exec("UPDATE combat_state SET turn_order = $1 WHERE lobby_id = $2", string(newTurnOrder), lobbyID)
+		} else {
+			// Add to character conditions
+			var condJSON []byte
+			db.QueryRow(`SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1`, req.TargetID).Scan(&condJSON)
+			var conds []map[string]interface{}
+			json.Unmarshal(condJSON, &conds)
+			conds = append(conds, map[string]interface{}{
+				"name":     frightenedCond,
+				"duration": "end_of_barbarian_next_turn",
+				"source":   fmt.Sprintf("Intimidating Presence from %s", barbarianName),
+			})
+			newCondJSON, _ := json.Marshal(conds)
+			db.Exec(`UPDATE characters SET conditions = $1 WHERE id = $2`, string(newCondJSON), req.TargetID)
+		}
+		
+		// Log the action
+		actionDesc := fmt.Sprintf("%s uses Intimidating Presence on %s", barbarianName, targetName)
+		actionResult := fmt.Sprintf("WIS save: d20(%d) + %d = %d vs DC %d - FRIGHTENED until end of %s's next turn!", roll, wisMod, total, saveDC, barbarianName)
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, $3, $4, $5)
+		`, lobbyID, req.BarbarianID, "intimidating_presence", actionDesc, actionResult)
+		
+		response := map[string]interface{}{
+			"success":        true,
+			"barbarian":      barbarianName,
+			"target":         targetName,
+			"target_id":      req.TargetID,
+			"save_dc":        saveDC,
+			"roll":           roll,
+			"wis_modifier":   wisMod,
+			"total":          total,
+			"saved":          false,
+			"frightened":     true,
+			"condition":      frightenedCond,
+			"duration":       "Until end of barbarian's next turn",
+			"action_used":    true,
+			"message":        fmt.Sprintf("😱 %s's fearsome presence terrifies %s! WIS save: d20(%d) + %d = %d vs DC %d - FAILED! %s is FRIGHTENED of %s until the end of their next turn.", barbarianName, targetName, roll, wisMod, total, saveDC, targetName, barbarianName),
+			"frightened_effects": []string{
+				"Disadvantage on ability checks and attack rolls while the source of fear is in line of sight",
+				"Cannot willingly move closer to the source of fear",
+			},
+			"rules_note": "On subsequent turns, the frightened creature can use their action to retry the WIS save. Call this endpoint with retry=true for the target to attempt again.",
+		}
+		if hasDisadvantage {
+			response["disadvantage"] = true
+		}
+		json.NewEncoder(w).Encode(response)
 	}
 }
 
