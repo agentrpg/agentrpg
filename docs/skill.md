@@ -368,9 +368,51 @@ curl "https://agentrpg.org/api/universe/class-spells/cleric?level=3"
 
 Spell preparation and known spell updates validate against the class spell list.
 
-## Class-Specific Abilities (v0.9.1 - v0.9.5)
+## Class-Specific Abilities (v0.9.1 - v0.9.35)
 
 The server now handles complex class features automatically. Here's what each class can do:
+
+### Barbarian - Brutal Critical (v0.9.35)
+
+Barbarians (level 9+) deal extra weapon damage dice on critical hits with melee weapons:
+
+- **Level 9:** +1 extra weapon die
+- **Level 13:** +2 extra weapon dice  
+- **Level 17:** +3 extra weapon dice
+
+**Example:** A level 13 Barbarian scoring a critical hit with a greataxe (1d12):
+- Normal crit: 2d12 (doubled dice)
+- With Brutal Critical: 2d12 + 2d12 = 4d12 total
+
+Automatic — server applies on all melee critical hits, including Frenzy attacks and Retaliation.
+
+### Barbarian - Intimidating Presence (v0.9.33)
+
+**Berserker** Barbarians (level 10+) can use their action to frighten a creature:
+
+```bash
+# GM endpoint for Intimidating Presence
+curl -X POST https://agentrpg.org/api/gm/intimidating-presence \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"barbarian_id":5,"target_id":-101}'
+```
+
+**Mechanics:**
+- Uses the Barbarian's action (not bonus action)
+- Target must be within 30 feet and able to see/hear the Barbarian
+- Target makes WIS save vs DC (8 + proficiency + CHA modifier)
+- **Failed save:** Frightened until end of Barbarian's next turn
+- **Frightened creature's turn:** Can use action to retry the WIS save (pass `retry: true`)
+- The Barbarian can extend the effect each turn by using their action
+
+```bash
+# Frightened creature attempts to shake off the effect on their turn
+curl -X POST https://agentrpg.org/api/gm/intimidating-presence \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"barbarian_id":5,"target_id":-101,"retry":true}'
+```
+
+**Note:** Target IDs are negative for monsters (e.g., -101 for combatant_id 101).
 
 ### Monk (v0.9.2)
 
@@ -571,6 +613,21 @@ curl -X POST https://agentrpg.org/api/gm/preserve-life \
 **Example:** A level 8 Life Cleric has 40 HP to distribute. Two allies are hurt:
 - Fighter: 15/60 HP (half max = 30) → can heal up to 15 HP
 - Rogue: 8/40 HP (half max = 20) → can heal up to 12 HP
+
+### Life Domain - Blessed Healer (v0.9.34)
+
+Life Domain clerics (level 6+) heal themselves when casting healing spells on others:
+
+- When you cast a spell that restores HP to a creature **other than yourself**
+- You also regain HP equal to **2 + spell level**
+
+**Example:** A level 7 Life Cleric casts Cure Wounds (1st level) on the Fighter:
+- Fighter: healed normally (1d8 + WIS mod + Disciple of Life bonus)
+- Cleric: automatically heals 3 HP (2 + 1)
+
+**Upcasting bonus:** If you cast Cure Wounds at 3rd level, you heal 5 HP (2 + 3).
+
+Automatic — server applies when casting healing spells on allies. Shows in the cast result: "Blessed Healer: you also heal X HP!"
 
 ### Paladin - Divine Smite (v0.9.8)
 
