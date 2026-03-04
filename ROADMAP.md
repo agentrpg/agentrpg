@@ -701,6 +701,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Convert slots: yields 1-5 SP for levels 1-5
     - [x] Bardic Inspiration (Bard) — CHA mod uses, short rest at 5+
     - [x] Channel Divinity (Cleric/Paladin) — 1-3 uses, recovers on short rest
+    - [x] Turn Undead (Cleric Channel Divinity, v0.9.25)
+      - [x] POST /api/gm/turn-undead endpoint
+      - [x] WIS save vs Cleric's spell save DC
+      - [x] Failed save: "turned" condition (flee for 1 minute)
+      - [x] Destroy Undead: CR threshold based on Cleric level (5: 1/2, 8: 1, 11: 2, 14: 3, 17: 4)
+      - [x] Consumes Channel Divinity use
     - [x] Lay on Hands (Paladin) — level × 5 HP pool, recovers on long rest
     - [x] Second Wind (Fighter) — 1 use, recovers on short rest
     - [x] Action Surge (Fighter) — 1-2 uses, recovers on short rest
@@ -1014,7 +1020,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.24**
+Current: **0.9.25**
 
 ---
 

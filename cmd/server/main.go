@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.24
+// @version 0.9.25
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.24"
+const version = "0.9.25"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -426,6 +426,7 @@ func main() {
 	http.HandleFunc("/api/gm/underwater", handleGMUnderwater)
 	http.HandleFunc("/api/gm/set-lighting", handleGMSetLighting)
 	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
+	http.HandleFunc("/api/gm/turn-undead", handleGMTurnUndead)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
@@ -23572,6 +23573,353 @@ func handleGMMoraleCheck(w http.ResponseWriter, r *http.Request) {
 	
 	if flees {
 		response["gm_guidance"] = "The creature attempts to flee! Consider: Dash action toward exit, Disengage to avoid opportunity attacks, or if cornered, surrender or fight desperately."
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMTurnUndead godoc
+// @Summary Cleric uses Turn Undead (Channel Divinity)
+// @Description A Cleric presents their holy symbol to turn undead creatures. Each undead within 30 feet must make a WIS save vs the Cleric's spell save DC. On failure, the creature is turned for 1 minute. At higher levels, low-CR undead are instantly destroyed (Destroy Undead). (v0.9.25)
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{caster_id=integer,target_ids=[]integer} true "Turn Undead request"
+// @Success 200 {object} map[string]interface{} "Turn Undead results"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or caster not a Cleric"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/turn-undead [post]
+func handleGMTurnUndead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CasterID  int   `json:"caster_id"`   // Cleric character ID
+		TargetIDs []int `json:"target_ids"`  // Array of combatant IDs (negative for monsters)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CasterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "caster_id required (the Cleric using Turn Undead)",
+		})
+		return
+	}
+	
+	if len(req.TargetIDs) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_ids required (array of undead combatant IDs within 30 feet)",
+		})
+		return
+	}
+	
+	// Verify caster is a Cleric level 2+ in GM's campaign
+	var casterName, className string
+	var casterLevel, wisScore int
+	var lobbyID int
+	err = db.QueryRow(`
+		SELECT c.name, c.class, c.level, c.wis, c.lobby_id
+		FROM characters c
+		WHERE c.id = $1
+	`, req.CasterID).Scan(&casterName, &className, &casterLevel, &wisScore, &lobbyID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Caster character not found",
+		})
+		return
+	}
+	
+	if strings.ToLower(className) != "cleric" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_cleric",
+			"message": fmt.Sprintf("%s is a %s, not a Cleric. Turn Undead is a Cleric class feature.", casterName, className),
+		})
+		return
+	}
+	
+	if casterLevel < 2 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_level",
+			"message": fmt.Sprintf("%s is level %d. Turn Undead requires Cleric level 2+.", casterName, casterLevel),
+		})
+		return
+	}
+	
+	// Verify agent is GM of this campaign
+	var dmID int
+	err = db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+	if err != nil || dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You must be the GM of this campaign to use Turn Undead",
+		})
+		return
+	}
+	
+	// Check if Channel Divinity is available
+	current := getCurrentClassResources(req.CasterID)
+	if current["channel_divinity"] <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_channel_divinity",
+			"message": fmt.Sprintf("%s has no Channel Divinity uses remaining. Recovers on short or long rest.", casterName),
+		})
+		return
+	}
+	
+	// Calculate spell save DC (8 + proficiency + WIS mod)
+	wisMod := modifier(wisScore)
+	saveDC := spellSaveDC(casterLevel, wisMod)
+	
+	// Determine Destroy Undead CR threshold based on level
+	destroyUndeadCR := 0.0
+	if casterLevel >= 17 {
+		destroyUndeadCR = 4.0
+	} else if casterLevel >= 14 {
+		destroyUndeadCR = 3.0
+	} else if casterLevel >= 11 {
+		destroyUndeadCR = 2.0
+	} else if casterLevel >= 8 {
+		destroyUndeadCR = 1.0
+	} else if casterLevel >= 5 {
+		destroyUndeadCR = 0.5
+	}
+	
+	// Process each target
+	results := []map[string]interface{}{}
+	turnedCount := 0
+	destroyedCount := 0
+	immuneCount := 0
+	notUndeadCount := 0
+	
+	for _, targetID := range req.TargetIDs {
+		result := map[string]interface{}{
+			"target_id": targetID,
+		}
+		
+		// Get target info from combat_combatants
+		var targetName, monsterKey string
+		var isMonster bool
+		var combatantID int
+		
+		err = db.QueryRow(`
+			SELECT cc.combatant_id, cc.name, COALESCE(cc.monster_key, ''), cc.is_monster
+			FROM combat_combatants cc
+			JOIN combat_state cs ON cc.lobby_id = cs.lobby_id
+			WHERE cc.combatant_id = $1 AND cs.lobby_id = $2 AND cs.active = true
+		`, targetID, lobbyID).Scan(&combatantID, &targetName, &monsterKey, &isMonster)
+		
+		if err != nil {
+			result["error"] = "target_not_in_combat"
+			result["message"] = fmt.Sprintf("Target %d not found in active combat", targetID)
+			results = append(results, result)
+			continue
+		}
+		
+		result["target_name"] = targetName
+		
+		// Check if target is undead
+		creatureType := getTargetCreatureType(targetID)
+		if creatureType != "undead" {
+			result["outcome"] = "not_undead"
+			result["creature_type"] = creatureType
+			result["message"] = fmt.Sprintf("%s is not undead (%s) — Turn Undead has no effect", targetName, creatureType)
+			notUndeadCount++
+			results = append(results, result)
+			continue
+		}
+		
+		result["creature_type"] = "undead"
+		
+		// Get monster WIS and CR
+		var monsterWIS int
+		var monsterCRStr string
+		if monsterKey != "" {
+			db.QueryRow(`SELECT COALESCE(wis, 10), COALESCE(cr, '0') FROM monsters WHERE slug = $1`, monsterKey).Scan(&monsterWIS, &monsterCRStr)
+		} else {
+			monsterWIS = 10
+			monsterCRStr = "0"
+		}
+		
+		// Parse CR (handles fractions like "1/4", "1/2")
+		monsterCR := 0.0
+		if strings.Contains(monsterCRStr, "/") {
+			parts := strings.Split(monsterCRStr, "/")
+			if len(parts) == 2 {
+				num, _ := strconv.ParseFloat(parts[0], 64)
+				den, _ := strconv.ParseFloat(parts[1], 64)
+				if den > 0 {
+					monsterCR = num / den
+				}
+			}
+		} else {
+			monsterCR, _ = strconv.ParseFloat(monsterCRStr, 64)
+		}
+		
+		result["wisdom"] = monsterWIS
+		result["challenge_rating"] = monsterCRStr
+		
+		// Check for condition immunity to Turn Undead (some powerful undead are immune)
+		// For now we check "turned" condition immunity
+		var conditionImmunities string
+		if monsterKey != "" {
+			db.QueryRow(`SELECT COALESCE(condition_immunities, '') FROM monsters WHERE slug = $1`, monsterKey).Scan(&conditionImmunities)
+		}
+		
+		if strings.Contains(strings.ToLower(conditionImmunities), "turned") {
+			result["outcome"] = "immune"
+			result["message"] = fmt.Sprintf("%s is immune to being turned", targetName)
+			immuneCount++
+			results = append(results, result)
+			continue
+		}
+		
+		// Roll WIS saving throw
+		wisModTarget := modifier(monsterWIS)
+		roll := rollDie(20)
+		total := roll + wisModTarget
+		passed := total >= saveDC
+		
+		result["save_roll"] = roll
+		result["save_modifier"] = wisModTarget
+		result["save_total"] = total
+		result["save_dc"] = saveDC
+		result["save_passed"] = passed
+		
+		if passed {
+			result["outcome"] = "resisted"
+			result["message"] = fmt.Sprintf("%s resisted: d20(%d) + %d = %d vs DC %d", targetName, roll, wisModTarget, total, saveDC)
+			results = append(results, result)
+			continue
+		}
+		
+		// Failed save — check for Destroy Undead
+		if destroyUndeadCR > 0 && monsterCR <= destroyUndeadCR {
+			// Destroy the undead
+			result["outcome"] = "destroyed"
+			result["destroy_undead_cr"] = destroyUndeadCR
+			result["message"] = fmt.Sprintf("💀 %s (CR %s) is DESTROYED by Turn Undead! (Destroy Undead CR ≤ %.1f)", targetName, monsterCRStr, destroyUndeadCR)
+			
+			// Remove from combat (set HP to 0 or remove from combatants)
+			db.Exec(`UPDATE combat_combatants SET hp = 0 WHERE combatant_id = $1 AND lobby_id = $2`, targetID, lobbyID)
+			
+			destroyedCount++
+			results = append(results, result)
+			continue
+		}
+		
+		// Apply "turned" condition (turned creatures must spend their turns trying to move away)
+		// Condition format: "turned:CASTER_ID" for tracking source
+		turnedCondition := fmt.Sprintf("turned:%d", req.CasterID)
+		
+		// Update conditions in combat_combatants
+		var existingConditions string
+		db.QueryRow(`SELECT COALESCE(conditions, '') FROM combat_combatants WHERE combatant_id = $1 AND lobby_id = $2`, targetID, lobbyID).Scan(&existingConditions)
+		
+		newConditions := existingConditions
+		if existingConditions == "" {
+			newConditions = turnedCondition
+		} else if !strings.Contains(existingConditions, "turned") {
+			newConditions = existingConditions + "," + turnedCondition
+		}
+		
+		db.Exec(`UPDATE combat_combatants SET conditions = $1 WHERE combatant_id = $2 AND lobby_id = $3`, newConditions, targetID, lobbyID)
+		
+		result["outcome"] = "turned"
+		result["condition_applied"] = turnedCondition
+		result["message"] = fmt.Sprintf("✨ %s is TURNED! d20(%d) + %d = %d vs DC %d — Must flee for 1 minute or until damaged", targetName, roll, wisModTarget, total, saveDC)
+		turnedCount++
+		results = append(results, result)
+	}
+	
+	// Consume Channel Divinity
+	useClassResource(req.CasterID, "channel_divinity", 1)
+	remaining := getCurrentClassResources(req.CasterID)["channel_divinity"]
+	
+	// Log the action
+	summaryParts := []string{}
+	if turnedCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d turned", turnedCount))
+	}
+	if destroyedCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d destroyed", destroyedCount))
+	}
+	if immuneCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d immune", immuneCount))
+	}
+	if notUndeadCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d not undead", notUndeadCount))
+	}
+	resistedCount := len(req.TargetIDs) - turnedCount - destroyedCount - immuneCount - notUndeadCount
+	if resistedCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d resisted", resistedCount))
+	}
+	summary := strings.Join(summaryParts, ", ")
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CasterID, "turn_undead", 
+		fmt.Sprintf("%s uses Turn Undead (Channel Divinity)!", casterName),
+		fmt.Sprintf("Save DC %d — %s", saveDC, summary))
+	
+	// Build response
+	response := map[string]interface{}{
+		"success":                  true,
+		"caster":                   casterName,
+		"caster_level":             casterLevel,
+		"spell_save_dc":            saveDC,
+		"wisdom_modifier":          wisMod,
+		"channel_divinity_remaining": remaining,
+		"results":                  results,
+		"summary": map[string]interface{}{
+			"targets":   len(req.TargetIDs),
+			"turned":    turnedCount,
+			"destroyed": destroyedCount,
+			"immune":    immuneCount,
+			"not_undead": notUndeadCount,
+			"resisted":  resistedCount,
+		},
+	}
+	
+	if destroyUndeadCR > 0 {
+		response["destroy_undead_cr"] = destroyUndeadCR
+	}
+	
+	// Add turned condition effects reminder
+	if turnedCount > 0 {
+		response["turned_effects"] = map[string]interface{}{
+			"duration":    "1 minute or until damaged",
+			"behavior":    "Must spend turns moving away from the Cleric by the safest route",
+			"restrictions": "Cannot willingly move closer, cannot take reactions",
+			"ends_if":     "Takes any damage",
+		}
 	}
 	
 	json.NewEncoder(w).Encode(response)
