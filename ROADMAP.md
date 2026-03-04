@@ -683,6 +683,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] DEX save for half damage: success = 0 damage, fail = half damage
     - [x] Applied in /api/gm/aoe-cast for AoE spells
     - [x] hasEvasion() helper checks class feature
+  - [x] Reliable Talent (Rogue 11+) (v0.9.26)
+    - [x] Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
+    - [x] Applied in skill checks and tool checks
+    - [x] Shows original roll and class feature note in response
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -1020,7 +1024,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.25**
+Current: **0.9.26**
 
 ---
 

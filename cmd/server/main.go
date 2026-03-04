@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.25
+// @version 0.9.26
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.25"
+const version = "0.9.26"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -11122,6 +11122,15 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		roll2 = 0
 	}
 	
+	// v0.9.26: Reliable Talent (Rogue level 11+)
+	// Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
+	reliableTalentApplied := false
+	originalRoll := finalRoll
+	if isProficient && hasClassFeature(class, level, "reliable_talent") && finalRoll <= 9 {
+		finalRoll = 10
+		reliableTalentApplied = true
+	}
+	
 	total := finalRoll + totalMod
 	success := total >= req.DC
 	
@@ -11133,7 +11142,9 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	
 	// Build result description
 	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
-	if rollType == "advantage" {
+	if reliableTalentApplied {
+		resultStr = fmt.Sprintf("d20(%d→10)", originalRoll)
+	} else if rollType == "advantage" {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
 	} else if rollType == "disadvantage" {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
@@ -11152,9 +11163,10 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Check for natural 20 or 1 (optional rule flavor)
+	// Note: Reliable Talent doesn't affect crits - those only apply to attack rolls anyway
 	if finalRoll == 20 {
 		outcomeStr = "CRITICAL SUCCESS"
-	} else if finalRoll == 1 {
+	} else if finalRoll == 1 && !reliableTalentApplied {
 		outcomeStr = "CRITICAL FAILURE"
 	}
 	
@@ -11206,6 +11218,12 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		response["jack_of_all_trades"] = true
 		response["jack_of_all_trades_bonus"] = jackOfAllTradesBonus
 		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Jack of All Trades (half proficiency for non-proficient checks)", charName, jackOfAllTradesBonus)
+	}
+	// v0.9.26: Add Reliable Talent note
+	if reliableTalentApplied {
+		response["reliable_talent"] = true
+		response["original_roll"] = originalRoll
+		response["class_feature_note"] = fmt.Sprintf("%s's Reliable Talent: rolled %d, treated as 10", charName, originalRoll)
 	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {
@@ -11510,12 +11528,23 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		roll2 = 0
 	}
 	
+	// v0.9.26: Reliable Talent (Rogue level 11+)
+	// Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
+	toolReliableTalentApplied := false
+	toolOriginalRoll := finalRoll
+	if isProficient && hasClassFeature(toolClass, level, "reliable_talent") && finalRoll <= 9 {
+		finalRoll = 10
+		toolReliableTalentApplied = true
+	}
+	
 	total := finalRoll + totalMod
 	success := total >= req.DC
 	
 	// Build result description
 	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
-	if rollType == "advantage" || rollType == "advantage (inspiration)" {
+	if toolReliableTalentApplied {
+		resultStr = fmt.Sprintf("d20(%d→10)", toolOriginalRoll)
+	} else if rollType == "advantage" || rollType == "advantage (inspiration)" {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
 	} else if strings.HasPrefix(rollType, "disadvantage") {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
@@ -11534,9 +11563,10 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Natural 20/1 flavor
+	// Note: Reliable Talent doesn't affect crits - those only apply to attack rolls anyway
 	if finalRoll == 20 {
 		outcomeStr = "CRITICAL SUCCESS"
-	} else if finalRoll == 1 {
+	} else if finalRoll == 1 && !toolReliableTalentApplied {
 		outcomeStr = "CRITICAL FAILURE"
 	}
 	
@@ -11595,6 +11625,12 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Jack of All Trades (half proficiency for non-proficient checks)", charName, toolJackOfAllTradesBonus)
 		// Update the note to reflect the bonus
 		response["note"] = fmt.Sprintf("%s is not proficient with %s, but gains +%d from Jack of All Trades", charName, req.Tool, toolJackOfAllTradesBonus)
+	}
+	// v0.9.26: Add Reliable Talent note
+	if toolReliableTalentApplied {
+		response["reliable_talent"] = true
+		response["original_roll"] = toolOriginalRoll
+		response["class_feature_note"] = fmt.Sprintf("%s's Reliable Talent: rolled %d, treated as 10", charName, toolOriginalRoll)
 	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {
