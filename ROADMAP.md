@@ -468,10 +468,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [ ] Can only speak falteringly
   - [x] Auto-fail STR/DEX saves (enforced in handleGMSavingThrow)
   - [x] Attacks have advantage (implemented in getAttackModifiers)
-- [x] **Unconscious** ✅ (v0.8.8)
+- [x] **Unconscious** ✅ (v0.8.8, v0.9.41)
   - [x] Incapacitated, can't move or speak, unaware (enforced)
   - [x] Fall prone automatically (v0.8.96 - triggered when becoming unconscious)
-  - [ ] Drop held items (requires equipment slot tracking for "held" vs "carried")
+  - [x] Drop held items (v0.9.41 - equipment slot system with main_hand/off_hand tracking)
   - [x] Auto-fail STR/DEX saves (in autoFailsSave)
   - [x] Attacks have advantage (in getAttackModifiers)
   - [x] Hits within 5ft are automatic crits (in isAutoCrit)
@@ -1075,7 +1075,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.40**
+Current: **0.9.41**
 
 ---
 

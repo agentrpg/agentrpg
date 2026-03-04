@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.40
+// @version 0.9.41
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.39"
+const version = "0.9.41"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -416,6 +416,8 @@ func main() {
 	http.HandleFunc("/api/characters/encumbrance", handleCharacterEncumbrance)
 	http.HandleFunc("/api/characters/equip-armor", handleCharacterEquipArmor)
 	http.HandleFunc("/api/characters/unequip-armor", handleCharacterUnequipArmor)
+	http.HandleFunc("/api/characters/equip-weapon", handleCharacterEquipWeapon)
+	http.HandleFunc("/api/characters/unequip-weapon", handleCharacterUnequipWeapon)
 	http.HandleFunc("/api/characters/downtime", handleCharacterDowntime)
 	http.HandleFunc("/api/characters/mount", handleCharacterMount)
 	http.HandleFunc("/api/characters/dismount", handleCharacterDismount)
@@ -979,6 +981,12 @@ func initDB() {
 		-- Stores the character_id of the creature currently under Quivering Palm effect
 		-- Only one creature can be quivering at a time
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS quivering_palm_target INT;
+		
+		-- Equipment slots for held items (v0.9.41)
+		-- Tracks what weapons/items are held in hands (vs just in inventory)
+		-- Enables "drop held items when unconscious" per PHB p292
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS equipped_main_hand VARCHAR(100);
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS equipped_off_hand VARCHAR(100);
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -7507,6 +7515,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var languageProfsRaw string
 	var equippedArmor sql.NullString
 	var equippedShield bool
+	var equippedMainHand, equippedOffHand sql.NullString
 	var darkvisionRange, blindsightRange, truesightRange int
 	
 	var subclassChoicesJSON []byte // v0.9.23: For Land druid circle spells
@@ -7527,6 +7536,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			COALESCE(weapon_proficiencies, ''), COALESCE(armor_proficiencies, ''),
 			COALESCE(expertise, ''), COALESCE(language_proficiencies, ''),
 			equipped_armor, COALESCE(equipped_shield, false),
+			equipped_main_hand, equipped_off_hand,
 			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0),
 			COALESCE(known_spells, '[]'), COALESCE(prepared_spells, '[]'), COALESCE(feats, '[]'),
 			COALESCE(subclass_choices, '{}')
@@ -7538,6 +7548,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&gold, &copper, &silver, &electrum, &platinum,
 		&inventoryJSON, &pendingASI, &hitDiceSpent, &exhaustionLevel, &skillProfsRaw, &hasInspiration, &toolProfsRaw,
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
+		&equippedMainHand, &equippedOffHand,
 		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON, &preparedSpellsJSON, &featsJSON,
 		&subclassChoicesJSON)
 	
@@ -7801,10 +7812,12 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["cover_bonus"] = coverBonus
 	}
 	
-	// Equipment (armor/shield)
+	// Equipment (armor/shield/weapons v0.9.41)
 	equipment := map[string]interface{}{
-		"armor":  nil,
-		"shield": equippedShield,
+		"armor":     nil,
+		"shield":    equippedShield,
+		"main_hand": nil,
+		"off_hand":  nil,
 	}
 	if equippedArmor.Valid && equippedArmor.String != "" {
 		armorInfo, err := getArmorInfo(equippedArmor.String)
@@ -7821,6 +7834,43 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			equipment["armor"] = equippedArmor.String
+		}
+	}
+	// v0.9.41: Add equipped weapons
+	if equippedMainHand.Valid && equippedMainHand.String != "" {
+		weaponSlug := strings.ToLower(strings.ReplaceAll(equippedMainHand.String, " ", "-"))
+		var weaponName string
+		var properties sql.NullString
+		var damageDice, damageType sql.NullString
+		err := db.QueryRow(`SELECT name, properties, damage_dice, damage_type FROM weapons WHERE slug = $1`, weaponSlug).Scan(&weaponName, &properties, &damageDice, &damageType)
+		if err == nil {
+			equipment["main_hand"] = map[string]interface{}{
+				"name":        weaponName,
+				"slug":        weaponSlug,
+				"properties":  properties.String,
+				"damage_dice": damageDice.String,
+				"damage_type": damageType.String,
+			}
+		} else {
+			equipment["main_hand"] = equippedMainHand.String
+		}
+	}
+	if equippedOffHand.Valid && equippedOffHand.String != "" {
+		weaponSlug := strings.ToLower(strings.ReplaceAll(equippedOffHand.String, " ", "-"))
+		var weaponName string
+		var properties sql.NullString
+		var damageDice, damageType sql.NullString
+		err := db.QueryRow(`SELECT name, properties, damage_dice, damage_type FROM weapons WHERE slug = $1`, weaponSlug).Scan(&weaponName, &properties, &damageDice, &damageType)
+		if err == nil {
+			equipment["off_hand"] = map[string]interface{}{
+				"name":        weaponName,
+				"slug":        weaponSlug,
+				"properties":  properties.String,
+				"damage_dice": damageDice.String,
+				"damage_type": damageType.String,
+			}
+		} else {
+			equipment["off_hand"] = equippedOffHand.String
 		}
 	}
 	response["equipment"] = equipment
@@ -8454,6 +8504,22 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
 			"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
 		},
+	}
+	
+	// v0.9.41: Add equipped weapons to character info
+	var equippedMainHandMyTurn, equippedOffHandMyTurn sql.NullString
+	db.QueryRow(`SELECT equipped_main_hand, equipped_off_hand FROM characters WHERE id = $1`, charID).Scan(&equippedMainHandMyTurn, &equippedOffHandMyTurn)
+	if equippedMainHandMyTurn.Valid || equippedOffHandMyTurn.Valid {
+		equippedWeapons := map[string]interface{}{}
+		if equippedMainHandMyTurn.Valid && equippedMainHandMyTurn.String != "" {
+			equippedWeapons["main_hand"] = equippedMainHandMyTurn.String
+		}
+		if equippedOffHandMyTurn.Valid && equippedOffHandMyTurn.String != "" {
+			equippedWeapons["off_hand"] = equippedOffHandMyTurn.String
+		}
+		if len(equippedWeapons) > 0 {
+			characterInfo["equipped_weapons"] = equippedWeapons
+		}
 	}
 	
 	// Add class resources (v0.8.69 - Ki, Rage, Sorcery Points, etc.)
@@ -17617,6 +17683,370 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleCharacterEquipWeapon godoc
+// @Summary Equip a weapon from inventory
+// @Description Equip a weapon to main_hand or off_hand slot. Two-handed weapons require main_hand and leave off_hand empty. Light weapons can be dual-wielded. Weapons must be in inventory to equip. (v0.9.41)
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,weapon=string,slot=string} true "Equip weapon. slot: main_hand (default) or off_hand"
+// @Success 200 {object} map[string]interface{} "Equipped weapon info"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/equip-weapon [post]
+func handleCharacterEquipWeapon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agent, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Weapon      string `json:"weapon"` // Weapon slug or name (e.g., "longsword", "shortbow")
+		Slot        string `json:"slot"`   // main_hand (default) or off_hand
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 || req.Weapon == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id and weapon required"})
+		return
+	}
+	
+	if req.Slot == "" {
+		req.Slot = "main_hand"
+	}
+	if req.Slot != "main_hand" && req.Slot != "off_hand" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "slot must be main_hand or off_hand"})
+		return
+	}
+	
+	// Verify character belongs to agent
+	var charName string
+	var ownerID int
+	var inventoryJSON []byte
+	var weaponProfs string
+	var mainHand, offHand sql.NullString
+	err = db.QueryRow(`SELECT name, agent_id, COALESCE(inventory, '[]'), COALESCE(weapon_proficiencies, ''),
+		equipped_main_hand, equipped_off_hand
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &inventoryJSON, &weaponProfs, &mainHand, &offHand)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agent {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	// Check if weapon is in inventory
+	var inventory []map[string]interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
+	
+	weaponSlug := strings.ToLower(strings.ReplaceAll(req.Weapon, " ", "-"))
+	foundWeapon := false
+	var weaponInfo map[string]interface{}
+	
+	for _, item := range inventory {
+		itemName, _ := item["name"].(string)
+		itemSlug := strings.ToLower(strings.ReplaceAll(itemName, " ", "-"))
+		if itemSlug == weaponSlug || strings.ToLower(itemName) == strings.ToLower(req.Weapon) {
+			foundWeapon = true
+			weaponInfo = item
+			break
+		}
+	}
+	
+	// Also check weapons table for properties
+	var dbWeaponName string
+	var dbProperties sql.NullString
+	var isTwoHanded, isLight bool
+	err = db.QueryRow(`SELECT name, properties FROM weapons WHERE slug = $1`, weaponSlug).Scan(&dbWeaponName, &dbProperties)
+	if err == nil {
+		propsLower := strings.ToLower(dbProperties.String)
+		isTwoHanded = strings.Contains(propsLower, "two-handed") || strings.Contains(propsLower, "2h")
+		isLight = strings.Contains(propsLower, "light")
+	}
+	
+	if !foundWeapon {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":      "weapon_not_in_inventory",
+			"weapon":     req.Weapon,
+			"suggestion": "Use /api/gm/give-item to add the weapon to inventory first.",
+		})
+		return
+	}
+	
+	warnings := []string{}
+	
+	// Check weapon proficiency
+	if !isWeaponProficient(weaponProfs, req.Weapon) {
+		warnings = append(warnings, "not_proficient_no_proficiency_bonus_on_attacks")
+	}
+	
+	// Handle two-handed weapons
+	if isTwoHanded {
+		if req.Slot == "off_hand" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "two_handed_weapon",
+				"message": "Two-handed weapons must be equipped in main_hand and require both hands.",
+			})
+			return
+		}
+		// Clear off-hand when equipping two-handed weapon
+		offHand = sql.NullString{Valid: false}
+		warnings = append(warnings, "two_handed_weapon_clears_off_hand")
+	}
+	
+	// Handle off-hand restrictions
+	if req.Slot == "off_hand" {
+		// Check if main hand has two-handed weapon
+		if mainHand.Valid && mainHand.String != "" {
+			var mainProps sql.NullString
+			mainSlug := strings.ToLower(strings.ReplaceAll(mainHand.String, " ", "-"))
+			db.QueryRow(`SELECT properties FROM weapons WHERE slug = $1`, mainSlug).Scan(&mainProps)
+			if mainProps.Valid && (strings.Contains(strings.ToLower(mainProps.String), "two-handed") || strings.Contains(strings.ToLower(mainProps.String), "2h")) {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "main_hand_is_two_handed",
+					"message": fmt.Sprintf("Cannot equip off-hand weapon while wielding two-handed %s.", mainHand.String),
+				})
+				return
+			}
+		}
+		
+		// Warn if off-hand weapon isn't light (dual-wielding rules)
+		if !isLight {
+			warnings = append(warnings, "off_hand_not_light_requires_dual_wielder_feat_for_offhand_attack")
+		}
+	}
+	
+	// Update the appropriate slot
+	newMainHand := mainHand
+	newOffHand := offHand
+	if req.Slot == "main_hand" {
+		newMainHand = sql.NullString{String: req.Weapon, Valid: true}
+		if isTwoHanded {
+			newOffHand = sql.NullString{Valid: false}
+		}
+	} else {
+		newOffHand = sql.NullString{String: req.Weapon, Valid: true}
+	}
+	
+	// Update database
+	_, err = db.Exec(`UPDATE characters SET equipped_main_hand = $1, equipped_off_hand = $2 WHERE id = $3`,
+		newMainHand, newOffHand, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	response := map[string]interface{}{
+		"success":            true,
+		"character":          charName,
+		"equipped_main_hand": nullStringToInterface(newMainHand),
+		"equipped_off_hand":  nullStringToInterface(newOffHand),
+		"slot_equipped":      req.Slot,
+		"weapon":             req.Weapon,
+	}
+	if weaponInfo != nil {
+		response["weapon_info"] = weaponInfo
+	}
+	if isTwoHanded {
+		response["two_handed"] = true
+	}
+	if isLight {
+		response["light"] = true
+	}
+	if len(warnings) > 0 {
+		response["warnings"] = warnings
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleCharacterUnequipWeapon godoc
+// @Summary Unequip weapon(s) from hands
+// @Description Remove equipped weapon(s) from main_hand and/or off_hand. Weapons return to inventory. Use drop=true to drop on ground instead (for unconscious mechanic). (v0.9.41)
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=int,slot=string,drop=bool} true "Unequip options. slot: main_hand, off_hand, or both (default). drop: true to drop instead of returning to inventory"
+// @Success 200 {object} map[string]interface{} "Unequipped weapon info"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 400 {object} map[string]interface{} "Bad request"
+// @Router /characters/unequip-weapon [post]
+func handleCharacterUnequipWeapon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "method_not_allowed"})
+		return
+	}
+	
+	agent, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Slot        string `json:"slot"` // main_hand, off_hand, or both (default)
+		Drop        bool   `json:"drop"` // If true, drop weapon instead of returning to inventory
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_id required"})
+		return
+	}
+	
+	if req.Slot == "" {
+		req.Slot = "both"
+	}
+	if req.Slot != "main_hand" && req.Slot != "off_hand" && req.Slot != "both" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "slot must be main_hand, off_hand, or both"})
+		return
+	}
+	
+	// Verify character belongs to agent
+	var charName string
+	var ownerID int
+	var mainHand, offHand sql.NullString
+	err = db.QueryRow(`SELECT name, agent_id, equipped_main_hand, equipped_off_hand
+		FROM characters WHERE id = $1`, req.CharacterID).Scan(&charName, &ownerID, &mainHand, &offHand)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if ownerID != agent {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_your_character"})
+		return
+	}
+	
+	droppedItems := []string{}
+	newMainHand := mainHand
+	newOffHand := offHand
+	
+	// Determine what to unequip
+	if req.Slot == "main_hand" || req.Slot == "both" {
+		if mainHand.Valid && mainHand.String != "" {
+			droppedItems = append(droppedItems, mainHand.String)
+			newMainHand = sql.NullString{Valid: false}
+		}
+	}
+	if req.Slot == "off_hand" || req.Slot == "both" {
+		if offHand.Valid && offHand.String != "" {
+			droppedItems = append(droppedItems, offHand.String)
+			newOffHand = sql.NullString{Valid: false}
+		}
+	}
+	
+	if len(droppedItems) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "No weapons equipped in specified slot(s)",
+		})
+		return
+	}
+	
+	// Update database
+	_, err = db.Exec(`UPDATE characters SET equipped_main_hand = $1, equipped_off_hand = $2 WHERE id = $3`,
+		newMainHand, newOffHand, req.CharacterID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
+		return
+	}
+	
+	action := "stowed"
+	if req.Drop {
+		action = "dropped"
+	}
+	
+	response := map[string]interface{}{
+		"success":            true,
+		"character":          charName,
+		"action":             action,
+		"items":              droppedItems,
+		"equipped_main_hand": nullStringToInterface(newMainHand),
+		"equipped_off_hand":  nullStringToInterface(newOffHand),
+	}
+	
+	if req.Drop {
+		response["note"] = "Weapons dropped on ground. GM may need to track dropped item locations."
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// dropHeldItems drops equipped weapons when character becomes unconscious (PHB p292)
+// Called internally when unconscious condition is applied
+func dropHeldItems(charID int) []string {
+	var mainHand, offHand sql.NullString
+	err := db.QueryRow(`SELECT equipped_main_hand, equipped_off_hand FROM characters WHERE id = $1`, charID).Scan(&mainHand, &offHand)
+	if err != nil {
+		return nil
+	}
+	
+	droppedItems := []string{}
+	if mainHand.Valid && mainHand.String != "" {
+		droppedItems = append(droppedItems, mainHand.String)
+	}
+	if offHand.Valid && offHand.String != "" {
+		droppedItems = append(droppedItems, offHand.String)
+	}
+	
+	if len(droppedItems) > 0 {
+		db.Exec(`UPDATE characters SET equipped_main_hand = NULL, equipped_off_hand = NULL WHERE id = $1`, charID)
+	}
+	
+	return droppedItems
+}
+
+// nullStringToInterface converts sql.NullString to interface{} for JSON
+func nullStringToInterface(ns sql.NullString) interface{} {
+	if ns.Valid {
+		return ns.String
+	}
+	return nil
 }
 
 // handleCharacterDowntime godoc
@@ -33933,6 +34363,14 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 			response["conditions"] = conditions
 			response["auto_prone"] = true
 			response["prone_note"] = fmt.Sprintf("%s falls prone (unconscious creatures automatically fall prone)", getCharacterName(charID))
+		}
+		
+		// v0.9.41: Drop held items when becoming unconscious
+		// Per 5e PHB p292: "An unconscious creature drops whatever it's holding"
+		droppedItems := dropHeldItems(charID)
+		if len(droppedItems) > 0 {
+			response["dropped_items"] = droppedItems
+			response["drop_note"] = fmt.Sprintf("%s drops held items (unconscious creatures drop whatever they're holding)", getCharacterName(charID))
 		}
 	}
 	
