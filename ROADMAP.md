@@ -594,6 +594,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Half proficiency bonus (rounded up) to STR/DEX/CON checks when not proficient
     - [x] Applied in skill checks and tool checks
     - [x] Fighter (Champion) level 7+ feature
+  - [x] Champion's Survivor (v0.9.28)
+    - [x] At start of turn, regain 5 + CON mod HP if HP ≤ 50% max (and HP > 0)
+    - [x] Triggers in combat/next, combat/skip, and GM narrate with advance_turn
+    - [x] Fighter (Champion) level 18+ feature
   - [x] Life Domain's Disciple of Life (+2+spell_level healing, v0.8.71)
   - [x] Life Domain's Supreme Healing (max dice on healing spells, v0.8.71)
   - [x] Life Domain's Divine Strike (1d8 radiant at level 8, 2d8 at level 14, v0.9.1)
@@ -1028,7 +1032,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.27**
+Current: **0.9.28**
 
 ---
 
