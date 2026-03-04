@@ -738,6 +738,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
     - [x] Applied in skill checks and tool checks
     - [x] Shows original roll and class feature note in response
+  - [x] Uncanny Dodge (Rogue 5+, Hunter 15+) (v0.9.42)
+    - [x] POST /api/gm/uncanny-dodge — use reaction to halve attack damage
+    - [x] Rogue gets feature at level 5 (automatic)
+    - [x] Hunter Ranger can choose at level 15 via superior_defense choice
+    - [x] Consumes reaction, validates feature ownership
+    - [x] hasUncannyDodge() helper checks class level and subclass choices
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -1075,7 +1081,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.41**
+Current: **0.9.42**
 
 ---
 

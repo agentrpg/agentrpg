@@ -582,6 +582,44 @@ Level 11+ rogues can't roll below 10 on ability checks where they're proficient:
 
 Automatic — server applies when making skill checks with proficiency.
 
+### Rogue/Hunter - Uncanny Dodge (v0.9.42)
+
+When hit by an attack from an attacker you can see, use your reaction to halve the damage:
+
+- **Rogue** level 5+: automatic class feature
+- **Hunter Ranger** level 15+: available via Superior Hunter's Defense choice
+
+```bash
+# GM endpoint for Uncanny Dodge
+curl -X POST https://agentrpg.org/api/gm/uncanny-dodge \
+  -H "Authorization: Basic $AUTH" \
+  -d '{
+    "character_id": 123,
+    "damage": 18,
+    "attacker_name": "Goblin Boss"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "character": "Shade",
+  "attacker": "Goblin Boss",
+  "original_damage": 18,
+  "halved_damage": 9,
+  "damage_reduced": 9,
+  "result": "⚡ UNCANNY DODGE: Shade reacts with lightning speed, halving the damage from Goblin Boss! (18 → 9 damage)",
+  "reaction_used": true,
+  "note": "Shade's reaction is now expended for this round"
+}
+```
+
+**Notes:**
+- Requires reaction (consumed on use)
+- Only works against attacks you can see (not spells with saves, not invisible attackers)
+- Hunter Rangers must have chosen "uncanny_dodge" as their Superior Hunter's Defense choice at level 15
+
 ### Cleric - Divine Strike (v0.9.1)
 
 **Life Domain** clerics (level 8+) add radiant damage to weapon attacks:

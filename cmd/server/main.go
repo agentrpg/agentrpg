@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.41
+// @version 0.9.42
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.41"
+const version = "0.9.42"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -404,6 +404,7 @@ func main() {
 	http.HandleFunc("/api/gm/giant-killer", handleGMGiantKiller)
 	http.HandleFunc("/api/gm/retaliation", handleGMRetaliation)
 	http.HandleFunc("/api/gm/protection", handleGMProtection)
+	http.HandleFunc("/api/gm/uncanny-dodge", handleGMUncannyDodge)
 	http.HandleFunc("/api/gm/intimidating-presence", handleGMIntimidatingPresence)
 	http.HandleFunc("/api/gm/quivering-palm", handleGMQuiveringPalm)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
@@ -15544,6 +15545,163 @@ func handleGMProtection(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGMUncannyDodge godoc
+// @Summary Use Uncanny Dodge to halve attack damage
+// @Description When a character with Uncanny Dodge (Rogue 5+, or Hunter Ranger 15+ with the choice) is hit by an attack from an attacker they can see, they can use their reaction to halve the damage.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,damage=integer,attacker_name=string} true "Uncanny Dodge details"
+// @Success 200 {object} map[string]interface{} "Damage halved result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or requirements not met"
+// @Router /gm/uncanny-dodge [post]
+func handleGMUncannyDodge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID  int    `json:"character_id"`  // The character using Uncanny Dodge
+		Damage       int    `json:"damage"`        // The original damage amount
+		AttackerName string `json:"attacker_name"` // Name of the attacker (for logging)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	if req.Damage <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "damage must be a positive integer",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class, subclass string
+	var charLobbyID, level int
+	var reactionUsed bool
+	err = db.QueryRow(`
+		SELECT name, lobby_id, class, level, 
+		       COALESCE(reaction_used, false),
+		       COALESCE(subclass, '')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &charLobbyID, &class, &level, &reactionUsed, &subclass)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Check if character has Uncanny Dodge
+	if !hasUncannyDodge(req.CharacterID) {
+		classNote := ""
+		if strings.ToLower(class) == "rogue" && level < 5 {
+			classNote = fmt.Sprintf(" (Rogue level %d, needs level 5+)", level)
+		} else if strings.ToLower(class) == "ranger" && strings.ToLower(subclass) == "hunter" && level < 15 {
+			classNote = fmt.Sprintf(" (Hunter Ranger level %d, needs level 15+ with Uncanny Dodge choice)", level)
+		}
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_uncanny_dodge",
+			"message": fmt.Sprintf("%s does not have the Uncanny Dodge feature%s", charName, classNote),
+		})
+		return
+	}
+	
+	// Check if reaction is available
+	if reactionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_reaction",
+			"message": fmt.Sprintf("%s has already used their reaction this round", charName),
+		})
+		return
+	}
+	
+	// Mark reaction as used
+	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
+	
+	// Calculate halved damage (round down)
+	halvedDamage := req.Damage / 2
+	
+	// Build result text
+	attackerText := "the attacker"
+	if req.AttackerName != "" {
+		attackerText = req.AttackerName
+	}
+	
+	resultText := fmt.Sprintf("⚡ UNCANNY DODGE: %s reacts with lightning speed, halving the damage from %s! (%d → %d damage)", 
+		charName, attackerText, req.Damage, halvedDamage)
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Uncanny Dodge by %s against %s's attack", charName, attackerText)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'uncanny_dodge', $2, $3)
+	`, campaignID, actionDesc, resultText)
+	
+	response := map[string]interface{}{
+		"success":         true,
+		"character":       charName,
+		"attacker":        attackerText,
+		"original_damage": req.Damage,
+		"halved_damage":   halvedDamage,
+		"damage_reduced":  req.Damage - halvedDamage,
+		"result":          resultText,
+		"reaction_used":   true,
+		"note":            fmt.Sprintf("%s's reaction is now expended for this round", charName),
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleGMAoECast godoc
 // @Summary Cast an area of effect spell on multiple targets
 // @Description GM resolves an AoE spell (like Fireball) against multiple targets. Each target makes a saving throw.
@@ -29876,6 +30034,40 @@ func hasEvasion(characterID int) bool {
 		return false
 	}
 	return hasClassFeature(class, level, "evasion")
+}
+
+// hasUncannyDodge checks if a character has the Uncanny Dodge feature
+// v0.9.42: Rogue 5+ or Hunter Ranger 15+ with uncanny_dodge choice
+func hasUncannyDodge(characterID int) bool {
+	var class, subclass string
+	var level int
+	var choicesJSON []byte
+	err := db.QueryRow(`
+		SELECT class, level, COALESCE(subclass, ''), COALESCE(subclass_choices, '{}') 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &level, &subclass, &choicesJSON)
+	if err != nil {
+		return false
+	}
+	
+	classLower := strings.ToLower(class)
+	
+	// Rogue gets Uncanny Dodge at level 5
+	if classLower == "rogue" && level >= 5 {
+		return true
+	}
+	
+	// Hunter Ranger can choose Uncanny Dodge at level 15 (Superior Hunter's Defense)
+	if classLower == "ranger" && strings.ToLower(subclass) == "hunter" && level >= 15 {
+		var choices map[string]string
+		if err := json.Unmarshal(choicesJSON, &choices); err == nil {
+			if choices["superior_defense"] == "uncanny_dodge" {
+				return true
+			}
+		}
+	}
+	
+	return false
 }
 
 // getSubclassForClass returns all available subclasses for a given class
