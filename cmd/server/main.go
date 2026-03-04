@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.27"
+const version = "0.9.30"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -427,6 +427,7 @@ func main() {
 	http.HandleFunc("/api/gm/set-lighting", handleGMSetLighting)
 	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
 	http.HandleFunc("/api/gm/turn-undead", handleGMTurnUndead)
+	http.HandleFunc("/api/gm/preserve-life", handleGMPreserveLife)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
@@ -476,6 +477,8 @@ func main() {
 	http.HandleFunc("/api/characters/metamagic", handleCharacterMetamagic)
 	http.HandleFunc("/api/characters/flexible-casting", handleFlexibleCasting)
 	http.HandleFunc("/api/characters/multiclass", handleCharacterMulticlass)
+	http.HandleFunc("/api/characters/fighting-style", handleCharacterFightingStyle)
+	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
 	http.HandleFunc("/api/universe/rules/", handleUniverseRule)
@@ -961,6 +964,11 @@ func initDB() {
 		-- Warlock pact slots are tracked separately from regular spell slots
 		-- Pact slots recover on short rest, regular slots on long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS pact_slots_used JSONB DEFAULT '{}';
+		
+		-- Fighting Styles tracking (v0.9.29)
+		-- Tracks chosen fighting styles for Fighter, Paladin, Ranger (level 1/2)
+		-- Champion Fighters get additional style at level 10
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS fighting_styles JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -7829,6 +7837,15 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		naturalACBase = getNaturalACBase(subclassRaw.String, level)
 	}
 	calculatedAC := calculateArmorACWithNatural(modifier(dex), equippedArmor.String, equippedShield, naturalACBase)
+	
+	// v0.9.29: Defense Fighting Style (+1 AC while wearing armor)
+	defenseBonus := 0
+	if equippedArmor.String != "" && hasFightingStyle(charID, "defense") {
+		defenseBonus = 1
+		calculatedAC += defenseBonus
+		response["defense_style_bonus"] = defenseBonus
+	}
+	
 	if calculatedAC != ac {
 		response["ac"] = calculatedAC
 		response["effective_ac"] = calculatedAC + coverBonus
@@ -7977,6 +7994,23 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		response["feats"] = featsInfo
+	}
+	
+	// v0.9.29: Fighting Styles
+	fightingStylesJSON := getFightingStyles(charID)
+	if len(fightingStylesJSON) > 0 {
+		fightingStylesInfo := []map[string]interface{}{}
+		for _, slug := range fightingStylesJSON {
+			if style, ok := fightingStyles[slug]; ok {
+				fightingStylesInfo = append(fightingStylesInfo, map[string]interface{}{
+					"slug":        style.Slug,
+					"name":        style.Name,
+					"description": style.Description,
+					"mechanic":    style.Mechanic,
+				})
+			}
+		}
+		response["fighting_styles"] = fightingStylesInfo
 	}
 	
 	// Concentration
@@ -17038,6 +17072,13 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 	}
 	newAC := calculateArmorACWithNatural(dexMod, newArmor, newShield, naturalACBase)
 	
+	// v0.9.29: Defense Fighting Style (+1 AC while wearing armor)
+	equipDefenseBonus := 0
+	if newArmor != "" && hasFightingStyle(req.CharacterID, "defense") {
+		equipDefenseBonus = 1
+		newAC += equipDefenseBonus
+	}
+	
 	// Update stored AC
 	db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, newAC, req.CharacterID)
 	
@@ -17047,6 +17088,9 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		"equipped_armor":  newArmor,
 		"equipped_shield": newShield,
 		"new_ac":          newAC,
+	}
+	if equipDefenseBonus > 0 {
+		response["defense_style_bonus"] = equipDefenseBonus
 	}
 	if len(warnings) > 0 {
 		response["warnings"] = warnings
@@ -17193,6 +17237,13 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 	}
 	newAC := calculateArmorACWithNatural(dexMod, newArmor, newShield, naturalACBase)
 	
+	// v0.9.29: Defense Fighting Style (+1 AC while wearing armor)
+	unequipDefenseBonus := 0
+	if newArmor != "" && hasFightingStyle(req.CharacterID, "defense") {
+		unequipDefenseBonus = 1
+		newAC += unequipDefenseBonus
+	}
+	
 	// Update stored AC
 	db.Exec(`UPDATE characters SET ac = $1 WHERE id = $2`, newAC, req.CharacterID)
 	
@@ -17202,6 +17253,9 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 		"equipped_armor":  newArmor,
 		"equipped_shield": newShield,
 		"new_ac":          newAC,
+	}
+	if unequipDefenseBonus > 0 {
+		response["defense_style_bonus"] = unequipDefenseBonus
 	}
 	if len(warnings) > 0 {
 		response["warnings"] = warnings
@@ -19489,6 +19543,15 @@ func resolveAction(action, description string, charID int) string {
 		// Determine if ranged attack (v0.8.23: for proper prone handling)
 		isRangedAttack := hasWeapon && weapon.Type == "ranged"
 		
+		// v0.9.29: Archery Fighting Style (+2 to ranged attack rolls)
+		archeryBonus := 0
+		archeryNote := ""
+		if isRangedAttack && hasFightingStyle(charID, "archery") {
+			archeryBonus = 2
+			attackMod += archeryBonus
+			archeryNote = " (Archery +2)"
+		}
+		
 		// Get condition-based advantage/disadvantage (pass isRanged for prone handling)
 		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{}, isRangedAttack)
 		
@@ -19656,7 +19719,28 @@ func resolveAction(action, description string, charID int) string {
 			if hasWeapon {
 				damageDice = weapon.Damage
 			}
-			dmg := rollDamage(damageDice, true) + damageMod
+			
+			// v0.9.29: Great Weapon Fighting - reroll 1s and 2s on damage dice
+			autoCritGWFNote := ""
+			autoCritIsTwoHanded := hasWeapon && (containsProperty(weapon.Properties, "two-handed") || 
+				(containsProperty(weapon.Properties, "versatile") && strings.Contains(descLower, "two hand")))
+			
+			var dmg int
+			if autoCritIsTwoHanded && hasFightingStyle(charID, "great_weapon_fighting") {
+				dmg = rollDamageGWF(damageDice, true) + damageMod
+				autoCritGWFNote = " (GWF)"
+			} else {
+				dmg = rollDamage(damageDice, true) + damageMod
+			}
+			
+			// v0.9.29: Dueling - +2 damage with one-handed melee
+			autoCritDuelingNote := ""
+			autoCritIsOneHandedMelee := hasWeapon && weapon.Type == "melee" && !containsProperty(weapon.Properties, "two-handed")
+			if autoCritIsOneHandedMelee && hasFightingStyle(charID, "dueling") {
+				dmg += 2
+				autoCritDuelingNote = " (Dueling +2)"
+			}
+			
 			weaponName := "unarmed"
 			if hasWeapon {
 				weaponName = weapon.Name
@@ -19744,8 +19828,8 @@ func resolveAction(action, description string, charID int) string {
 				improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 2d8 radiant)", improvedSmiteDmg)
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s Damage: %d%s%s%s%s%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -19760,7 +19844,28 @@ func resolveAction(action, description string, charID int) string {
 			if hasWeapon {
 				damageDice = weapon.Damage
 			}
-			dmg := rollDamage(damageDice, true) + damageMod
+			
+			// v0.9.29: Great Weapon Fighting - reroll 1s and 2s on damage dice
+			critGWFNote := ""
+			critIsTwoHanded := hasWeapon && (containsProperty(weapon.Properties, "two-handed") || 
+				(containsProperty(weapon.Properties, "versatile") && strings.Contains(descLower, "two hand")))
+			
+			var dmg int
+			if critIsTwoHanded && hasFightingStyle(charID, "great_weapon_fighting") {
+				dmg = rollDamageGWF(damageDice, true) + damageMod
+				critGWFNote = " (GWF)"
+			} else {
+				dmg = rollDamage(damageDice, true) + damageMod
+			}
+			
+			// v0.9.29: Dueling - +2 damage with one-handed melee
+			critDuelingNote := ""
+			critIsOneHandedMelee := hasWeapon && weapon.Type == "melee" && !containsProperty(weapon.Properties, "two-handed")
+			if critIsOneHandedMelee && hasFightingStyle(charID, "dueling") {
+				dmg += 2
+				critDuelingNote = " (Dueling +2)"
+			}
+			
 			weaponName := "unarmed"
 			if hasWeapon {
 				weaponName = weapon.Name
@@ -19852,7 +19957,7 @@ func resolveAction(action, description string, charID int) string {
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s Damage: %d%s%s%s%s%s", weaponName, totalAttack, critLabel, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
 		} else if attackRoll == 1 {
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
@@ -19864,7 +19969,30 @@ func resolveAction(action, description string, charID int) string {
 			damageDice = weapon.Damage
 			weaponName = weapon.Name
 		}
-		dmg := rollDamage(damageDice, false) + damageMod
+		
+		// v0.9.29: Great Weapon Fighting - reroll 1s and 2s on damage dice
+		gwfNote := ""
+		isTwoHanded := hasWeapon && (containsProperty(weapon.Properties, "two-handed") || 
+			(containsProperty(weapon.Properties, "versatile") && strings.Contains(descLower, "two hand")))
+		
+		// Roll damage (with GWF rerolls if applicable)
+		var dmg int
+		if isTwoHanded && hasFightingStyle(charID, "great_weapon_fighting") {
+			dmg = rollDamageGWF(damageDice, false) + damageMod
+			gwfNote = " (GWF)"
+		} else {
+			dmg = rollDamage(damageDice, false) + damageMod
+		}
+		
+		// v0.9.29: Dueling - +2 damage with one-handed melee, no other weapons
+		duelingNote := ""
+		isOneHandedMelee := hasWeapon && weapon.Type == "melee" && !containsProperty(weapon.Properties, "two-handed")
+		if isOneHandedMelee && hasFightingStyle(charID, "dueling") {
+			// Dueling requires wielding a melee weapon in one hand with no other weapons
+			// Shield is fine for Dueling (only blocks with off-hand)
+			dmg += 2
+			duelingNote = " (Dueling +2)"
+		}
 		
 		// Check for Hunter's Colossus Slayer (v0.8.90)
 		// Extra 1d8 damage once per turn against wounded targets
@@ -19954,7 +20082,7 @@ func resolveAction(action, description string, charID int) string {
 			improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 1d8 radiant)", improvedSmiteDmg)
 		}
 		
-		return fmt.Sprintf("Attack with %s: %d to hit%s. Damage: %d%s%s%s%s%s", weaponName, totalAttack, rollInfo, dmg, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
+		return fmt.Sprintf("Attack with %s: %d to hit%s%s. Damage: %d%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
 		
 	case "cast":
 		// v0.9.22: Non-proficient armor blocks spellcasting entirely (PHB p144)
@@ -20923,12 +21051,27 @@ func resolveAction(action, description string, charID int) string {
 			profInfo = " (not proficient)"
 		}
 		
+		// v0.9.29: Two-Weapon Fighting style allows adding ability modifier to off-hand damage
+		hasTWFStyle := hasFightingStyle(charID, "two_weapon_fighting")
+		damageMod := 0
+		twfNote := " (TWF - no ability modifier)"
+		if hasTWFStyle {
+			// Get the ability modifier used for the attack
+			if containsProperty(weapon.Properties, "finesse") {
+				damageMod = modifier(dex)
+			} else {
+				damageMod = modifier(str)
+			}
+			twfNote = fmt.Sprintf(" (TWF Style +%d)", damageMod)
+		}
+		
 		// Critical hit
 		if attackRoll == 20 {
-			// Double damage dice, but still no ability modifier for TWF
+			// Double damage dice
 			dmg := rollDamage(weapon.Damage, true) // crit = double dice
-			return fmt.Sprintf("Offhand attack with %s%s: %d (nat 20 CRITICAL!)%s Damage: %d (TWF - no ability modifier)", 
-				weapon.Name, profInfo, totalAttack, rollInfo, dmg)
+			dmg += damageMod // Add ability mod if have TWF style
+			return fmt.Sprintf("Offhand attack with %s%s: %d (nat 20 CRITICAL!)%s Damage: %d%s", 
+				weapon.Name, profInfo, totalAttack, rollInfo, dmg, twfNote)
 		}
 		
 		// Critical miss
@@ -20937,10 +21080,11 @@ func resolveAction(action, description string, charID int) string {
 				weapon.Name, profInfo, totalAttack, rollInfo)
 		}
 		
-		// Normal hit - NO ability modifier to damage per TWF rules
+		// Normal hit
 		dmg := rollDamage(weapon.Damage, false)
-		return fmt.Sprintf("Offhand attack with %s%s: %d to hit%s. Damage: %d (TWF - no ability modifier)", 
-			weapon.Name, profInfo, totalAttack, rollInfo, dmg)
+		dmg += damageMod // Add ability mod if have TWF style
+		return fmt.Sprintf("Offhand attack with %s%s: %d to hit%s. Damage: %d%s", 
+			weapon.Name, profInfo, totalAttack, rollInfo, dmg, twfNote)
 
 	case "frenzy_attack":
 		// v0.8.92: Berserker Frenzy bonus action attack
@@ -22337,6 +22481,41 @@ func rollDamage(dice string, critical bool) int {
 	}
 	
 	_, total := rollDice(count, sides)
+	return total
+}
+
+// rollDamageGWF rolls damage with Great Weapon Fighting style (v0.9.29)
+// Rerolls 1s and 2s once (must use new roll)
+func rollDamageGWF(dice string, critical bool) int {
+	dice = strings.ToLower(dice)
+	// Remove any +X modifier for now, just roll dice
+	if idx := strings.Index(dice, "+"); idx > 0 {
+		dice = dice[:idx]
+	}
+	
+	parts := strings.Split(dice, "d")
+	if len(parts) != 2 {
+		return rollDie(6)
+	}
+	
+	count, _ := strconv.Atoi(parts[0])
+	sides, _ := strconv.Atoi(parts[1])
+	if count < 1 { count = 1 }
+	if sides < 1 { sides = 6 }
+	
+	if critical {
+		count *= 2 // Double dice on crit
+	}
+	
+	total := 0
+	for i := 0; i < count; i++ {
+		roll := rollDie(sides)
+		// GWF: reroll 1s and 2s once
+		if roll == 1 || roll == 2 {
+			roll = rollDie(sides) // Must use new roll
+		}
+		total += roll
+	}
 	return total
 }
 
@@ -24160,6 +24339,283 @@ func handleGMTurnUndead(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMPreserveLife godoc
+// @Summary Life Domain Channel Divinity: Preserve Life (mass healing)
+// @Description Life Domain Clerics (level 2+) can use Channel Divinity to heal the badly injured. Evoke healing energy that restores up to 5 × cleric level hit points total, divided among creatures within 30 feet. Cannot restore a creature to more than half its hit point maximum. (v0.9.30)
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{caster_id=integer,healing=[]object{target_id=integer,amount=integer}} true "Preserve Life request with healing distribution"
+// @Success 200 {object} map[string]interface{} "Preserve Life results"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not Life Domain Cleric"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/preserve-life [post]
+func handleGMPreserveLife(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CasterID int `json:"caster_id"` // Life Domain Cleric character ID
+		Healing  []struct {
+			TargetID int `json:"target_id"` // Character ID to heal
+			Amount   int `json:"amount"`    // HP to restore to this target
+		} `json:"healing"` // Distribution of healing
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CasterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "caster_id required (the Life Domain Cleric using Preserve Life)",
+		})
+		return
+	}
+	
+	if len(req.Healing) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "healing array required with target_id and amount for each creature",
+			"example": map[string]interface{}{
+				"caster_id": 1,
+				"healing": []map[string]interface{}{
+					{"target_id": 2, "amount": 15},
+					{"target_id": 3, "amount": 10},
+				},
+			},
+		})
+		return
+	}
+	
+	// Verify caster is a Life Domain Cleric level 2+
+	var casterName, className, subclass string
+	var casterLevel int
+	var lobbyID int
+	err = db.QueryRow(`
+		SELECT c.name, c.class, c.level, COALESCE(c.subclass, ''), c.lobby_id
+		FROM characters c
+		WHERE c.id = $1
+	`, req.CasterID).Scan(&casterName, &className, &casterLevel, &subclass, &lobbyID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Caster character not found",
+		})
+		return
+	}
+	
+	if strings.ToLower(className) != "cleric" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_cleric",
+			"message": fmt.Sprintf("%s is a %s, not a Cleric. Preserve Life requires Life Domain Cleric.", casterName, className),
+		})
+		return
+	}
+	
+	if strings.ToLower(subclass) != "life" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "wrong_domain",
+			"message": fmt.Sprintf("%s is a %s Domain Cleric. Preserve Life is only available to Life Domain Clerics.", casterName, subclass),
+			"hint":    "Use Turn Undead (available to all Clerics) instead",
+		})
+		return
+	}
+	
+	if casterLevel < 2 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_level",
+			"message": fmt.Sprintf("%s is level %d. Channel Divinity: Preserve Life requires Cleric level 2+.", casterName, casterLevel),
+		})
+		return
+	}
+	
+	// Verify agent is GM of this campaign
+	var dmID int
+	err = db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+	if err != nil || dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You must be the GM of this campaign to use Preserve Life",
+		})
+		return
+	}
+	
+	// Check if Channel Divinity is available
+	current := getCurrentClassResources(req.CasterID)
+	if current["channel_divinity"] <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_channel_divinity",
+			"message": fmt.Sprintf("%s has no Channel Divinity uses remaining. Recovers on short or long rest.", casterName),
+		})
+		return
+	}
+	
+	// Calculate total healing pool: 5 × cleric level
+	healingPool := 5 * casterLevel
+	
+	// Calculate total requested healing
+	totalRequested := 0
+	for _, h := range req.Healing {
+		if h.Amount < 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_amount",
+				"message": "Healing amounts must be positive",
+			})
+			return
+		}
+		totalRequested += h.Amount
+	}
+	
+	if totalRequested > healingPool {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":        "exceeds_pool",
+			"message":      fmt.Sprintf("Total healing requested (%d) exceeds pool (%d HP = 5 × level %d)", totalRequested, healingPool, casterLevel),
+			"healing_pool": healingPool,
+			"requested":    totalRequested,
+		})
+		return
+	}
+	
+	// Process each healing target
+	results := []map[string]interface{}{}
+	totalHealed := 0
+	
+	for _, h := range req.Healing {
+		if h.Amount == 0 {
+			continue
+		}
+		
+		result := map[string]interface{}{
+			"target_id":  h.TargetID,
+			"requested":  h.Amount,
+		}
+		
+		// Get target info
+		var targetName string
+		var currentHP, maxHP int
+		err = db.QueryRow(`
+			SELECT c.name, c.hp, c.max_hp
+			FROM characters c
+			WHERE c.id = $1 AND c.lobby_id = $2
+		`, h.TargetID, lobbyID).Scan(&targetName, &currentHP, &maxHP)
+		
+		if err != nil {
+			result["error"] = "target_not_found"
+			result["message"] = fmt.Sprintf("Character %d not found in this campaign", h.TargetID)
+			results = append(results, result)
+			continue
+		}
+		
+		result["target_name"] = targetName
+		result["hp_before"] = currentHP
+		result["max_hp"] = maxHP
+		
+		// Calculate half HP maximum (the cap for Preserve Life)
+		halfMax := maxHP / 2
+		
+		// Calculate how much we can actually heal
+		// Cannot restore above half HP maximum
+		actualHeal := h.Amount
+		if currentHP >= halfMax {
+			// Already at or above half HP — cannot heal with Preserve Life
+			result["healed"] = 0
+			result["hp_after"] = currentHP
+			result["capped_at_half"] = true
+			result["message"] = fmt.Sprintf("%s is already at %d HP (≥ half of %d max) — Preserve Life cannot heal above half HP", targetName, currentHP, maxHP)
+			results = append(results, result)
+			continue
+		}
+		
+		// Calculate maximum we can heal to (half HP)
+		maxHealable := halfMax - currentHP
+		if actualHeal > maxHealable {
+			actualHeal = maxHealable
+			result["capped_at_half"] = true
+		}
+		
+		// Apply healing
+		newHP := currentHP + actualHeal
+		if newHP > halfMax {
+			newHP = halfMax
+			actualHeal = halfMax - currentHP
+		}
+		
+		db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, h.TargetID)
+		
+		result["healed"] = actualHeal
+		result["hp_after"] = newHP
+		result["half_max"] = halfMax
+		
+		if actualHeal < h.Amount {
+			result["message"] = fmt.Sprintf("✨ %s healed for %d HP (capped at half max %d): %d → %d HP", targetName, actualHeal, halfMax, currentHP, newHP)
+		} else {
+			result["message"] = fmt.Sprintf("✨ %s healed for %d HP: %d → %d HP", targetName, actualHeal, currentHP, newHP)
+		}
+		
+		totalHealed += actualHeal
+		results = append(results, result)
+	}
+	
+	// Consume Channel Divinity
+	useClassResource(req.CasterID, "channel_divinity", 1)
+	remaining := getCurrentClassResources(req.CasterID)["channel_divinity"]
+	
+	// Log the action
+	targetNames := []string{}
+	for _, r := range results {
+		if name, ok := r["target_name"].(string); ok {
+			if healed, ok := r["healed"].(int); ok && healed > 0 {
+				targetNames = append(targetNames, fmt.Sprintf("%s (+%d)", name, healed))
+			}
+		}
+	}
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CasterID, "preserve_life",
+		fmt.Sprintf("%s uses Channel Divinity: Preserve Life!", casterName),
+		fmt.Sprintf("Healed %d HP total: %s", totalHealed, strings.Join(targetNames, ", ")))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":                    true,
+		"caster":                     casterName,
+		"cleric_level":               casterLevel,
+		"healing_pool":               healingPool,
+		"healing_used":               totalHealed,
+		"healing_remaining":          healingPool - totalRequested,
+		"channel_divinity_remaining": remaining,
+		"results":                    results,
+		"rules_note":                 "Preserve Life cannot restore a creature to more than half its hit point maximum",
+	})
 }
 
 // handleGMCounterspell godoc
@@ -26815,6 +27271,123 @@ func getMetamagicChoices(charID int) []string {
 	var choices []string
 	json.Unmarshal(choicesJSON, &choices)
 	return choices
+}
+
+// FightingStyle represents a combat specialization for Fighters, Paladins, and Rangers (v0.9.29)
+type FightingStyle struct {
+	Slug        string   `json:"slug"`
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Classes     []string `json:"classes"` // Which classes can choose this style
+	Mechanic    string   `json:"mechanic"` // Mechanical effect key
+}
+
+// All 6 SRD Fighting Styles
+var fightingStyles = map[string]FightingStyle{
+	"archery": {
+		Slug:        "archery",
+		Name:        "Archery",
+		Description: "You gain a +2 bonus to attack rolls you make with ranged weapons.",
+		Classes:     []string{"fighter", "ranger"},
+		Mechanic:    "ranged_attack_+2",
+	},
+	"defense": {
+		Slug:        "defense",
+		Name:        "Defense",
+		Description: "While you are wearing armor, you gain a +1 bonus to AC.",
+		Classes:     []string{"fighter", "paladin", "ranger"},
+		Mechanic:    "armor_ac_+1",
+	},
+	"dueling": {
+		Slug:        "dueling",
+		Name:        "Dueling",
+		Description: "When you are wielding a melee weapon in one hand and no other weapons, you gain a +2 bonus to damage rolls with that weapon.",
+		Classes:     []string{"fighter", "paladin", "ranger"},
+		Mechanic:    "one_handed_damage_+2",
+	},
+	"great_weapon_fighting": {
+		Slug:        "great_weapon_fighting",
+		Name:        "Great Weapon Fighting",
+		Description: "When you roll a 1 or 2 on a damage die for an attack you make with a melee weapon that you are wielding with two hands, you can reroll the die and must use the new roll. The weapon must have the two-handed or versatile property for you to gain this benefit.",
+		Classes:     []string{"fighter", "paladin"},
+		Mechanic:    "reroll_1_2_damage",
+	},
+	"protection": {
+		Slug:        "protection",
+		Name:        "Protection",
+		Description: "When a creature you can see attacks a target other than you that is within 5 feet of you, you can use your reaction to impose disadvantage on the attack roll. You must be wielding a shield.",
+		Classes:     []string{"fighter", "paladin"},
+		Mechanic:    "reaction_impose_disadvantage",
+	},
+	"two_weapon_fighting": {
+		Slug:        "two_weapon_fighting",
+		Name:        "Two-Weapon Fighting",
+		Description: "When you engage in two-weapon fighting, you can add your ability modifier to the damage of the second attack.",
+		Classes:     []string{"fighter", "ranger"},
+		Mechanic:    "offhand_ability_mod",
+	},
+}
+
+// getFightingStyles returns the fighting styles a character has chosen
+func getFightingStyles(charID int) []string {
+	var stylesJSON []byte
+	err := db.QueryRow("SELECT COALESCE(fighting_styles, '[]') FROM characters WHERE id = $1", charID).Scan(&stylesJSON)
+	if err != nil {
+		return []string{}
+	}
+	var styles []string
+	json.Unmarshal(stylesJSON, &styles)
+	return styles
+}
+
+// hasFightingStyle checks if a character has a specific fighting style
+func hasFightingStyle(charID int, slug string) bool {
+	styles := getFightingStyles(charID)
+	for _, s := range styles {
+		if s == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// getMaxFightingStyles returns how many fighting styles a character can have
+func getMaxFightingStyles(class string, level int, subclass string) int {
+	class = strings.ToLower(class)
+	switch class {
+	case "fighter":
+		if level >= 1 {
+			// Champion Fighters get an additional style at level 10
+			if subclass == "champion" && level >= 10 {
+				return 2
+			}
+			return 1
+		}
+	case "paladin":
+		if level >= 2 {
+			return 1
+		}
+	case "ranger":
+		if level >= 2 {
+			return 1
+		}
+	}
+	return 0
+}
+
+// getAvailableFightingStyles returns styles available to a character's class
+func getAvailableFightingStyles(class string) []FightingStyle {
+	class = strings.ToLower(class)
+	available := []FightingStyle{}
+	for _, style := range fightingStyles {
+		for _, c := range style.Classes {
+			if c == class {
+				available = append(available, style)
+				break
+			}
+		}
+	}
+	return available
 }
 
 // ClassFeature represents a core class feature granted at a specific level
@@ -38068,6 +38641,308 @@ func getMulticlassSpellSlots(classLevels map[string]int) map[int]int {
 
 // handleUniverseMetamagic godoc
 // @Summary List all Metamagic options
+// handleCharacterFightingStyle handles viewing and choosing fighting styles
+// @Summary View or choose fighting style
+// @Description GET: View available and known fighting styles. POST: Choose a fighting style.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (for GET)"
+// @Param request body object{character_id=int,style=string} false "Fighting style choice (for POST)"
+// @Success 200 {object} object
+// @Router /characters/fighting-style [get]
+// @Router /characters/fighting-style [post]
+func handleCharacterFightingStyle(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			// List all fighting styles
+			styles := []FightingStyle{}
+			slugs := []string{}
+			for slug := range fightingStyles {
+				slugs = append(slugs, slug)
+			}
+			sort.Strings(slugs)
+			for _, slug := range slugs {
+				styles = append(styles, fightingStyles[slug])
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"fighting_styles": styles,
+				"note":            "Use character_id parameter to see a specific character's fighting styles",
+			})
+			return
+		}
+		
+		var class, subclass string
+		var level int
+		var stylesJSON []byte
+		err = db.QueryRow(`
+			SELECT class, level, COALESCE(subclass, ''), COALESCE(fighting_styles, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &subclass, &stylesJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		classLower := strings.ToLower(class)
+		maxStyles := getMaxFightingStyles(class, level, subclass)
+		
+		if maxStyles == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_fighting_style_feature",
+				"message": fmt.Sprintf("%s level %d does not have the Fighting Style feature", class, level),
+				"note":    "Fighters get Fighting Style at level 1. Paladins and Rangers get it at level 2.",
+			})
+			return
+		}
+		
+		var knownSlugs []string
+		json.Unmarshal(stylesJSON, &knownSlugs)
+		
+		knownStyles := []FightingStyle{}
+		for _, slug := range knownSlugs {
+			if style, ok := fightingStyles[slug]; ok {
+				knownStyles = append(knownStyles, style)
+			}
+		}
+		
+		// Available styles for this class
+		available := getAvailableFightingStyles(classLower)
+		
+		// Filter out already known
+		availableToChoose := []FightingStyle{}
+		for _, style := range available {
+			known := false
+			for _, k := range knownSlugs {
+				if k == style.Slug {
+					known = true
+					break
+				}
+			}
+			if !known {
+				availableToChoose = append(availableToChoose, style)
+			}
+		}
+		
+		canChooseMore := len(knownSlugs) < maxStyles
+		
+		response := map[string]interface{}{
+			"character_id":     charID,
+			"class":            class,
+			"level":            level,
+			"fighting_styles":  knownStyles,
+			"styles_count":     len(knownSlugs),
+			"max_styles":       maxStyles,
+			"can_choose_more":  canChooseMore,
+			"available":        availableToChoose,
+		}
+		
+		if canChooseMore {
+			response["how_to_choose"] = "POST /api/characters/fighting-style with character_id and style (slug)"
+		}
+		
+		if subclass == "champion" && level >= 10 && len(knownSlugs) < 2 {
+			response["champion_note"] = "Champion's Additional Fighting Style: You can choose a second fighting style!"
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Style       string `json:"style"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Verify ownership
+	var ownerID int
+	var class, subclass string
+	var level int
+	var stylesJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, class, level, COALESCE(subclass, ''), COALESCE(fighting_styles, '[]')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &level, &subclass, &stylesJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only choose fighting styles for your own characters",
+		})
+		return
+	}
+	
+	classLower := strings.ToLower(class)
+	maxStyles := getMaxFightingStyles(class, level, subclass)
+	
+	if maxStyles == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_fighting_style_feature",
+			"message": fmt.Sprintf("%s level %d does not have the Fighting Style feature", class, level),
+		})
+		return
+	}
+	
+	var knownSlugs []string
+	json.Unmarshal(stylesJSON, &knownSlugs)
+	
+	if len(knownSlugs) >= maxStyles {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "max_styles_reached",
+			"message": fmt.Sprintf("You already have %d fighting style(s), the maximum for %s level %d", len(knownSlugs), class, level),
+		})
+		return
+	}
+	
+	// Validate style exists
+	styleSlug := strings.ToLower(strings.ReplaceAll(req.Style, " ", "_"))
+	style, exists := fightingStyles[styleSlug]
+	if !exists {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "invalid_style",
+			"message":         fmt.Sprintf("Unknown fighting style: %s", req.Style),
+			"valid_styles":    getAvailableFightingStyles(classLower),
+		})
+		return
+	}
+	
+	// Check if class can use this style
+	classCanUse := false
+	for _, c := range style.Classes {
+		if c == classLower {
+			classCanUse = true
+			break
+		}
+	}
+	if !classCanUse {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":     "style_not_available",
+			"message":   fmt.Sprintf("%s cannot choose the %s fighting style", class, style.Name),
+			"available": getAvailableFightingStyles(classLower),
+		})
+		return
+	}
+	
+	// Check if already known
+	for _, k := range knownSlugs {
+		if k == styleSlug {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_known",
+				"message": fmt.Sprintf("You already know the %s fighting style", style.Name),
+			})
+			return
+		}
+	}
+	
+	// Add the style
+	knownSlugs = append(knownSlugs, styleSlug)
+	newStylesJSON, _ := json.Marshal(knownSlugs)
+	
+	_, err = db.Exec(`UPDATE characters SET fighting_styles = $1 WHERE id = $2`, newStylesJSON, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "db_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Get all known styles with info
+	knownStyles := []FightingStyle{}
+	for _, slug := range knownSlugs {
+		if s, ok := fightingStyles[slug]; ok {
+			knownStyles = append(knownStyles, s)
+		}
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"message":         fmt.Sprintf("⚔️ You have adopted the %s fighting style!", style.Name),
+		"style":           style,
+		"fighting_styles": knownStyles,
+		"styles_count":    len(knownSlugs),
+		"max_styles":      maxStyles,
+		"effects": map[string]string{
+			"archery":              "+2 to ranged attack rolls",
+			"defense":              "+1 AC while wearing armor",
+			"dueling":              "+2 damage with one-handed melee weapon (no other weapons)",
+			"great_weapon_fighting": "Reroll 1s and 2s on damage dice for two-handed weapons",
+			"protection":           "Reaction to impose disadvantage on attack vs adjacent ally (requires shield)",
+			"two_weapon_fighting":   "Add ability modifier to off-hand attack damage",
+		}[styleSlug],
+	})
+}
+
+// handleUniverseFightingStyles returns all available fighting styles
+// @Summary List all fighting styles
+// @Description Returns all 6 SRD Fighting Style options
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} object{fighting_styles=[]FightingStyle}
+// @Router /universe/fighting-styles [get]
+func handleUniverseFightingStyles(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	styles := []FightingStyle{}
+	slugs := []string{}
+	for slug := range fightingStyles {
+		slugs = append(slugs, slug)
+	}
+	sort.Strings(slugs)
+	for _, slug := range slugs {
+		styles = append(styles, fightingStyles[slug])
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"fighting_styles": styles,
+		"class_availability": map[string][]string{
+			"fighter": {"archery", "defense", "dueling", "great_weapon_fighting", "protection", "two_weapon_fighting"},
+			"paladin": {"defense", "dueling", "great_weapon_fighting", "protection"},
+			"ranger":  {"archery", "defense", "dueling", "two_weapon_fighting"},
+		},
+		"levels": map[string]int{
+			"fighter": 1,
+			"paladin": 2,
+			"ranger":  2,
+		},
+		"note": "Champion Fighters gain an Additional Fighting Style at level 10",
+	})
+}
+
 // @Description Returns all 8 SRD Metamagic options available to Sorcerers
 // @Tags Universe
 // @Produce json
