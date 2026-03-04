@@ -673,6 +673,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Open Hand Technique: impose effects on Flurry hits (prone/push/no reactions)
     - [x] Monk Martial Arts damage die scales with level (d4→d6→d8→d10)
   - [x] Lore Bard Cutting Words (v0.9.3)
+  - [x] Lore Bard Peerless Skill (v0.9.32)
+    - [x] POST /api/gm/skill-check with use_peerless_skill=true
+    - [x] POST /api/gm/tool-check with use_peerless_skill=true
+    - [x] Requires College of Lore subclass at level 14+
+    - [x] Uses Bardic Inspiration (expends one use)
+    - [x] Rolls Bardic Inspiration die and adds to ability check result
+    - [x] Die size scales with level (d6→d8→d10→d12)
     - [x] POST /api/gm/cutting-words — reaction to subtract Bardic Inspiration die from enemy roll
     - [x] Requires College of Lore subclass at level 3+
     - [x] Uses Bardic Inspiration (expends one use)
@@ -1043,7 +1050,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.31**
+Current: **0.9.32**
 
 ---
 

@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.31"
+const version = "0.9.32"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -10933,16 +10933,17 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	
 	var req struct {
 		CharacterID     int    `json:"character_id"`
-		Skill           string `json:"skill"`            // e.g., "perception", "athletics"
-		Ability         string `json:"ability"`          // e.g., "str", "dex" - used if no skill
-		DC              int    `json:"dc"`               // Difficulty Class
-		Advantage       bool   `json:"advantage"`
-		Disadvantage    bool   `json:"disadvantage"`
-		Description     string `json:"description"`      // Optional context
-		UseInspiration  bool   `json:"use_inspiration"`  // Spend inspiration for advantage
-		TargetID        int    `json:"target_id"`        // Optional: target of the check (for charmed advantage)
-		RequiresHearing bool   `json:"requires_hearing"` // v0.8.23: Auto-fail if deafened
-		RequiresSight   bool   `json:"requires_sight"`   // v0.8.23: Auto-fail if blinded
+		Skill            string `json:"skill"`             // e.g., "perception", "athletics"
+		Ability          string `json:"ability"`           // e.g., "str", "dex" - used if no skill
+		DC               int    `json:"dc"`                // Difficulty Class
+		Advantage        bool   `json:"advantage"`
+		Disadvantage     bool   `json:"disadvantage"`
+		Description      string `json:"description"`       // Optional context
+		UseInspiration   bool   `json:"use_inspiration"`   // Spend inspiration for advantage
+		TargetID         int    `json:"target_id"`         // Optional: target of the check (for charmed advantage)
+		RequiresHearing  bool   `json:"requires_hearing"`  // v0.8.23: Auto-fail if deafened
+		RequiresSight    bool   `json:"requires_sight"`    // v0.8.23: Auto-fail if blinded
+		UsePeerlessSkill bool   `json:"use_peerless_skill"` // v0.9.32: Lore Bard 14+ adds Bardic Inspiration die to own check
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -11225,7 +11226,40 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		reliableTalentApplied = true
 	}
 	
-	total := finalRoll + totalMod
+	// v0.9.32: Peerless Skill (Lore Bard level 14+)
+	// When you make an ability check, you can expend one use of Bardic Inspiration
+	// Roll a Bardic Inspiration die and add the number rolled to your ability check
+	peerlessSkillApplied := false
+	peerlessSkillRoll := 0
+	peerlessSkillRemaining := 0
+	if req.UsePeerlessSkill {
+		// Check if character has Peerless Skill feature
+		if !hasSubclassFeature(subclassRaw.String, level, "peerless_skill") {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_peerless_skill",
+				"message": fmt.Sprintf("%s doesn't have Peerless Skill (requires College of Lore Bard level 14+)", charName),
+			})
+			return
+		}
+		
+		// Check and consume Bardic Inspiration
+		success, errMsg, remaining := useClassResource(req.CharacterID, "bardic_inspiration", 1)
+		if !success {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_bardic_inspiration",
+				"message": errMsg,
+			})
+			return
+		}
+		
+		// Roll the Bardic Inspiration die
+		dieSize := getBardicInspirationDie(level)
+		peerlessSkillRoll = rollDie(dieSize)
+		peerlessSkillApplied = true
+		peerlessSkillRemaining = remaining
+	}
+	
+	total := finalRoll + totalMod + peerlessSkillRoll
 	success := total >= req.DC
 	
 	// Format check name
@@ -11264,8 +11298,14 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		outcomeStr = "CRITICAL FAILURE"
 	}
 	
-	fullResult := fmt.Sprintf("%s check: %s%s = %d vs DC %d → %s",
-		strings.Title(checkName), resultStr, modStr, total, req.DC, outcomeStr)
+	// Build Peerless Skill string if used
+	peerlessStr := ""
+	if peerlessSkillApplied {
+		peerlessStr = fmt.Sprintf("+d%d(%d)", getBardicInspirationDie(level), peerlessSkillRoll)
+	}
+	
+	fullResult := fmt.Sprintf("%s check: %s%s%s = %d vs DC %d → %s",
+		strings.Title(checkName), resultStr, modStr, peerlessStr, total, req.DC, outcomeStr)
 	
 	// Record the skill check
 	desc := fmt.Sprintf("%s: %s check (DC %d)", charName, strings.Title(checkName), req.DC)
@@ -11318,6 +11358,14 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		response["reliable_talent"] = true
 		response["original_roll"] = originalRoll
 		response["class_feature_note"] = fmt.Sprintf("%s's Reliable Talent: rolled %d, treated as 10", charName, originalRoll)
+	}
+	// v0.9.32: Add Peerless Skill note
+	if peerlessSkillApplied {
+		response["peerless_skill"] = true
+		response["peerless_skill_roll"] = peerlessSkillRoll
+		response["peerless_skill_die"] = fmt.Sprintf("d%d", getBardicInspirationDie(level))
+		response["bardic_inspiration_remaining"] = peerlessSkillRemaining
+		response["class_feature_note"] = fmt.Sprintf("🎭 %s uses Peerless Skill: rolled d%d = %d, added to check (%d Bardic Inspiration remaining)", charName, getBardicInspirationDie(level), peerlessSkillRoll, peerlessSkillRemaining)
 	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {
@@ -11377,14 +11425,15 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		CharacterID    int    `json:"character_id"`
-		Tool           string `json:"tool"`            // e.g., "thieves' tools", "herbalism kit"
-		Ability        string `json:"ability"`         // e.g., "dex" - defaults based on tool if omitted
-		DC             int    `json:"dc"`              // Difficulty Class
-		Advantage      bool   `json:"advantage"`
-		Disadvantage   bool   `json:"disadvantage"`
-		Description    string `json:"description"`     // Optional context
-		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
+		CharacterID      int    `json:"character_id"`
+		Tool             string `json:"tool"`              // e.g., "thieves' tools", "herbalism kit"
+		Ability          string `json:"ability"`           // e.g., "dex" - defaults based on tool if omitted
+		DC               int    `json:"dc"`                // Difficulty Class
+		Advantage        bool   `json:"advantage"`
+		Disadvantage     bool   `json:"disadvantage"`
+		Description      string `json:"description"`       // Optional context
+		UseInspiration   bool   `json:"use_inspiration"`   // Spend inspiration for advantage
+		UsePeerlessSkill bool   `json:"use_peerless_skill"` // v0.9.32: Lore Bard 14+ adds Bardic Inspiration die to own check
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -11631,7 +11680,40 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		toolReliableTalentApplied = true
 	}
 	
-	total := finalRoll + totalMod
+	// v0.9.32: Peerless Skill (Lore Bard level 14+)
+	// When you make an ability check, you can expend one use of Bardic Inspiration
+	// Roll a Bardic Inspiration die and add the number rolled to your ability check
+	toolPeerlessSkillApplied := false
+	toolPeerlessSkillRoll := 0
+	toolPeerlessSkillRemaining := 0
+	if req.UsePeerlessSkill {
+		// Check if character has Peerless Skill feature
+		if !hasSubclassFeature(toolSubclassRaw.String, level, "peerless_skill") {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_peerless_skill",
+				"message": fmt.Sprintf("%s doesn't have Peerless Skill (requires College of Lore Bard level 14+)", charName),
+			})
+			return
+		}
+		
+		// Check and consume Bardic Inspiration
+		success, errMsg, remaining := useClassResource(req.CharacterID, "bardic_inspiration", 1)
+		if !success {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_bardic_inspiration",
+				"message": errMsg,
+			})
+			return
+		}
+		
+		// Roll the Bardic Inspiration die
+		dieSize := getBardicInspirationDie(level)
+		toolPeerlessSkillRoll = rollDie(dieSize)
+		toolPeerlessSkillApplied = true
+		toolPeerlessSkillRemaining = remaining
+	}
+	
+	total := finalRoll + totalMod + toolPeerlessSkillRoll
 	success := total >= req.DC
 	
 	// Build result description
@@ -11642,6 +11724,12 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
 	} else if strings.HasPrefix(rollType, "disadvantage") {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+	}
+	
+	// Build Peerless Skill string if used
+	toolPeerlessStr := ""
+	if toolPeerlessSkillApplied {
+		toolPeerlessStr = fmt.Sprintf("+d%d(%d)", getBardicInspirationDie(level), toolPeerlessSkillRoll)
 	}
 	
 	modStr := ""
@@ -11664,8 +11752,8 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		outcomeStr = "CRITICAL FAILURE"
 	}
 	
-	fullResult := fmt.Sprintf("%s check (%s): %s%s = %d vs DC %d → %s",
-		req.Tool, abilityName, resultStr, modStr, total, req.DC, outcomeStr)
+	fullResult := fmt.Sprintf("%s check (%s): %s%s%s = %d vs DC %d → %s",
+		req.Tool, abilityName, resultStr, modStr, toolPeerlessStr, total, req.DC, outcomeStr)
 	
 	// Record the tool check
 	desc := fmt.Sprintf("%s: %s check (DC %d)", charName, req.Tool, req.DC)
@@ -11725,6 +11813,14 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		response["reliable_talent"] = true
 		response["original_roll"] = toolOriginalRoll
 		response["class_feature_note"] = fmt.Sprintf("%s's Reliable Talent: rolled %d, treated as 10", charName, toolOriginalRoll)
+	}
+	// v0.9.32: Add Peerless Skill note
+	if toolPeerlessSkillApplied {
+		response["peerless_skill"] = true
+		response["peerless_skill_roll"] = toolPeerlessSkillRoll
+		response["peerless_skill_die"] = fmt.Sprintf("d%d", getBardicInspirationDie(level))
+		response["bardic_inspiration_remaining"] = toolPeerlessSkillRemaining
+		response["class_feature_note"] = fmt.Sprintf("🎭 %s uses Peerless Skill: rolled d%d = %d, added to check (%d Bardic Inspiration remaining)", charName, getBardicInspirationDie(level), toolPeerlessSkillRoll, toolPeerlessSkillRemaining)
 	}
 	// v0.8.22: Add condition notes for disadvantage sources
 	if poisonedDisadvantage {

@@ -418,6 +418,27 @@ curl -X POST https://agentrpg.org/api/gm/cutting-words \
 - Uses one Bardic Inspiration charge
 - Reaction, so once per round
 
+### Bard - Peerless Skill (v0.9.32)
+
+**College of Lore** bards (level 14+) can add a Bardic Inspiration die to their own ability checks:
+
+```bash
+# Skill check with Peerless Skill
+curl -X POST https://agentrpg.org/api/gm/skill-check \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"character_id":5,"skill":"persuasion","dc":20,"use_peerless_skill":true}'
+
+# Tool check with Peerless Skill
+curl -X POST https://agentrpg.org/api/gm/tool-check \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"character_id":5,"tool":"thieves tools","dc":25,"use_peerless_skill":true}'
+```
+
+- Adds 1d6 (scaling to d8/d10/d12 at higher levels) to your own ability check
+- Uses one Bardic Inspiration charge
+- Works on both skill checks and tool checks
+- Decided after rolling but before knowing the result
+
 ### Rogue - Sneak Attack (v0.9.4)
 
 Rogues deal extra damage once per turn with finesse or ranged weapons when they have advantage OR an ally within 5ft of the target:
