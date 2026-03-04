@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.37
+// @version 0.9.38
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.37"
+const version = "0.9.38"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -15512,6 +15512,27 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.38: Check for Elemental Affinity (Draconic Sorcerer level 6+)
+	// When casting a spell that deals damage matching dragon ancestry, add CHA mod to damage
+	elementalAffinityBonus := 0
+	elementalAffinityAncestry := ""
+	if req.CasterID > 0 && damageType != "" {
+		var subclass sql.NullString
+		var casterLevel, casterCha int
+		db.QueryRow(`SELECT COALESCE(subclass, ''), level, cha FROM characters WHERE id = $1`, req.CasterID).Scan(&subclass, &casterLevel, &casterCha)
+		
+		if subclass.Valid && subclass.String == "draconic" {
+			if hasSubclassFeature(subclass.String, casterLevel, "elemental_affinity") {
+				ancestryDamageType := getDragonAncestryDamageType(req.CasterID)
+				if ancestryDamageType != "" && strings.ToLower(damageType) == ancestryDamageType {
+					elementalAffinityBonus = modifier(casterCha)
+					elementalAffinityAncestry = ancestryDamageType
+					baseDamage += elementalAffinityBonus
+				}
+			}
+		}
+	}
+	
 	// v0.9.37: Check for Potent Cantrip (Evocation Wizard level 6+)
 	// Potent Cantrip: when a creature succeeds on save against your cantrip, they take half damage
 	hasPotentCantrip := false
@@ -15820,6 +15841,16 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			"max_targets":        maxSculptTargets,
 			"protected_targets":  sculptedIDs,
 			"info":               "Protected targets automatically succeeded on saves and took no damage",
+		}
+	}
+	
+	// Add Elemental Affinity info (v0.9.38)
+	if elementalAffinityBonus > 0 {
+		response["elemental_affinity"] = map[string]interface{}{
+			"applied":     true,
+			"cha_bonus":   elementalAffinityBonus,
+			"damage_type": elementalAffinityAncestry,
+			"info":        fmt.Sprintf("Added Charisma modifier to %s damage (Elemental Affinity)", elementalAffinityAncestry),
 		}
 	}
 	
@@ -20606,11 +20637,26 @@ func resolveAction(action, description string, charID int) string {
 				}
 				
 				dmg := rollDamage(damageDice, false)
+				
+				// v0.9.38: Elemental Affinity (Draconic Sorcerer level 6+)
+				// Add CHA mod to damage when spell damage type matches dragon ancestry
+				elementalAffinityNote := ""
+				if subclass.Valid && subclass.String == "draconic" {
+					if hasSubclassFeature(subclass.String, level, "elemental_affinity") {
+						ancestryDamageType := getDragonAncestryDamageType(charID)
+						if ancestryDamageType != "" && strings.ToLower(spell.DamageType) == ancestryDamageType {
+							chaBonus := modifier(cha)
+							dmg += chaBonus
+							elementalAffinityNote = fmt.Sprintf(" (Elemental Affinity: +%d)", chaBonus)
+						}
+					}
+				}
+				
 				saveInfo := ""
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, metamagicNote, materialConsumedNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, metamagicNote, materialConsumedNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -29204,6 +29250,56 @@ func getSubclassMechanic(subclassSlug string, level int, mechanic string) (strin
 		}
 	}
 	return "", false
+}
+
+// dragonAncestryDamageTypes maps dragon ancestry to damage type (PHB p102)
+var dragonAncestryDamageTypes = map[string]string{
+	"black":  "acid",
+	"blue":   "lightning",
+	"brass":  "fire",
+	"bronze": "lightning",
+	"copper": "acid",
+	"gold":   "fire",
+	"green":  "poison",
+	"red":    "fire",
+	"silver": "cold",
+	"white":  "cold",
+}
+
+// getDragonAncestryDamageType returns the damage type for a Draconic Sorcerer's dragon ancestry (v0.9.38)
+// Returns empty string if character has no dragon ancestry chosen or isn't a Draconic Sorcerer
+func getDragonAncestryDamageType(charID int) string {
+	var subclass sql.NullString
+	var choicesJSON []byte
+	err := db.QueryRow(`
+		SELECT COALESCE(subclass, ''), COALESCE(subclass_choices, '{}')
+		FROM characters WHERE id = $1
+	`, charID).Scan(&subclass, &choicesJSON)
+	if err != nil {
+		return ""
+	}
+	
+	// Must be Draconic Sorcerer
+	if !subclass.Valid || subclass.String != "draconic" {
+		return ""
+	}
+	
+	// Get dragon_ancestor choice from subclass_choices
+	var choices map[string]string
+	json.Unmarshal(choicesJSON, &choices)
+	
+	ancestry, ok := choices["dragon_ancestor"]
+	if !ok {
+		return ""
+	}
+	
+	// Look up damage type
+	damageType, ok := dragonAncestryDamageTypes[ancestry]
+	if !ok {
+		return ""
+	}
+	
+	return damageType
 }
 
 // getLandCircleSpells returns circle spells for Circle of the Land druids based on land type (v0.9.23)
@@ -39202,6 +39298,70 @@ func getSubclassChoiceOptions(subclass, feature string) []map[string]interface{}
 				"slug":        "uncanny_dodge",
 				"name":        "Uncanny Dodge",
 				"description": "When an attacker you can see hits you with an attack, you can use your reaction to halve the attack's damage against you.",
+			},
+		}
+	case "dragon_ancestor":
+		// v0.9.38: Draconic Sorcerer dragon ancestry choice (PHB p102)
+		return []map[string]interface{}{
+			{
+				"slug":        "black",
+				"name":        "Black Dragon",
+				"damage_type": "acid",
+				"description": "Black dragon ancestry. Associated damage type: Acid.",
+			},
+			{
+				"slug":        "blue",
+				"name":        "Blue Dragon",
+				"damage_type": "lightning",
+				"description": "Blue dragon ancestry. Associated damage type: Lightning.",
+			},
+			{
+				"slug":        "brass",
+				"name":        "Brass Dragon",
+				"damage_type": "fire",
+				"description": "Brass dragon ancestry. Associated damage type: Fire.",
+			},
+			{
+				"slug":        "bronze",
+				"name":        "Bronze Dragon",
+				"damage_type": "lightning",
+				"description": "Bronze dragon ancestry. Associated damage type: Lightning.",
+			},
+			{
+				"slug":        "copper",
+				"name":        "Copper Dragon",
+				"damage_type": "acid",
+				"description": "Copper dragon ancestry. Associated damage type: Acid.",
+			},
+			{
+				"slug":        "gold",
+				"name":        "Gold Dragon",
+				"damage_type": "fire",
+				"description": "Gold dragon ancestry. Associated damage type: Fire.",
+			},
+			{
+				"slug":        "green",
+				"name":        "Green Dragon",
+				"damage_type": "poison",
+				"description": "Green dragon ancestry. Associated damage type: Poison.",
+			},
+			{
+				"slug":        "red",
+				"name":        "Red Dragon",
+				"damage_type": "fire",
+				"description": "Red dragon ancestry. Associated damage type: Fire.",
+			},
+			{
+				"slug":        "silver",
+				"name":        "Silver Dragon",
+				"damage_type": "cold",
+				"description": "Silver dragon ancestry. Associated damage type: Cold.",
+			},
+			{
+				"slug":        "white",
+				"name":        "White Dragon",
+				"damage_type": "cold",
+				"description": "White dragon ancestry. Associated damage type: Cold.",
 			},
 		}
 	}

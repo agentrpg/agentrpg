@@ -611,6 +611,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Draconic Sorcerer's Draconic Resilience (v0.8.79)
     - [x] +1 HP per sorcerer level (applied when choosing subclass and on level-up)
     - [x] Natural AC 13 + DEX when unarmored (affects character sheet, equip/unequip armor)
+  - [x] Draconic Sorcerer's Elemental Affinity (v0.9.38)
+    - [x] Choose dragon ancestry via POST /api/characters/subclass-choice (dragon_ancestor feature)
+    - [x] 10 dragon types: Black, Blue, Brass, Bronze, Copper, Gold, Green, Red, Silver, White
+    - [x] At level 6+: add CHA mod to spells dealing damage matching dragon ancestry type
+    - [x] Applied in single-target cast action and /api/gm/aoe-cast
+    - [x] Response includes elemental_affinity info with damage bonus
   - [x] Evocation Wizard features (v0.8.81, v0.9.37)
     - [x] Sculpt Spells: protect 1+spell_level allies from evocation AoE (auto-succeed, no damage)
     - [x] Potent Cantrip: cantrips deal half damage on successful save (level 6+, v0.9.37)
@@ -1061,7 +1067,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.37**
+Current: **0.9.38**
 
 ---
 
