@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.26
+// @version 0.9.27
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.26"
+const version = "0.9.27"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -859,6 +859,10 @@ func initDB() {
 		-- Upcasting support (v0.8.28)
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS damage_at_slot_level JSONB DEFAULT '{}';
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS heal_at_slot_level JSONB DEFAULT '{}';
+		-- Material component tracking (v0.9.27)
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS material TEXT;
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS material_cost INTEGER DEFAULT 0;
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS material_consumed BOOLEAN DEFAULT FALSE;
 		
 		-- Legendary Resistances (v0.8.29 - Phase 8 P2)
 		-- Number of legendary resistances a monster has (usually 3 for bosses)
@@ -1495,8 +1499,27 @@ func seedSpellsFromAPI() {
 			}
 		}
 		
-		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size, damage_at_slot_level, heal_at_slot_level)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		// Material component details (v0.9.27)
+		material := ""
+		materialCost := 0
+		materialConsumed := false
+		if mat, ok := detail["material"].(string); ok {
+			material = mat
+			matLower := strings.ToLower(mat)
+			// Check if consumed
+			materialConsumed = strings.Contains(matLower, "consume")
+			// Parse cost from patterns like "worth 300 gp", "worth 300gp", "300 gp", "1,000 gp"
+			costRegex := regexp.MustCompile(`(?:worth\s+)?(\d{1,3}(?:,\d{3})*)\s*gp`)
+			if matches := costRegex.FindStringSubmatch(matLower); len(matches) > 1 {
+				costStr := strings.ReplaceAll(matches[1], ",", "")
+				if cost, err := strconv.Atoi(costStr); err == nil {
+					materialCost = cost
+				}
+			}
+		}
+		
+		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size, damage_at_slot_level, heal_at_slot_level, material, material_cost, material_consumed)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name, level = EXCLUDED.level, school = EXCLUDED.school,
 				casting_time = EXCLUDED.casting_time, range = EXCLUDED.range,
@@ -1506,10 +1529,12 @@ func seedSpellsFromAPI() {
 				healing = EXCLUDED.healing, is_ritual = EXCLUDED.is_ritual,
 				aoe_shape = EXCLUDED.aoe_shape, aoe_size = EXCLUDED.aoe_size,
 				damage_at_slot_level = EXCLUDED.damage_at_slot_level,
-				heal_at_slot_level = EXCLUDED.heal_at_slot_level`,
+				heal_at_slot_level = EXCLUDED.heal_at_slot_level,
+				material = EXCLUDED.material, material_cost = EXCLUDED.material_cost,
+				material_consumed = EXCLUDED.material_consumed`,
 			r["index"], detail["name"], int(detail["level"].(float64)), school, detail["casting_time"], detail["range"],
 			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing, isRitual, aoeShape, aoeSize,
-			damageAtSlotLevelJSON, healAtSlotLevelJSON)
+			damageAtSlotLevelJSON, healAtSlotLevelJSON, material, materialCost, materialConsumed)
 	}
 	log.Println("Spells seeded")
 }
@@ -1813,20 +1838,21 @@ func loadSRDFromDB() {
 
 	// Load spells (for resolveAction)
 	// v0.8.38: Added casting_time for bonus action spell restriction
-	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, ''), COALESCE(damage_at_slot_level, '{}'), COALESCE(heal_at_slot_level, '{}'), COALESCE(casting_time, '1 action') FROM spells")
+	// v0.9.27: Added material, material_cost, material_consumed for costly/consumed components
+	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, ''), COALESCE(damage_at_slot_level, '{}'), COALESCE(heal_at_slot_level, '{}'), COALESCE(casting_time, '1 action'), COALESCE(material, ''), COALESCE(material_cost, 0), COALESCE(material_consumed, false) FROM spells")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
-			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape, components, castingTime string
+			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape, components, castingTime, material string
 			var damageAtSlotLevelJSON, healAtSlotLevelJSON []byte
-			var level, aoeSize int
-			var isRitual bool
-			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components, &damageAtSlotLevelJSON, &healAtSlotLevelJSON, &castingTime)
+			var level, aoeSize, materialCost int
+			var isRitual, materialConsumed bool
+			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components, &damageAtSlotLevelJSON, &healAtSlotLevelJSON, &castingTime, &material, &materialCost, &materialConsumed)
 			damageAtSlotLevel := map[string]string{}
 			healAtSlotLevel := map[string]string{}
 			json.Unmarshal(damageAtSlotLevelJSON, &damageAtSlotLevel)
 			json.Unmarshal(healAtSlotLevelJSON, &healAtSlotLevel)
-			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, CastingTime: castingTime, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components, DamageAtSlotLevel: damageAtSlotLevel, HealAtSlotLevel: healAtSlotLevel}
+			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, CastingTime: castingTime, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components, DamageAtSlotLevel: damageAtSlotLevel, HealAtSlotLevel: healAtSlotLevel, Material: material, MaterialCost: materialCost, MaterialConsumed: materialConsumed}
 		}
 		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
 	}
@@ -19980,6 +20006,20 @@ func resolveAction(action, description string, charID int) string {
 				return compErr
 			}
 			
+			// v0.9.27: Check costly material components
+			// Archdruid (Druid 20+) ignores non-costly/non-consumed materials
+			isArchdruid := strings.ToLower(classKey) == "druid" && level >= 20
+			materialToConsume := ""
+			if spell.MaterialCost > 0 && !isArchdruid {
+				matErr, foundMaterial := checkCostlyMaterial(inventory, spell.Material, spell.MaterialCost)
+				if matErr != "" {
+					return matErr
+				}
+				if spell.MaterialConsumed {
+					materialToConsume = foundMaterial
+				}
+			}
+			
 			// v0.8.38: Bonus Action Spell Restriction (PHB p.202)
 			// "A spell cast with a bonus action is especially swift. [...] You can't cast another
 			// spell during the same turn, except for a cantrip with a casting time of 1 action."
@@ -20176,6 +20216,13 @@ func resolveAction(action, description string, charID int) string {
 				db.Exec("UPDATE characters SET concentrating_on = $1 WHERE id = $2", spell.Name, charID)
 			}
 			
+			// v0.9.27: Consume material component if spell requires it
+			materialConsumedNote := ""
+			if materialToConsume != "" {
+				consumeSpellMaterial(charID, materialToConsume)
+				materialConsumedNote = fmt.Sprintf(" [Consumed: %s]", materialToConsume)
+			}
+			
 			// Determine damage/healing dice based on slot level (upcasting v0.8.28)
 			upcastInfo := ""
 			if requestedSlotLevel > spell.Level {
@@ -20203,7 +20250,7 @@ func resolveAction(action, description string, charID int) string {
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, metamagicNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, metamagicNote, materialConsumedNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -20245,9 +20292,9 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
-				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, spell.Description)
 			}
-			return fmt.Sprintf("Cast %s%s! (DC %d)%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, spell.Description)
+			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, spell.Description)
 		}
 		return fmt.Sprintf("Cast spell: %s (Save DC: %d)", description, saveDC)
 	
@@ -21961,6 +22008,127 @@ func containsProperty(props []string, prop string) bool {
 		}
 	}
 	return false
+}
+
+// COSTLY MATERIAL COMPONENT TRACKING (v0.9.27)
+
+// checkCostlyMaterial validates that a character has the required costly material in inventory
+// Returns: error message if missing, empty string if OK
+// Also returns the item name found (for consumption tracking)
+func checkCostlyMaterial(inventory []map[string]interface{}, materialDesc string, materialCost int) (string, string) {
+	if materialCost == 0 || materialDesc == "" {
+		return "", "" // No costly material required
+	}
+	
+	// Parse material name from description
+	// Examples: "Diamonds worth 300gp, which the spell consumes."
+	//           "A diamond worth at least 1,000 gp"
+	//           "Ruby dust worth 50 gp"
+	matLower := strings.ToLower(materialDesc)
+	
+	// Common material keywords to look for
+	materialKeywords := []string{
+		"diamond", "ruby", "emerald", "sapphire", "pearl", "gem", "jewel",
+		"gold", "silver", "platinum", "dust", "powder", "incense",
+		"holy water", "oil", "herbs", "crystal", "stone", "bone",
+	}
+	
+	// Find which material keyword is mentioned
+	targetMaterial := ""
+	for _, keyword := range materialKeywords {
+		if strings.Contains(matLower, keyword) {
+			targetMaterial = keyword
+			break
+		}
+	}
+	
+	// Search inventory for matching item with sufficient value
+	for _, item := range inventory {
+		itemName := ""
+		if name, ok := item["name"].(string); ok {
+			itemName = strings.ToLower(name)
+		} else if name, ok := item["item"].(string); ok {
+			itemName = strings.ToLower(name)
+		}
+		
+		// Check if item matches the material
+		if targetMaterial != "" && !strings.Contains(itemName, targetMaterial) {
+			continue
+		}
+		
+		// Check item value meets the cost requirement
+		itemValue := 0
+		if val, ok := item["value"].(float64); ok {
+			itemValue = int(val)
+		} else if val, ok := item["value"].(int); ok {
+			itemValue = val
+		} else if val, ok := item["cost"].(float64); ok {
+			itemValue = int(val)
+		} else if val, ok := item["cost"].(int); ok {
+			itemValue = val
+		}
+		
+		// If item has no value but name matches material, accept it
+		// (GM can track value manually or it's assumed to be worth enough)
+		if itemValue >= materialCost || (itemValue == 0 && targetMaterial != "" && strings.Contains(itemName, targetMaterial)) {
+			return "", itemName // Found suitable material
+		}
+	}
+	
+	return fmt.Sprintf("Cannot cast - spell requires %s (worth %d gp). Add the material to your inventory or ask your GM to provide it.", materialDesc, materialCost), ""
+}
+
+// consumeSpellMaterial removes a consumed spell material from character inventory
+// Only call this after the spell has been successfully cast
+func consumeSpellMaterial(charID int, materialName string) {
+	if materialName == "" {
+		return
+	}
+	
+	var inventoryJSON []byte
+	db.QueryRow("SELECT COALESCE(inventory, '[]') FROM characters WHERE id = $1", charID).Scan(&inventoryJSON)
+	var inventory []map[string]interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
+	
+	// Find and remove/decrement the material
+	for i, item := range inventory {
+		itemName := ""
+		if name, ok := item["name"].(string); ok {
+			itemName = strings.ToLower(name)
+		} else if name, ok := item["item"].(string); ok {
+			itemName = strings.ToLower(name)
+		}
+		
+		if strings.Contains(itemName, materialName) {
+			// Check quantity
+			qty := 1
+			if q, ok := item["quantity"].(float64); ok {
+				qty = int(q)
+			} else if q, ok := item["qty"].(float64); ok {
+				qty = int(q)
+			} else if q, ok := item["quantity"].(int); ok {
+				qty = q
+			} else if q, ok := item["qty"].(int); ok {
+				qty = q
+			}
+			
+			if qty > 1 {
+				// Decrement quantity
+				if _, ok := item["quantity"]; ok {
+					item["quantity"] = qty - 1
+				} else if _, ok := item["qty"]; ok {
+					item["qty"] = qty - 1
+				}
+			} else {
+				// Remove item entirely
+				inventory = append(inventory[:i], inventory[i+1:]...)
+			}
+			break
+		}
+	}
+	
+	updatedJSON, _ := json.Marshal(inventory)
+	db.Exec("UPDATE characters SET inventory = $1 WHERE id = $2", updatedJSON, charID)
 }
 
 // AMMUNITION TRACKING (v0.8.18)
@@ -34663,6 +34831,9 @@ type SRDSpell struct {
 	AoESize            int               `json:"aoe_size,omitempty"`
 	DamageAtSlotLevel  map[string]string `json:"damage_at_slot_level,omitempty"`
 	HealAtSlotLevel    map[string]string `json:"heal_at_slot_level,omitempty"`
+	Material           string            `json:"material,omitempty"`
+	MaterialCost       int               `json:"material_cost,omitempty"`
+	MaterialConsumed   bool              `json:"material_consumed,omitempty"`
 }
 
 // srdSpells lives in Postgres - queried via handleUniverseSpell(s), cached in srdSpellsMemory for resolveAction
@@ -35266,24 +35437,27 @@ func handleUniverseSpell(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/universe/spells/")
 	var s struct {
-		Name        string `json:"name"`
-		Level       int    `json:"level"`
-		School      string `json:"school"`
-		CastingTime string `json:"casting_time"`
-		Range       string `json:"range"`
-		Components  string `json:"components"`
-		Duration    string `json:"duration"`
-		Description string `json:"description"`
-		DamageDice  string `json:"damage_dice,omitempty"`
-		DamageType  string `json:"damage_type,omitempty"`
-		SavingThrow string `json:"saving_throw,omitempty"`
-		Healing     string `json:"healing,omitempty"`
-		IsRitual    bool   `json:"is_ritual"`
-		AoEShape    string `json:"aoe_shape,omitempty"`
-		AoESize     int    `json:"aoe_size,omitempty"`
+		Name             string `json:"name"`
+		Level            int    `json:"level"`
+		School           string `json:"school"`
+		CastingTime      string `json:"casting_time"`
+		Range            string `json:"range"`
+		Components       string `json:"components"`
+		Duration         string `json:"duration"`
+		Description      string `json:"description"`
+		DamageDice       string `json:"damage_dice,omitempty"`
+		DamageType       string `json:"damage_type,omitempty"`
+		SavingThrow      string `json:"saving_throw,omitempty"`
+		Healing          string `json:"healing,omitempty"`
+		IsRitual         bool   `json:"is_ritual"`
+		AoEShape         string `json:"aoe_shape,omitempty"`
+		AoESize          int    `json:"aoe_size,omitempty"`
+		Material         string `json:"material,omitempty"`
+		MaterialCost     int    `json:"material_cost,omitempty"`
+		MaterialConsumed bool   `json:"material_consumed,omitempty"`
 	}
-	err := db.QueryRow("SELECT name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0) FROM spells WHERE slug = $1", id).Scan(
-		&s.Name, &s.Level, &s.School, &s.CastingTime, &s.Range, &s.Components, &s.Duration, &s.Description, &s.DamageDice, &s.DamageType, &s.SavingThrow, &s.Healing, &s.IsRitual, &s.AoEShape, &s.AoESize)
+	err := db.QueryRow("SELECT name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(material, ''), COALESCE(material_cost, 0), COALESCE(material_consumed, false) FROM spells WHERE slug = $1", id).Scan(
+		&s.Name, &s.Level, &s.School, &s.CastingTime, &s.Range, &s.Components, &s.Duration, &s.Description, &s.DamageDice, &s.DamageType, &s.SavingThrow, &s.Healing, &s.IsRitual, &s.AoEShape, &s.AoESize, &s.Material, &s.MaterialCost, &s.MaterialConsumed)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": "spell_not_found"})
 		return

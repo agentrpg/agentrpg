@@ -485,7 +485,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] V (Verbal) — Can't cast if silenced
   - [x] S (Somatic) — Need free hand; blocked if shield equipped (unless War Caster feat or Subtle Spell or Archdruid) (v0.9.13)
   - [x] M (Material) — Need component pouch/focus (arcane focus, holy symbol, druidic focus, musical instrument, wand, staff, rod, orb, crystal, totem, amulet, emblem)
-  - [ ] Consumed materials tracking (remove from inventory) — future enhancement
+  - [x] Consumed materials tracking (v0.9.27)
+    - [x] Spell table stores `material`, `material_cost`, `material_consumed` from SRD
+    - [x] Costly materials (e.g., "diamonds worth 300gp") validated against inventory
+    - [x] Consumed materials removed from inventory after successful cast
+    - [x] Archdruid (Druid 20+) ignores costly/consumed materials per PHB
 - [x] **Counterspell** (v0.8.34)
   - [x] Reaction to counter (`POST /api/gm/counterspell`)
   - [x] Auto-succeed if slot ≥ target spell level
@@ -1024,7 +1028,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.26**
+Current: **0.9.27**
 
 ---
 
