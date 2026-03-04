@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.28
+// @version 0.9.31
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.30"
+const version = "0.9.31"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -427,6 +427,7 @@ func main() {
 	http.HandleFunc("/api/gm/set-lighting", handleGMSetLighting)
 	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
 	http.HandleFunc("/api/gm/turn-undead", handleGMTurnUndead)
+	http.HandleFunc("/api/gm/turn-unholy", handleGMTurnUnholy)
 	http.HandleFunc("/api/gm/preserve-life", handleGMPreserveLife)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
@@ -24335,6 +24336,310 @@ func handleGMTurnUndead(w http.ResponseWriter, r *http.Request) {
 			"behavior":    "Must spend turns moving away from the Cleric by the safest route",
 			"restrictions": "Cannot willingly move closer, cannot take reactions",
 			"ends_if":     "Takes any damage",
+		}
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMTurnUnholy godoc
+// @Summary Oath of Devotion Channel Divinity: Turn the Unholy (frighten fiends and undead)
+// @Description Devotion Paladins (level 3+) can use Channel Divinity to Turn the Unholy. Each fiend or undead that can see or hear you within 30 feet must make a Wisdom saving throw (DC = 8 + prof + CHA mod) or be turned for 1 minute or until it takes damage. (v0.9.31)
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{caster_id=integer,target_ids=[]integer} true "Turn the Unholy request"
+// @Success 200 {object} map[string]interface{} "Turn the Unholy results"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not Devotion Paladin"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/turn-unholy [post]
+func handleGMTurnUnholy(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CasterID  int   `json:"caster_id"`   // Paladin character ID
+		TargetIDs []int `json:"target_ids"`  // Array of combatant IDs (negative for monsters)
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CasterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "caster_id required (the Paladin using Turn the Unholy)",
+		})
+		return
+	}
+	
+	if len(req.TargetIDs) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_ids required (array of fiend/undead combatant IDs within 30 feet)",
+		})
+		return
+	}
+	
+	// Verify caster is a Paladin level 3+ with Devotion subclass in GM's campaign
+	var casterName, className, subclassSlug string
+	var casterLevel, chaScore int
+	var lobbyID int
+	var subclassRaw sql.NullString
+	err = db.QueryRow(`
+		SELECT c.name, c.class, c.level, c.cha, c.lobby_id, c.subclass
+		FROM characters c
+		WHERE c.id = $1
+	`, req.CasterID).Scan(&casterName, &className, &casterLevel, &chaScore, &lobbyID, &subclassRaw)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Caster character not found",
+		})
+		return
+	}
+	
+	if subclassRaw.Valid {
+		subclassSlug = subclassRaw.String
+	}
+	
+	if strings.ToLower(className) != "paladin" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_paladin",
+			"message": fmt.Sprintf("%s is a %s, not a Paladin. Turn the Unholy is a Devotion Paladin feature.", casterName, className),
+		})
+		return
+	}
+	
+	if casterLevel < 3 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_level",
+			"message": fmt.Sprintf("%s is level %d. Turn the Unholy requires Paladin level 3+ (when subclass is chosen).", casterName, casterLevel),
+		})
+		return
+	}
+	
+	if subclassSlug != "devotion" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "wrong_subclass",
+			"message": fmt.Sprintf("%s has the %s subclass. Turn the Unholy requires Oath of Devotion.", casterName, subclassSlug),
+			"note":    "Devotion Paladins choose their Oath at level 3.",
+		})
+		return
+	}
+	
+	// Verify agent is GM of this campaign
+	var dmID int
+	err = db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+	if err != nil || dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You must be the GM of this campaign to use Turn the Unholy",
+		})
+		return
+	}
+	
+	// Check if Channel Divinity is available
+	current := getCurrentClassResources(req.CasterID)
+	if current["channel_divinity"] <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_channel_divinity",
+			"message": fmt.Sprintf("%s has no Channel Divinity uses remaining. Recovers on short or long rest.", casterName),
+		})
+		return
+	}
+	
+	// Calculate spell save DC (8 + proficiency + CHA mod) - Paladin uses CHA
+	chaMod := modifier(chaScore)
+	saveDC := spellSaveDC(casterLevel, chaMod)
+	
+	// Process each target
+	results := []map[string]interface{}{}
+	turnedCount := 0
+	immuneCount := 0
+	notUnholyCount := 0
+	
+	for _, targetID := range req.TargetIDs {
+		result := map[string]interface{}{
+			"target_id": targetID,
+		}
+		
+		// Get target info from combat_combatants
+		var targetName, monsterKey string
+		var isMonster bool
+		var combatantID int
+		
+		err = db.QueryRow(`
+			SELECT cc.combatant_id, cc.name, COALESCE(cc.monster_key, ''), cc.is_monster
+			FROM combat_combatants cc
+			JOIN combat_state cs ON cc.lobby_id = cs.lobby_id
+			WHERE cc.combatant_id = $1 AND cs.lobby_id = $2 AND cs.active = true
+		`, targetID, lobbyID).Scan(&combatantID, &targetName, &monsterKey, &isMonster)
+		
+		if err != nil {
+			result["error"] = "target_not_in_combat"
+			result["message"] = fmt.Sprintf("Target %d not found in active combat", targetID)
+			results = append(results, result)
+			continue
+		}
+		
+		result["target_name"] = targetName
+		
+		// Check if target is fiend or undead
+		creatureType := getTargetCreatureType(targetID)
+		if creatureType != "undead" && creatureType != "fiend" {
+			result["outcome"] = "not_unholy"
+			result["creature_type"] = creatureType
+			result["message"] = fmt.Sprintf("%s is not a fiend or undead (%s) — Turn the Unholy has no effect", targetName, creatureType)
+			notUnholyCount++
+			results = append(results, result)
+			continue
+		}
+		
+		result["creature_type"] = creatureType
+		
+		// Get monster WIS
+		var monsterWIS int
+		if monsterKey != "" {
+			db.QueryRow(`SELECT COALESCE(wis, 10) FROM monsters WHERE slug = $1`, monsterKey).Scan(&monsterWIS)
+		} else {
+			monsterWIS = 10
+		}
+		
+		result["wisdom"] = monsterWIS
+		
+		// Check for condition immunity to turned
+		var conditionImmunities string
+		if monsterKey != "" {
+			db.QueryRow(`SELECT COALESCE(condition_immunities, '') FROM monsters WHERE slug = $1`, monsterKey).Scan(&conditionImmunities)
+		}
+		
+		if strings.Contains(strings.ToLower(conditionImmunities), "turned") || strings.Contains(strings.ToLower(conditionImmunities), "frightened") {
+			result["outcome"] = "immune"
+			result["message"] = fmt.Sprintf("%s is immune to being turned", targetName)
+			immuneCount++
+			results = append(results, result)
+			continue
+		}
+		
+		// Roll WIS saving throw
+		wisModTarget := modifier(monsterWIS)
+		roll := rollDie(20)
+		total := roll + wisModTarget
+		passed := total >= saveDC
+		
+		result["save_roll"] = roll
+		result["save_modifier"] = wisModTarget
+		result["save_total"] = total
+		result["save_dc"] = saveDC
+		result["save_passed"] = passed
+		
+		if passed {
+			result["outcome"] = "resisted"
+			result["message"] = fmt.Sprintf("%s resisted: d20(%d) + %d = %d vs DC %d", targetName, roll, wisModTarget, total, saveDC)
+			results = append(results, result)
+			continue
+		}
+		
+		// Apply "turned" condition
+		turnedCondition := fmt.Sprintf("turned:%d", req.CasterID)
+		
+		// Update conditions in combat_combatants
+		var existingConditions string
+		db.QueryRow(`SELECT COALESCE(conditions, '') FROM combat_combatants WHERE combatant_id = $1 AND lobby_id = $2`, targetID, lobbyID).Scan(&existingConditions)
+		
+		newConditions := existingConditions
+		if existingConditions == "" {
+			newConditions = turnedCondition
+		} else if !strings.Contains(existingConditions, "turned") {
+			newConditions = existingConditions + "," + turnedCondition
+		}
+		
+		db.Exec(`UPDATE combat_combatants SET conditions = $1 WHERE combatant_id = $2 AND lobby_id = $3`, newConditions, targetID, lobbyID)
+		
+		result["outcome"] = "turned"
+		result["condition_applied"] = turnedCondition
+		result["message"] = fmt.Sprintf("✨ %s (%s) is TURNED! d20(%d) + %d = %d vs DC %d — Must flee for 1 minute or until damaged", targetName, creatureType, roll, wisModTarget, total, saveDC)
+		turnedCount++
+		results = append(results, result)
+	}
+	
+	// Consume Channel Divinity
+	useClassResource(req.CasterID, "channel_divinity", 1)
+	remaining := getCurrentClassResources(req.CasterID)["channel_divinity"]
+	
+	// Log the action
+	summaryParts := []string{}
+	if turnedCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d turned", turnedCount))
+	}
+	if immuneCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d immune", immuneCount))
+	}
+	if notUnholyCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d not fiend/undead", notUnholyCount))
+	}
+	resistedCount := len(req.TargetIDs) - turnedCount - immuneCount - notUnholyCount
+	if resistedCount > 0 {
+		summaryParts = append(summaryParts, fmt.Sprintf("%d resisted", resistedCount))
+	}
+	summary := strings.Join(summaryParts, ", ")
+	
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CasterID, "turn_unholy", 
+		fmt.Sprintf("%s uses Turn the Unholy (Channel Divinity)!", casterName),
+		fmt.Sprintf("Save DC %d — %s", saveDC, summary))
+	
+	// Build response
+	response := map[string]interface{}{
+		"success":                    true,
+		"caster":                     casterName,
+		"caster_level":               casterLevel,
+		"spell_save_dc":              saveDC,
+		"charisma_modifier":          chaMod,
+		"channel_divinity_remaining": remaining,
+		"results":                    results,
+		"summary": map[string]interface{}{
+			"targets":     len(req.TargetIDs),
+			"turned":      turnedCount,
+			"immune":      immuneCount,
+			"not_unholy":  notUnholyCount,
+			"resisted":    resistedCount,
+		},
+	}
+	
+	// Add turned condition effects reminder
+	if turnedCount > 0 {
+		response["turned_effects"] = map[string]interface{}{
+			"duration":     "1 minute or until damaged",
+			"behavior":     "Must spend turns moving away from the Paladin by the safest route",
+			"restrictions": "Cannot willingly move closer, cannot take reactions",
+			"ends_if":      "Takes any damage",
 		}
 	}
 	

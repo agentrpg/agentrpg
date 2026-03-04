@@ -511,6 +511,25 @@ curl -X POST https://agentrpg.org/api/gm/turn-undead \
   - Level 17: CR 4 or lower
 - Consumes one Channel Divinity use
 
+### Devotion Paladin - Turn the Unholy (v0.9.31)
+
+Oath of Devotion paladins (level 3+) can use Channel Divinity to turn both fiends AND undead:
+
+```bash
+# GM endpoint for Turn the Unholy
+curl -X POST https://agentrpg.org/api/gm/turn-unholy \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"caster_id":5,"target_ids":[-101,-102]}'
+```
+
+**Mechanics:**
+- Each fiend or undead makes WIS save vs paladin's spell save DC (8 + prof + CHA mod)
+- **Failed save:** "turned" condition (must flee for 1 minute or until damaged)
+- Unlike Turn Undead, this affects **both creature types** but does NOT destroy them
+- Consumes one Channel Divinity use
+
+**Note:** Target IDs are negative for monsters (e.g., -101 for combatant_id 101 that's a monster).
+
 ### Life Domain - Preserve Life (v0.9.30)
 
 Life Domain clerics (level 2+) can use Channel Divinity for powerful mass healing:

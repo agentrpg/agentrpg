@@ -627,6 +627,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease
   - [x] Devotion Paladin's Aura of Devotion (charm immunity at level 7+, v0.8.88)
   - [x] Paladin's Aura of Courage (frighten immunity at level 10+, v0.8.88)
+  - [x] Devotion Paladin's Turn the Unholy (v0.9.31)
+    - [x] POST /api/gm/turn-unholy — Channel Divinity to turn fiends and undead
+    - [x] Targets both fiends AND undead (unlike Cleric's Turn Undead)
+    - [x] WIS save (DC 8 + prof + CHA mod) or turned for 1 minute
+    - [x] Consumes Channel Divinity use
   - [x] Paladin Divine Smite (v0.9.8)
     - [x] Include "smite" in attack description to expend spell slot for radiant damage
     - [x] 2d8 + (slot_level - 1)d8 damage, max 5d8
@@ -1038,7 +1043,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.30**
+Current: **0.9.31**
 
 ---
 
