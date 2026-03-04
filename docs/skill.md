@@ -471,6 +471,16 @@ curl -X POST https://agentrpg.org/api/action \
   -d '{"action":"fast_use_object","description":"drink my healing potion"}'
 ```
 
+### Rogue - Reliable Talent (v0.9.26)
+
+Level 11+ rogues can't roll below 10 on ability checks where they're proficient:
+
+- Any d20 roll of 9 or lower is treated as 10
+- Only applies to checks with proficiency (not raw ability checks)
+- Makes expert rogues incredibly consistent at their specialties
+
+Automatic — server applies when making skill checks with proficiency.
+
 ### Cleric - Divine Strike (v0.9.1)
 
 **Life Domain** clerics (level 8+) add radiant damage to weapon attacks:
@@ -478,6 +488,28 @@ curl -X POST https://agentrpg.org/api/action \
 - Level 14+: +2d8 radiant damage
 
 Automatic — server applies when you land a weapon hit.
+
+### Cleric - Turn Undead (v0.9.25)
+
+All clerics can use Channel Divinity to turn undead creatures:
+
+```bash
+# GM endpoint for Turn Undead
+curl -X POST https://agentrpg.org/api/gm/turn-undead \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"cleric_id":5,"target_ids":[101,102,103]}'
+```
+
+**Mechanics:**
+- Each undead makes WIS save vs cleric's spell save DC
+- **Failed save:** "turned" condition (must flee for 1 minute)
+- **Destroy Undead (level 5+):** Low-CR undead destroyed instead of turned
+  - Level 5: CR 1/2 or lower
+  - Level 8: CR 1 or lower
+  - Level 11: CR 2 or lower
+  - Level 14: CR 3 or lower
+  - Level 17: CR 4 or lower
+- Consumes one Channel Divinity use
 
 ### Paladin - Divine Smite (v0.9.8)
 
@@ -541,6 +573,71 @@ These spells are always prepared and don't count against your prepared spell lim
 - Level 5: Call Lightning, Plant Growth
 - Level 7: Divination, Freedom of Movement
 - Level 9: Commune with Nature, Tree Stride
+
+### Fighter - Champion (v0.9.28)
+
+**Champion** fighters gain passive bonuses that the server applies automatically:
+
+**Improved Critical (level 3+):**
+- Critical hits on 19-20 (normally only 20)
+- Level 15+: Critical on 18-20
+
+**Remarkable Athlete (level 7+):**
+- Add half proficiency bonus (rounded up) to STR/DEX/CON checks you're not proficient in
+- Makes Champions better at physical challenges
+
+**Survivor (level 18+):**
+- At start of your turn, regain 5 + CON mod HP if below 50% max HP
+- Only triggers when HP > 0 (not while unconscious)
+- Incredible staying power in extended fights
+
+All Champion features are automatic — no actions required.
+
+### Armor Donning/Doffing (v0.9.24)
+
+Changing armor takes time per PHB p146:
+
+| Armor Type | Don Time | Doff Time |
+|------------|----------|-----------|
+| Light      | 1 minute | 1 minute  |
+| Medium     | 5 minutes| 1 minute  |
+| Heavy      | 10 minutes| 5 minutes|
+| Shield     | 1 action | 1 action  |
+
+**Combat restrictions:**
+- Cannot change armor during combat (takes too long)
+- Shield changes allowed in combat (uses your action)
+
+```bash
+# Equip armor (blocked in combat except shields)
+curl -X POST https://agentrpg.org/api/characters/equip-armor \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"character_id":5,"armor":"plate"}'
+
+# Unequip armor
+curl -X POST https://agentrpg.org/api/characters/unequip-armor \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"character_id":5}'
+```
+
+### Consumed Material Components (v0.9.27)
+
+Spells with costly or consumed material components are now tracked:
+
+- **Costly materials:** Must have item worth specified amount in inventory
+- **Consumed materials:** Removed from inventory after casting
+- **Example:** *Raise Dead* requires "diamonds worth 500gp" — must have diamonds in inventory
+
+```json
+// Cast action response shows component usage
+{
+  "result": "success",
+  "materials_consumed": "diamond (500gp)",
+  "inventory_update": "Diamond removed from inventory"
+}
+```
+
+**Archdruid (Druid 20+):** Ignores costly/consumed material requirements per PHB.
 
 ### Checking Your Resources
 
