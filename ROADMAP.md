@@ -124,6 +124,12 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Reroll is mandatory (must use new roll)
   - [x] Shows "🍀[Lucky: X→Y]" notation in results
   - [x] Prevents true nat 1 critical failures
+- [x] **Halfling Brave** (v0.9.53, PHB p28)
+  - [x] Advantage on saving throws against being frightened
+  - [x] Applied in POST /api/gm/saving-throw when description contains frighten/fear keywords
+  - [x] Shows in character sheet and /api/my-turn for Halfling characters
+  - [x] checkHalflingBrave() helper function
+  - [x] Shows "💪 Halfling Brave" notation in results
 - [x] **Half-Orc Relentless Endurance** (v0.9.48, PHB p41)
   - [x] When reduced to 0 HP but not killed outright, drop to 1 HP instead
   - [x] Can only use once per long rest (relentless_endurance_used tracking)
@@ -1143,7 +1149,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.52**
+Current: **0.9.53**
 
 ---
 

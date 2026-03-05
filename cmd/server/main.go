@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.52
+// @version 0.9.53
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.52"
+const version = "0.9.53"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2040,6 +2040,23 @@ func applyHalflingLucky(roll int, characterID int) (int, bool, int) {
 		return newRoll, true, roll
 	}
 	return roll, false, roll
+}
+
+// checkHalflingBrave returns true if Halfling Brave grants advantage on this save (v0.9.53 PHB p28)
+// Brave: You have advantage on saving throws against being frightened.
+func checkHalflingBrave(characterID int, description string) bool {
+	if !isHalfling(characterID) {
+		return false
+	}
+	// Check if the save is against frightened effects
+	descLower := strings.ToLower(description)
+	frightenedKeywords := []string{"frighten", "frightened", "frightening", "fear", "feared", "fearful", "terrify", "terrified", "terror", "scare", "scared", "dread", "panic"}
+	for _, keyword := range frightenedKeywords {
+		if strings.Contains(descLower, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 // isHalfOrc checks if a character is a half-orc (v0.9.48 - Relentless Endurance)
@@ -8620,6 +8637,16 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.53: Halfling Brave info
+	if isHalfling(charID) {
+		response["halfling_brave"] = map[string]interface{}{
+			"description":               "Advantage on saving throws against being frightened (PHB p28)",
+			"frightened_save_advantage": true,
+			"automatic":                 true,
+			"tip":                       "💪 Your Halfling Brave heart grants advantage on saves against being frightened - your courage is legendary despite your size!",
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -9664,6 +9691,15 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"poison_damage_resistance": true,
 			"automatic":                true,
 			"tip":                      "⛏️ Your Dwarven Resilience grants advantage on poison saves and halves poison damage!",
+		}
+	}
+	
+	// v0.9.53: Halfling Brave tip
+	if isHalfling(charID) {
+		response["halfling_brave"] = map[string]interface{}{
+			"frightened_save_advantage": true,
+			"automatic":                 true,
+			"tip":                       "💪 Your Halfling Brave grants advantage on saves vs frightened effects - stand tall!",
 		}
 	}
 	
@@ -12819,6 +12855,14 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		dwarvenResilienceActive = true
 	}
 	
+	// v0.9.53: Halfling Brave (PHB p28)
+	// Advantage on saving throws against being frightened
+	halflingBraveActive := false
+	if checkHalflingBrave(req.CharacterID, req.Description) {
+		req.Advantage = true
+		halflingBraveActive = true
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -12854,6 +12898,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Fey Ancestry)"
 		} else if dwarvenResilienceActive {
 			rollType = "advantage (Dwarven Resilience)"
+		} else if halflingBraveActive {
+			rollType = "advantage (Halfling Brave)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
@@ -12991,6 +13037,11 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if dwarvenResilienceActive {
 		response["dwarven_resilience"] = true
 		response["racial_feature_note"] = fmt.Sprintf("⛏️ %s's Dwarven Resilience grants advantage on saves against poison", charName)
+	}
+	// v0.9.53: Add Halfling Brave note
+	if halflingBraveActive {
+		response["halfling_brave"] = true
+		response["racial_feature_note"] = fmt.Sprintf("💪 %s's Halfling Brave grants advantage on saves against frightened", charName)
 	}
 	json.NewEncoder(w).Encode(response)
 }
