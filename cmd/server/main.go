@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.49
+// @version 0.9.52
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.51"
+const version = "0.9.52"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2051,6 +2051,13 @@ func isHalfOrc(characterID int) bool {
 	}
 	raceLower := strings.ToLower(race)
 	return strings.Contains(raceLower, "half-orc") || strings.Contains(raceLower, "halforc") || strings.Contains(raceLower, "half_orc")
+}
+
+// hasSavageAttacks returns true if the character has the Half-Orc Savage Attacks racial trait (v0.9.52 PHB p41)
+// When you score a critical hit with a melee weapon attack, you can roll one of the weapon's damage dice
+// one additional time and add it to the extra damage of the critical hit.
+func hasSavageAttacks(characterID int) bool {
+	return isHalfOrc(characterID)
 }
 
 // isGnome checks if a character is a gnome (v0.9.49 - Gnome Cunning)
@@ -15505,8 +15512,21 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		if damage < 1 {
 			damage = 1
 		}
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d with %s", 
-			attackerName, targetName, luckyNote, totalAttack, damage, weaponName)
+		// v0.9.52: Half-Orc Savage Attacks on opportunity attack crits (PHB p41)
+		savageAttacksNote := ""
+		if !req.AttackerIsMonster && req.AttackerID > 0 && hasSavageAttacks(req.AttackerID) {
+			parts := strings.Split(strings.ToLower(damageDice), "d")
+			if len(parts) == 2 {
+				sides, _ := strconv.Atoi(parts[1])
+				if sides > 0 {
+					savageDmg := rollDie(sides)
+					damage += savageDmg
+					savageAttacksNote = fmt.Sprintf(" (+%d Savage Attacks)", savageDmg)
+				}
+			}
+		}
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s with %s", 
+			attackerName, targetName, luckyNote, totalAttack, damage, savageAttacksNote, weaponName)
 		hit = true
 	} else if totalAttack >= targetAC {
 		// Normal hit
@@ -16086,8 +16106,21 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s%s with %s", 
-			charName, req.AttackerName, totalAttack, damage, rageText, brutalCritText, weaponName)
+		// v0.9.52: Half-Orc Savage Attacks on Retaliation crits (PHB p41)
+		savageAttacksText := ""
+		if hasSavageAttacks(req.CharacterID) {
+			parts := strings.Split(strings.ToLower(damageDice), "d")
+			if len(parts) == 2 {
+				sides, _ := strconv.Atoi(parts[1])
+				if sides > 0 {
+					savageDmg := rollDie(sides)
+					damage += savageDmg
+					savageAttacksText = fmt.Sprintf(" (+%d Savage Attacks)", savageDmg)
+				}
+			}
+		}
+		resultText = fmt.Sprintf("💢 RETALIATION: %s strikes back at %s! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s%s%s with %s", 
+			charName, req.AttackerName, totalAttack, damage, rageText, brutalCritText, savageAttacksText, weaponName)
 		hit = true
 	} else if totalAttack >= targetAC {
 		// Normal hit
@@ -21612,8 +21645,23 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote)
+			// v0.9.52: Half-Orc Savage Attacks on auto-crit (PHB p41)
+			// Extra weapon damage die on melee critical hits
+			savageAttacksNote := ""
+			if !isRangedAttack && hasWeapon && hasSavageAttacks(charID) {
+				parts := strings.Split(strings.ToLower(weapon.Damage), "d")
+				if len(parts) == 2 {
+					sides, _ := strconv.Atoi(parts[1])
+					if sides > 0 {
+						savageDmg := rollDie(sides)
+						dmg += savageDmg
+						savageAttacksNote = fmt.Sprintf(" (+%d Savage Attacks, 1d%d)", savageDmg, sides)
+					}
+				}
+			}
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -21759,11 +21807,26 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// v0.9.52: Half-Orc Savage Attacks on crit (PHB p41)
+			// Extra weapon damage die on melee critical hits
+			savageAttacksNote := ""
+			if !isRangedAttack && hasWeapon && hasSavageAttacks(charID) {
+				parts := strings.Split(strings.ToLower(weapon.Damage), "d")
+				if len(parts) == 2 {
+					sides, _ := strconv.Atoi(parts[1])
+					if sides > 0 {
+						savageDmg := rollDie(sides)
+						dmg += savageDmg
+						savageAttacksNote = fmt.Sprintf(" (+%d Savage Attacks, 1d%d)", savageDmg, sides)
+					}
+				}
+			}
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote)
 		} else if attackRoll == 1 && !attackHalflingLuckyUsed {
 			// Critical miss (nat 1) - but not if Halfling Lucky was used (they already rerolled)
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
@@ -23096,8 +23159,21 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 			}
-			return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d (nat %d CRITICAL!)%s Damage: %d%s (%s + %d STR + %d rage)",
-				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRoll, frenzyRollInfo, frenzyDmg, brutalCritText, weapon.Damage, modifier(str), rageDamageBonus)
+			// v0.9.52: Half-Orc Savage Attacks on frenzy crits (PHB p41)
+			savageAttacksText := ""
+			if hasSavageAttacks(charID) {
+				parts := strings.Split(strings.ToLower(weapon.Damage), "d")
+				if len(parts) == 2 {
+					sides, _ := strconv.Atoi(parts[1])
+					if sides > 0 {
+						savageDmg := rollDie(sides)
+						frenzyDmg += savageDmg
+						savageAttacksText = fmt.Sprintf(" (+%d Savage Attacks)", savageDmg)
+					}
+				}
+			}
+			return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d (nat %d CRITICAL!)%s Damage: %d%s%s (%s + %d STR + %d rage)",
+				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRoll, frenzyRollInfo, frenzyDmg, brutalCritText, savageAttacksText, weapon.Damage, modifier(str), rageDamageBonus)
 		}
 
 		// Critical miss
