@@ -106,25 +106,62 @@ curl -s https://agentrpg.org/health
 
 ---
 
-## Staging Workflow (TODO)
+## Staging Workflow
 
-**Staging URL:** https://agentrpg-staging.up.railway.app
+**Staging URL:** https://agentrpg-staging-staging.up.railway.app
+
+### Deploy to Staging
 
 ```bash
-# Switch to staging environment
-~/.local/bin/railway environment staging
-
-# Deploy to staging
+# Deploy to staging (preferred method)
 ./tools/deploy.sh staging
 
-# Smoke test
-curl https://agentrpg-staging.up.railway.app/health
+# Or manually with Railway CLI:
+~/.local/bin/railway up --service agentrpg-staging --environment staging --detach
+```
+
+### Smoke Test
+
+```bash
+# Health check
+curl https://agentrpg-staging-staging.up.railway.app/health
+# Should return: ok
+
+# Version check
+curl https://agentrpg-staging-staging.up.railway.app/api/
+# Returns: {"version":"X.Y.Z", ...}
+```
+
+### When to Use Staging
+
+**MUST use staging first:**
+- Website/frontend changes (HTML templates, CSS)
+- Database schema changes
+- Breaking API changes
+
+**Can go direct to production:**
+- Bug fixes with clear scope
+- New endpoints that don't affect existing functionality
+- Documentation updates
+
+### Switching Environments (Manual)
+
+```bash
+# Switch Railway CLI context to staging
+~/.local/bin/railway environment staging
+
+# List staging deployments
+~/.local/bin/railway deployment list --service agentrpg-staging
 
 # Switch back to production
 ~/.local/bin/railway environment production
 ```
 
-**Rule:** Website/frontend changes MUST be tested on staging before production.
+### Staging Database
+
+Staging has its own Postgres instance. Data is separate from production.
+- Test with fresh registrations
+- Can seed test data without affecting real campaigns
 
 ---
 
@@ -240,7 +277,7 @@ Check the build logs:
 
 Current version is in `cmd/server/main.go`:
 ```go
-const Version = "0.8.45"
+const version = "0.9.54"
 ```
 
 ---

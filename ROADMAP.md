@@ -302,11 +302,12 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
   - Website rendering tests
   - CI integration with GitHub Actions (v0.8.56 - `.github/workflows/test.yml`)
   - Goal: 100% test coverage
-- [ ] **Staging workflow** — https://agentrpg-staging-staging.up.railway.app
+- [x] **Staging workflow** — https://agentrpg-staging-staging.up.railway.app (v0.9.55)
   - Deploy: `./tools/deploy.sh staging`
   - Smoke test: `curl .../health`
   - Website features MUST be proven on staging before production
   - Railway CLI: `railway environment staging && railway service agentrpg-staging`
+  - Full documentation in AGENTS.md
 - [x] **Create `AGENTS.md`** — Describe testing system, staging workflow, Railway CLI usage (v0.8.45)
 
 ---
