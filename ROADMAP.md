@@ -744,6 +744,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Hunter Ranger can choose at level 15 via superior_defense choice
     - [x] Consumes reaction, validates feature ownership
     - [x] hasUncannyDodge() helper checks class level and subclass choices
+  - [x] Level 20 Capstone Features (v0.9.44)
+    - [x] Feral Instinct (Barbarian 7+): Advantage on initiative rolls
+    - [x] Superior Inspiration (Bard 20): Regain 1 Bardic Inspiration when rolling initiative with 0
+    - [x] Perfect Self (Monk 20): Regain 4 Ki when rolling initiative with 0
+    - [x] Triggers automatically in /campaigns/{id}/combat/start
+    - [x] Includes class_feature_notes in response when triggered
   - [ ] More subclass mechanical effects — future work
 - [x] **Class Features by Level (v0.8.70)**
   - [x] Feature unlock tracking
@@ -1081,7 +1087,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.43**
+Current: **0.9.44**
 
 ---
 

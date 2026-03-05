@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.43"
+const version = "0.9.44"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -33275,8 +33275,9 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 	
 	// Roll initiative for all characters in the campaign
+	// v0.9.44: Include class info for Feral Instinct, Superior Inspiration, Perfect Self
 	rows, err := db.Query(`
-		SELECT c.id, c.name, c.dex, COALESCE(c.initiative_bonus, 0)
+		SELECT c.id, c.name, c.dex, COALESCE(c.initiative_bonus, 0), c.class, c.level, c.cha
 		FROM characters c WHERE c.lobby_id = $1
 	`, campaignID)
 	if err != nil {
@@ -33293,13 +33294,72 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 	
 	entries := []InitEntry{}
+	capstoneNotes := []string{}
+	
 	for rows.Next() {
-		var id, dex, initBonus int
-		var name string
-		rows.Scan(&id, &name, &dex, &initBonus)
+		var id, dex, initBonus, level, cha int
+		var name, class string
+		rows.Scan(&id, &name, &dex, &initBonus, &class, &level, &cha)
 		
-		init := rollInitiative(modifier(dex), initBonus)
+		classLower := strings.ToLower(class)
+		dexMod := modifier(dex)
+		
+		// v0.9.44: Feral Instinct (Barbarian 7+) - advantage on initiative rolls
+		var init int
+		if hasClassFeature(class, level, "feral_instinct") {
+			roll1 := rollDie(20)
+			roll2 := rollDie(20)
+			higherRoll := roll1
+			if roll2 > roll1 {
+				higherRoll = roll2
+			}
+			init = higherRoll + dexMod + initBonus
+			capstoneNotes = append(capstoneNotes, fmt.Sprintf("🐺 %s: Feral Instinct grants advantage on initiative (rolled %d, %d, took %d)", name, roll1, roll2, higherRoll))
+		} else {
+			init = rollInitiative(dexMod, initBonus)
+		}
+		
 		db.Exec("UPDATE characters SET current_initiative = $1 WHERE id = $2", init, id)
+		
+		// v0.9.44: Superior Inspiration (Bard 20) - regain 1 bardic inspiration if at 0
+		if classLower == "bard" && level >= 20 {
+			currentResources := getCurrentClassResources(id)
+			if bi, ok := currentResources["bardic_inspiration"]; ok && bi == 0 {
+				// Regain 1 use by reducing used count by 1
+				var usedJSON []byte
+				db.QueryRow("SELECT COALESCE(class_resources_used, '{}') FROM characters WHERE id = $1", id).Scan(&usedJSON)
+				used := make(map[string]int)
+				json.Unmarshal(usedJSON, &used)
+				if used["bardic_inspiration"] > 0 {
+					used["bardic_inspiration"]--
+					updatedJSON, _ := json.Marshal(used)
+					db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedJSON, id)
+					capstoneNotes = append(capstoneNotes, fmt.Sprintf("🎭 %s: Superior Inspiration triggered! Regained 1 Bardic Inspiration (had 0)", name))
+				}
+			}
+		}
+		
+		// v0.9.44: Perfect Self (Monk 20) - regain 4 ki if at 0
+		if classLower == "monk" && level >= 20 {
+			currentResources := getCurrentClassResources(id)
+			if ki, ok := currentResources["ki"]; ok && ki == 0 {
+				// Regain 4 ki by reducing used count by 4 (or all if less than 4 used)
+				var usedJSON []byte
+				db.QueryRow("SELECT COALESCE(class_resources_used, '{}') FROM characters WHERE id = $1", id).Scan(&usedJSON)
+				used := make(map[string]int)
+				json.Unmarshal(usedJSON, &used)
+				if used["ki"] > 0 {
+					regained := 4
+					if used["ki"] < 4 {
+						regained = used["ki"]
+					}
+					used["ki"] -= regained
+					updatedJSON, _ := json.Marshal(used)
+					db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedJSON, id)
+					capstoneNotes = append(capstoneNotes, fmt.Sprintf("🥋 %s: Perfect Self triggered! Regained %d Ki (had 0)", name, regained))
+				}
+			}
+		}
 		
 		entries = append(entries, InitEntry{ID: id, Name: name, Initiative: init, DexScore: dex})
 	}
@@ -33332,13 +33392,20 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 		db.Exec("UPDATE characters SET movement_remaining = $1 WHERE id = $2", speed, entry.ID)
 	}
 	
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	response := map[string]interface{}{
 		"success":      true,
 		"round":        1,
 		"turn_order":   entries,
 		"current_turn": entries[0].Name,
 		"action_economy_note": "All characters have their action, bonus action, reaction, and full movement available.",
-	})
+	}
+	
+	// v0.9.44: Add capstone feature notes if any triggered
+	if len(capstoneNotes) > 0 {
+		response["class_feature_notes"] = capstoneNotes
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleCombatEnd godoc
