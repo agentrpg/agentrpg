@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.48
+// @version 0.9.49
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.48"
+const version = "0.9.49"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2042,6 +2042,35 @@ func isHalfOrc(characterID int) bool {
 	}
 	raceLower := strings.ToLower(race)
 	return strings.Contains(raceLower, "half-orc") || strings.Contains(raceLower, "halforc") || strings.Contains(raceLower, "half_orc")
+}
+
+// isGnome checks if a character is a gnome (v0.9.49 - Gnome Cunning)
+func isGnome(characterID int) bool {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
+		return false
+	}
+	raceLower := strings.ToLower(race)
+	return strings.Contains(raceLower, "gnome")
+}
+
+// checkGnomeCunning returns true if Gnome Cunning grants advantage on this save (v0.9.49 PHB p37)
+// Gnome Cunning: Advantage on INT, WIS, and CHA saving throws against magic.
+func checkGnomeCunning(characterID int, abilityShort string, fromMagic bool) bool {
+	if !fromMagic {
+		return false
+	}
+	if !isGnome(characterID) {
+		return false
+	}
+	// Only applies to INT, WIS, CHA saves
+	switch abilityShort {
+	case "int", "wis", "cha":
+		return true
+	default:
+		return false
+	}
 }
 
 // checkRelentlessEndurance implements the Half-Orc Relentless Endurance racial trait (PHB p41):
@@ -8468,6 +8497,17 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["relentless_endurance"] = relentlessInfo
 	}
 	
+	// v0.9.49: Gnome Cunning info
+	if isGnome(charID) {
+		response["gnome_cunning"] = map[string]interface{}{
+			"description": "Advantage on INT, WIS, and CHA saving throws against magic (PHB p37)",
+			"applies_to":  []string{"Intelligence saves", "Wisdom saves", "Charisma saves"},
+			"against":     "magic (spells, magical effects)",
+			"automatic":   true,
+			"tip":         "🧠 Your Gnome Cunning grants advantage on mental saves against magic - trust your innate magical resistance!",
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -9483,6 +9523,16 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		response["relentless_endurance"] = relentlessInfo
+	}
+	
+	// v0.9.49: Gnome Cunning tip for saves against magic
+	if isGnome(charID) {
+		response["gnome_cunning"] = map[string]interface{}{
+			"applies_to": []string{"INT saves", "WIS saves", "CHA saves"},
+			"against":    "magic (spells, magical effects)",
+			"automatic":  true,
+			"tip":        "🧠 Your Gnome Cunning grants advantage on INT/WIS/CHA saves against magic - trust your innate resistance!",
+		}
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -12400,7 +12450,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Produce json
 // @Security BasicAuth
-// @Param request body object{character_id=int,ability=string,dc=int,advantage=bool,disadvantage=bool,description=string} true "Saving throw details"
+// @Param request body object{character_id=int,ability=string,dc=int,advantage=bool,disadvantage=bool,description=string,from_magic=bool} true "Saving throw details"
 // @Success 200 {object} map[string]interface{} "Saving throw result"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 400 {object} map[string]interface{} "Bad request"
@@ -12441,6 +12491,7 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		Disadvantage   bool   `json:"disadvantage"`
 		Description    string `json:"description"`     // Optional context (e.g., "Fireball", "Dragon's Breath")
 		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
+		FromMagic      bool   `json:"from_magic"`      // v0.9.49: Gnome Cunning (save vs magic)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -12612,6 +12663,14 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.49: Gnome Cunning (PHB p37)
+	// Advantage on INT, WIS, and CHA saving throws against magic
+	gnomeCunningActive := false
+	if checkGnomeCunning(req.CharacterID, abilityShort, req.FromMagic) {
+		req.Advantage = true
+		gnomeCunningActive = true
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -12641,6 +12700,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (inspiration)"
 		} else if dangerSenseActive {
 			rollType = "advantage (Danger Sense)"
+		} else if gnomeCunningActive {
+			rollType = "advantage (Gnome Cunning)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
@@ -12763,6 +12824,11 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if dangerSenseActive {
 		response["danger_sense"] = true
 		response["class_feature_note"] = fmt.Sprintf("🎯 %s's Danger Sense grants advantage on DEX saves against effects they can see", charName)
+	}
+	// v0.9.49: Add Gnome Cunning note
+	if gnomeCunningActive {
+		response["gnome_cunning"] = true
+		response["racial_feature_note"] = fmt.Sprintf("🧠 %s's Gnome Cunning grants advantage on %s saves against magic", charName, abilityName)
 	}
 	json.NewEncoder(w).Encode(response)
 }
@@ -16561,7 +16627,17 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Roll saving throw
+		// v0.9.49: Gnome Cunning - advantage on INT/WIS/CHA saves against magic (spells ARE magic)
+		gnomeCunningAoE := false
 		saveRoll := rollDie(20)
+		if targetID > 0 && checkGnomeCunning(targetID, strings.ToLower(savingThrow), true) {
+			// Roll with advantage
+			roll2 := rollDie(20)
+			gnomeCunningAoE = true
+			if roll2 > saveRoll {
+				saveRoll = roll2
+			}
+		}
 		saveTotal := saveRoll + saveMod
 		saved := saveTotal >= dc
 		sculptSpellsApplied := false
@@ -16635,6 +16711,12 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		if potentCantripApplied {
 			result["potent_cantrip"] = true
 			result["potent_cantrip_info"] = "Potent Cantrip: Succeeded on save against cantrip - took half damage instead of none"
+		}
+		
+		// Add Gnome Cunning info to result (v0.9.49)
+		if gnomeCunningAoE {
+			result["gnome_cunning"] = true
+			result["gnome_cunning_info"] = "🧠 Gnome Cunning: Rolled with advantage on save against magic"
 		}
 		
 		// Apply damage to characters or monsters

@@ -132,7 +132,12 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Shows in character sheet and /api/my-turn for Half-Orcs
   - [x] Shows "💪 Relentless Endurance triggers!" notification when used
   - [x] Resets on long rest
-- [ ] Gnome Cunning (advantage on INT/WIS/CHA saves vs magic) — future work
+- [x] **Gnome Cunning** (v0.9.49, PHB p37)
+  - [x] Advantage on INT, WIS, and CHA saving throws against magic
+  - [x] Applied in POST /api/gm/saving-throw with from_magic=true parameter
+  - [x] Applied in POST /api/gm/aoe-cast (spells are always magic)
+  - [x] Shows in character sheet and /api/my-turn for Gnome characters
+  - [x] isGnome() and checkGnomeCunning() helper functions
 
 ### Character Advancement (partial)
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
@@ -1118,7 +1123,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.48**
+Current: **0.9.49**
 
 ---
 
