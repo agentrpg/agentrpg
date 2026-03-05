@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.57"
+const version = "0.9.58"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2241,6 +2241,112 @@ func isTiefling(characterID int) bool {
 // hasTieflingHellishResistance returns true if character has Hellish Resistance (fire damage resistance, v0.9.54 PHB p43)
 func hasTieflingHellishResistance(characterID int) bool {
 	return isTiefling(characterID)
+}
+
+// v0.9.58: Hunter Ranger Defensive Tactics (PHB p93)
+// At level 7, Hunters choose one of: Escape the Horde, Multiattack Defense, or Steel Will
+
+// getDefensiveTacticsChoice returns the Hunter Ranger's defensive_tactics choice from subclass_choices (v0.9.58)
+func getDefensiveTacticsChoice(characterID int) string {
+	var subclassChoicesJSON []byte
+	err := db.QueryRow("SELECT COALESCE(subclass_choices, '{}') FROM characters WHERE id = $1", characterID).Scan(&subclassChoicesJSON)
+	if err != nil {
+		return ""
+	}
+	var choices map[string]string
+	if err := json.Unmarshal(subclassChoicesJSON, &choices); err != nil {
+		return ""
+	}
+	return choices["defensive_tactics"]
+}
+
+// isHunterRangerWithDefensiveTactics checks if character is a Hunter Ranger level 7+ with a defensive_tactics choice (v0.9.58)
+func isHunterRangerWithDefensiveTactics(characterID int) bool {
+	var class, subclass string
+	var level int
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), COALESCE(subclass, ''), level 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &subclass, &level)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(class) != "ranger" || strings.ToLower(subclass) != "hunter" || level < 7 {
+		return false
+	}
+	return getDefensiveTacticsChoice(characterID) != ""
+}
+
+// hasEscapeTheHorde returns true if character has Escape the Horde (v0.9.58 PHB p93)
+// Escape the Horde: Opportunity attacks against you are made with disadvantage.
+func hasEscapeTheHorde(characterID int) bool {
+	var class, subclass string
+	var level int
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), COALESCE(subclass, ''), level 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &subclass, &level)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(class) != "ranger" || strings.ToLower(subclass) != "hunter" || level < 7 {
+		return false
+	}
+	return getDefensiveTacticsChoice(characterID) == "escape_the_horde"
+}
+
+// hasSteelWill returns true if character has Steel Will (v0.9.58 PHB p93)
+// Steel Will: You have advantage on saving throws against being frightened.
+func hasSteelWill(characterID int) bool {
+	var class, subclass string
+	var level int
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), COALESCE(subclass, ''), level 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &subclass, &level)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(class) != "ranger" || strings.ToLower(subclass) != "hunter" || level < 7 {
+		return false
+	}
+	return getDefensiveTacticsChoice(characterID) == "steel_will"
+}
+
+// checkSteelWill returns true if Steel Will grants advantage on this save (v0.9.58 PHB p93)
+// Steel Will: You have advantage on saving throws against being frightened.
+func checkSteelWill(characterID int, description string) bool {
+	if !hasSteelWill(characterID) {
+		return false
+	}
+	// Check if the save is against frightened effects (same keywords as Halfling Brave)
+	descLower := strings.ToLower(description)
+	frightenedKeywords := []string{"frighten", "frightened", "frightening", "fear", "feared", "fearful", "terrify", "terrified", "terror", "scare", "scared", "dread", "panic"}
+	for _, keyword := range frightenedKeywords {
+		if strings.Contains(descLower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasMultiattackDefense returns true if character has Multiattack Defense (v0.9.58 PHB p93)
+// Multiattack Defense: When a creature hits you with an attack, you gain +4 AC vs subsequent attacks from that creature for the rest of the turn.
+// NOTE: Full implementation requires combat state tracking; this helper just checks eligibility.
+func hasMultiattackDefense(characterID int) bool {
+	var class, subclass string
+	var level int
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), COALESCE(subclass, ''), level 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &subclass, &level)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(class) != "ranger" || strings.ToLower(subclass) != "hunter" || level < 7 {
+		return false
+	}
+	return getDefensiveTacticsChoice(characterID) == "multiattack_defense"
 }
 
 // getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
@@ -13002,6 +13108,14 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		halflingBraveActive = true
 	}
 	
+	// v0.9.58: Hunter Ranger Steel Will (PHB p93)
+	// Advantage on saving throws against being frightened
+	steelWillActive := false
+	if checkSteelWill(req.CharacterID, req.Description) {
+		req.Advantage = true
+		steelWillActive = true
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -13039,6 +13153,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Dwarven Resilience)"
 		} else if halflingBraveActive {
 			rollType = "advantage (Halfling Brave)"
+		} else if steelWillActive {
+			rollType = "advantage (Steel Will)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
@@ -15665,8 +15781,20 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	// Roll the attack
-	attackRoll := rollDie(20)
+	// v0.9.58: Check for Escape the Horde (Hunter Ranger Defensive Tactics, PHB p93)
+	// Opportunity attacks against you are made with disadvantage
+	escapeTheHordeActive := hasEscapeTheHorde(req.TargetID)
+	
+	// Roll the attack (with disadvantage if target has Escape the Horde)
+	var attackRoll int
+	var oaRoll1, oaRoll2 int
+	if escapeTheHordeActive {
+		oaRoll1, oaRoll2, attackRoll = rollWithDisadvantage()
+	} else {
+		attackRoll = rollDie(20)
+		oaRoll1 = attackRoll
+		oaRoll2 = 0
+	}
 	
 	// v0.9.47: Halfling Lucky (PHB p28) - reroll nat 1s on attack rolls
 	oaHalflingLuckyUsed := false
@@ -15690,11 +15818,15 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	if oaHalflingLuckyUsed {
 		luckyNote = fmt.Sprintf(" 🍀[Lucky: %d→%d]", oaHalflingLuckyOriginal, attackRoll)
 	}
+	escapeNote := ""
+	if escapeTheHordeActive {
+		escapeNote = fmt.Sprintf(" 🏃[Escape the Horde: %d/%d→%d]", oaRoll1, oaRoll2, attackRoll)
+	}
 	
 	if attackRoll == 1 && !oaHalflingLuckyUsed {
 		// Critical miss (only if not saved by Halfling Lucky)
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d (nat 1 - Critical Miss!)", 
-			attackerName, targetName, totalAttack)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d (nat 1 - Critical Miss!)", 
+			attackerName, targetName, escapeNote, luckyNote, totalAttack)
 		hit = false
 	} else if attackRoll == 20 {
 		// Critical hit - double damage dice
@@ -15715,8 +15847,8 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s with %s", 
-			attackerName, targetName, luckyNote, totalAttack, damage, savageAttacksNote, weaponName)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s with %s", 
+			attackerName, targetName, escapeNote, luckyNote, totalAttack, damage, savageAttacksNote, weaponName)
 		hit = true
 	} else if totalAttack >= targetAC {
 		// Normal hit
@@ -15724,13 +15856,13 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		if damage < 1 {
 			damage = 1
 		}
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
-			attackerName, targetName, luckyNote, totalAttack, targetAC, damage, weaponName)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
+			attackerName, targetName, escapeNote, luckyNote, totalAttack, targetAC, damage, weaponName)
 		hit = true
 	} else {
 		// Miss
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d vs AC %d - MISS!", 
-			attackerName, targetName, luckyNote, totalAttack, targetAC)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d vs AC %d - MISS!", 
+			attackerName, targetName, escapeNote, luckyNote, totalAttack, targetAC)
 		hit = false
 	}
 	

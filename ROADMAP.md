@@ -753,13 +753,17 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] +1 die at level 9, +2 at level 13, +3 at level 17
       - [x] Applied to regular attacks, frenzy attacks, and Retaliation
       - [x] Uses weapon's damage die type (e.g., 1d12 greataxe = extra d12s)
-  - [x] Hunter Ranger features (v0.8.90, v0.8.93)
+  - [x] Hunter Ranger features (v0.8.90, v0.8.93, v0.9.58)
     - [x] Hunter's Prey choice system: POST /api/characters/subclass-choice to select option
     - [x] Colossus Slayer: extra 1d8 damage (once per turn) against wounded targets
     - [x] Giant Killer: reaction attack against Large+ creatures (POST /api/gm/giant-killer, v0.8.93)
     - [x] Horde Breaker: free extra attack against creature within 5ft of original target (v0.8.93)
     - [x] Subclass choices stored in `subclass_choices` JSONB column
     - [x] GET /api/characters/subclass-choice?character_id=X to view pending choices
+    - [x] Defensive Tactics (Level 7, v0.9.58 PHB p93)
+      - [x] Escape the Horde: Opportunity attacks against you are made with disadvantage
+      - [x] Steel Will: Advantage on saving throws against being frightened
+      - [x] Multiattack Defense: Helper function ready (full combat tracking not yet implemented)
   - [x] Monk Ki abilities and Open Hand features (v0.9.2)
     - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
     - [x] patient_defense action: Dodge as bonus action for 1 ki
@@ -1161,7 +1165,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.57**
+Current: **0.9.58**
 
 ---
 

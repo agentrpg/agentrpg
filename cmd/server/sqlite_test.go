@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -405,4 +406,140 @@ func TestSQLiteDwarvenResilience(t *testing.T) {
 	if checkDwarvenResilience(2, "Save against poison") {
 		t.Error("did not expect Human to have Dwarven Resilience")
 	}
+}
+
+// setupSQLiteTestDBWithClassAndSubclass creates a test DB with class, subclass, and subclass_choices columns for Hunter tests
+func setupSQLiteTestDBWithClassAndSubclass(t *testing.T) *sql.DB {
+	t.Helper()
+
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+
+	schema := `
+CREATE TABLE characters (
+	id INTEGER PRIMARY KEY,
+	name TEXT,
+	race TEXT,
+	class TEXT,
+	subclass TEXT,
+	level INTEGER DEFAULT 1,
+	conditions TEXT DEFAULT '[]',
+	exhaustion_level INTEGER DEFAULT 0,
+	subclass_choices TEXT DEFAULT '{}',
+	lobby_id INTEGER DEFAULT 0
+);`
+	if _, err := testDB.Exec(schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	db = testDB
+	t.Cleanup(func() {
+		_ = testDB.Close()
+		db = originalDB
+	})
+
+	return testDB
+}
+
+func seedHunterRanger(t *testing.T, testDB *sql.DB, id int, name string, level int, defensiveTactics string) {
+	t.Helper()
+	choicesJSON := "{}"
+	if defensiveTactics != "" {
+		choicesJSON = fmt.Sprintf(`{"defensive_tactics":"%s"}`, defensiveTactics)
+	}
+	_, err := testDB.Exec(
+		`INSERT INTO characters (id, name, race, class, subclass, level, subclass_choices) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, name, "Human", "ranger", "hunter", level, choicesJSON,
+	)
+	if err != nil {
+		t.Fatalf("insert hunter ranger: %v", err)
+	}
+}
+
+// TestSQLiteHunterDefensiveTactics tests Hunter Ranger Defensive Tactics (v0.9.58 PHB p93)
+func TestSQLiteHunterDefensiveTactics(t *testing.T) {
+	testDB := setupSQLiteTestDBWithClassAndSubclass(t)
+	// Level 7+ Hunter with Escape the Horde
+	seedHunterRanger(t, testDB, 1, "Strider", 7, "escape_the_horde")
+	// Level 7+ Hunter with Steel Will
+	seedHunterRanger(t, testDB, 2, "Aragorn", 7, "steel_will")
+	// Level 7+ Hunter with Multiattack Defense
+	seedHunterRanger(t, testDB, 3, "Drizzt", 8, "multiattack_defense")
+	// Level 6 Hunter (too low for Defensive Tactics)
+	seedHunterRanger(t, testDB, 4, "Newbie", 6, "escape_the_horde")
+	// Non-hunter Ranger
+	_, err := testDB.Exec(`INSERT INTO characters (id, name, race, class, subclass, level) VALUES (5, 'Beast Master', 'Human', 'ranger', 'beast_master', 10)`)
+	if err != nil {
+		t.Fatalf("insert beast master: %v", err)
+	}
+	// Non-ranger
+	_, err = testDB.Exec(`INSERT INTO characters (id, name, race, class, level) VALUES (6, 'Fighter', 'Human', 'fighter', 10)`)
+	if err != nil {
+		t.Fatalf("insert fighter: %v", err)
+	}
+
+	// Test Escape the Horde
+	t.Run("EscapeTheHorde", func(t *testing.T) {
+		if !hasEscapeTheHorde(1) {
+			t.Error("expected Strider (Level 7 Hunter with escape_the_horde) to have Escape the Horde")
+		}
+		if hasEscapeTheHorde(2) {
+			t.Error("Aragorn chose steel_will, should not have Escape the Horde")
+		}
+		if hasEscapeTheHorde(4) {
+			t.Error("Newbie is level 6, should not have Escape the Horde yet")
+		}
+		if hasEscapeTheHorde(5) {
+			t.Error("Beast Master is not a Hunter, should not have Escape the Horde")
+		}
+		if hasEscapeTheHorde(6) {
+			t.Error("Fighter should not have Escape the Horde")
+		}
+	})
+
+	// Test Steel Will
+	t.Run("SteelWill", func(t *testing.T) {
+		if !hasSteelWill(2) {
+			t.Error("expected Aragorn (Level 7 Hunter with steel_will) to have Steel Will")
+		}
+		if hasSteelWill(1) {
+			t.Error("Strider chose escape_the_horde, should not have Steel Will")
+		}
+		// Check that Steel Will grants advantage on frighten saves
+		if !checkSteelWill(2, "Save against the dragon's frightening presence") {
+			t.Error("Steel Will should apply to frightening presence save")
+		}
+		if checkSteelWill(2, "Save against fireball") {
+			t.Error("Steel Will should not apply to non-frighten saves")
+		}
+	})
+
+	// Test Multiattack Defense
+	t.Run("MultiattackDefense", func(t *testing.T) {
+		if !hasMultiattackDefense(3) {
+			t.Error("expected Drizzt (Level 8 Hunter with multiattack_defense) to have Multiattack Defense")
+		}
+		if hasMultiattackDefense(1) {
+			t.Error("Strider chose escape_the_horde, should not have Multiattack Defense")
+		}
+	})
+
+	// Test isHunterRangerWithDefensiveTactics helper
+	t.Run("HunterRangerWithDefensiveTactics", func(t *testing.T) {
+		if !isHunterRangerWithDefensiveTactics(1) {
+			t.Error("Strider should be a Hunter Ranger with Defensive Tactics")
+		}
+		if isHunterRangerWithDefensiveTactics(4) {
+			t.Error("Newbie is level 6, should not qualify for Defensive Tactics")
+		}
+		if isHunterRangerWithDefensiveTactics(5) {
+			t.Error("Beast Master is not a Hunter")
+		}
+		if isHunterRangerWithDefensiveTactics(6) {
+			t.Error("Fighter is not a Ranger")
+		}
+	})
 }
