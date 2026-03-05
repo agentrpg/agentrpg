@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.42
+// @version 0.9.43
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.42"
+const version = "0.9.43"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2751,6 +2751,127 @@ func canMove(charID int) bool {
 		return false
 	}
 	return true
+}
+
+// PETRIFIED WEIGHT (v0.9.43)
+// ============================================
+
+// getBodyWeightBySize returns estimated body weight in pounds based on 5e size category
+// Based on PHB/DMG guidelines: Small ~40 lbs, Medium ~150 lbs, Large ~500 lbs
+func getBodyWeightBySize(size string) float64 {
+	switch strings.ToLower(size) {
+	case "tiny":
+		return 8.0
+	case "small":
+		return 40.0
+	case "medium":
+		return 150.0
+	case "large":
+		return 500.0
+	case "huge":
+		return 2000.0
+	case "gargantuan":
+		return 8000.0
+	default:
+		return 150.0 // Default to Medium
+	}
+}
+
+// calculateInventoryWeight calculates total weight from a character's inventory
+func calculateInventoryWeight(inventory []map[string]interface{}) float64 {
+	totalWeight := 0.0
+	
+	for _, item := range inventory {
+		itemName, _ := item["name"].(string)
+		quantity := 1
+		if q, ok := item["quantity"].(float64); ok {
+			quantity = int(q)
+		}
+		
+		// Check for weight in item
+		weight := 0.0
+		if w, ok := item["weight"].(float64); ok {
+			weight = w
+		} else {
+			// Try to look up weight from SRD
+			itemSlug := strings.ToLower(strings.ReplaceAll(itemName, " ", "-"))
+			
+			// Check weapons
+			var dbWeight float64
+			err := db.QueryRow(`SELECT COALESCE(weight, 0) FROM weapons WHERE slug = $1`, itemSlug).Scan(&dbWeight)
+			if err == nil && dbWeight > 0 {
+				weight = dbWeight
+			} else {
+				// Check armor
+				err = db.QueryRow(`SELECT COALESCE(weight, 0) FROM armor WHERE slug = $1`, itemSlug).Scan(&dbWeight)
+				if err == nil && dbWeight > 0 {
+					weight = dbWeight
+				}
+			}
+		}
+		
+		totalWeight += weight * float64(quantity)
+	}
+	
+	return totalWeight
+}
+
+// getCharacterTotalWeight returns the character's total weight (body + equipment)
+// If petrified, the weight is multiplied by 10 per PHB p183
+func getCharacterTotalWeight(charID int) map[string]interface{} {
+	// Get character race and inventory
+	var race string
+	var inventoryJSON []byte
+	var conditionsJSON []byte
+	err := db.QueryRow(`SELECT race, COALESCE(inventory, '[]'), COALESCE(conditions, '[]') FROM characters WHERE id = $1`, charID).Scan(&race, &inventoryJSON, &conditionsJSON)
+	if err != nil {
+		return nil
+	}
+	
+	// Get race size
+	var size string
+	err = db.QueryRow(`SELECT COALESCE(size, 'Medium') FROM races WHERE LOWER(name) = LOWER($1)`, race).Scan(&size)
+	if err != nil {
+		size = "Medium" // Default
+	}
+	
+	// Calculate body weight
+	bodyWeight := getBodyWeightBySize(size)
+	
+	// Calculate equipment weight
+	var inventory []map[string]interface{}
+	json.Unmarshal(inventoryJSON, &inventory)
+	equipmentWeight := calculateInventoryWeight(inventory)
+	
+	// Total weight
+	totalWeight := bodyWeight + equipmentWeight
+	
+	// Check for petrified condition
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	isPetrified := false
+	for _, c := range conditions {
+		if strings.ToLower(c) == "petrified" {
+			isPetrified = true
+			break
+		}
+	}
+	
+	result := map[string]interface{}{
+		"race_size":        size,
+		"body_weight_lbs":  bodyWeight,
+		"equipment_weight_lbs": equipmentWeight,
+		"total_weight_lbs": totalWeight,
+	}
+	
+	if isPetrified {
+		petrifiedWeight := totalWeight * 10
+		result["petrified"] = true
+		result["petrified_weight_lbs"] = petrifiedWeight
+		result["petrified_note"] = "When petrified, weight increases by a factor of 10 (PHB p183). The petrified creature and all nonmagical objects it carries are transformed to stone."
+	}
+	
+	return result
 }
 
 // autoFailsSave checks if a condition causes automatic failure on a saving throw type
@@ -7802,6 +7923,21 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 		response["exhaustion_effects"] = exhaustionEffects
 		response["exhaustion_warning"] = fmt.Sprintf("You have %d level(s) of exhaustion. Take a long rest to reduce by 1.", exhaustionLevel)
+	}
+	
+	// Petrified weight (v0.9.43) - show weight info when petrified (weight x10 per PHB p183)
+	isPetrified := false
+	for _, c := range conditions {
+		if strings.ToLower(c) == "petrified" {
+			isPetrified = true
+			break
+		}
+	}
+	if isPetrified {
+		weightInfo := getCharacterTotalWeight(charID)
+		if weightInfo != nil {
+			response["weight"] = weightInfo
+		}
 	}
 	
 	if coverBonus > 0 {
