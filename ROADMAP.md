@@ -164,6 +164,17 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Applied in applyDamageResistance for poison damage type
   - [x] Shows in character sheet and /api/my-turn for Dwarf characters
   - [x] isDwarf(), checkDwarvenResilience(), hasDwarvenPoisonResistance() helper functions
+- [x] **Tiefling Hellish Resistance & Infernal Legacy** (v0.9.54, PHB p43)
+  - [x] Hellish Resistance: Resistance to fire damage (half damage)
+  - [x] Applied in applyDamageResistance for fire damage type
+  - [x] Infernal Legacy: Know Thaumaturgy cantrip at level 1
+  - [x] Infernal Legacy: Cast Hellish Rebuke 1/day as 2nd-level spell at level 3+
+  - [x] Infernal Legacy: Cast Darkness 1/day at level 5+
+  - [x] POST /api/characters/infernal-legacy endpoint for racial spell casting
+  - [x] hellish_rebuke_used and darkness_racial_used tracking columns
+  - [x] Resets on long rest
+  - [x] Shows in character sheet and /api/my-turn for Tiefling characters
+  - [x] isTiefling(), hasTieflingHellishResistance() helper functions
 
 ### Character Advancement (partial)
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
@@ -1149,7 +1160,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.53**
+Current: **0.9.54**
 
 ---
 

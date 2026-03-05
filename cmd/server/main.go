@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.53
+// @version 0.9.54
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.53"
+const version = "0.9.54"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -126,6 +126,15 @@ func applyDamageResistance(charID int, damage int, damageType string) DamageModR
 		if hasDwarvenPoisonResistance(charID) {
 			result.FinalDamage = result.FinalDamage / 2
 			result.Resistances = append(result.Resistances, "poison (Dwarven Resilience)")
+			result.WasHalved = true
+		}
+	}
+	
+	// v0.9.54: Tiefling Hellish Resistance - fire damage resistance (PHB p43)
+	if strings.ToLower(damageType) == "fire" && !result.WasHalved {
+		if hasTieflingHellishResistance(charID) {
+			result.FinalDamage = result.FinalDamage / 2
+			result.Resistances = append(result.Resistances, "fire (Hellish Resistance)")
 			result.WasHalved = true
 		}
 	}
@@ -495,6 +504,7 @@ func main() {
 	http.HandleFunc("/api/characters/multiclass", handleCharacterMulticlass)
 	http.HandleFunc("/api/characters/fighting-style", handleCharacterFightingStyle)
 	http.HandleFunc("/api/characters/breath-weapon", handleCharacterBreathWeapon)
+	http.HandleFunc("/api/characters/infernal-legacy", handleCharacterInfernalLegacy)
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
@@ -1013,6 +1023,12 @@ func initDB() {
 		-- When reduced to 0 HP but not killed outright, can drop to 1 HP instead
 		-- Resets on long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS relentless_endurance_used BOOLEAN DEFAULT FALSE;
+		
+		-- Tiefling Infernal Legacy tracking (v0.9.54)
+		-- Hellish Rebuke (1/day at level 3+) and Darkness (1/day at level 5+)
+		-- Resets on long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS hellish_rebuke_used BOOLEAN DEFAULT FALSE;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS darkness_racial_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2213,6 +2229,21 @@ func checkDwarvenResilience(characterID int, description string) bool {
 // hasDwarvenPoisonResistance returns true if character has Dwarven Resilience (poison damage resistance, v0.9.51 PHB p20)
 func hasDwarvenPoisonResistance(characterID int) bool {
 	return isDwarf(characterID)
+}
+
+// isTiefling checks if a character is a Tiefling (v0.9.54 - Hellish Resistance, Infernal Legacy)
+func isTiefling(characterID int) bool {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
+		return false
+	}
+	return strings.ToLower(race) == "tiefling"
+}
+
+// hasTieflingHellishResistance returns true if character has Hellish Resistance (fire damage resistance, v0.9.54 PHB p43)
+func hasTieflingHellishResistance(characterID int) bool {
+	return isTiefling(characterID)
 }
 
 // getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
@@ -8647,6 +8678,59 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.54: Tiefling Infernal Legacy info
+	if isTiefling(charID) {
+		var hellishRebukeUsed, darknessUsed bool
+		db.QueryRow("SELECT COALESCE(hellish_rebuke_used, false), COALESCE(darkness_racial_used, false) FROM characters WHERE id = $1", charID).Scan(&hellishRebukeUsed, &darknessUsed)
+		
+		infernalLegacy := map[string]interface{}{
+			"hellish_resistance": map[string]interface{}{
+				"description":           "Resistance to fire damage (PHB p43)",
+				"fire_damage_resistance": true,
+				"automatic":             true,
+			},
+			"thaumaturgy": map[string]interface{}{
+				"description": "You know the Thaumaturgy cantrip (cast at will)",
+				"type":        "cantrip",
+			},
+		}
+		
+		if level >= 3 {
+			chaMod := modifier(cha)
+			profBonus := proficiencyBonus(level)
+			spellDC := 8 + chaMod + profBonus
+			
+			infernalLegacy["hellish_rebuke"] = map[string]interface{}{
+				"available":        !hellishRebukeUsed,
+				"used_since_rest":  hellishRebukeUsed,
+				"recovery":         "long rest",
+				"spell_level":      2,
+				"damage_dice":      "3d10",
+				"damage_type":      "fire",
+				"save":             "DEX",
+				"spell_dc":         spellDC,
+				"description":      "Reaction when damaged: target takes 3d10 fire damage (DEX save for half)",
+				"how_to_use":       "POST /api/characters/infernal-legacy with character_id, spell='hellish_rebuke', target_id",
+			}
+		}
+		
+		if level >= 5 {
+			infernalLegacy["darkness"] = map[string]interface{}{
+				"available":        !darknessUsed,
+				"used_since_rest":  darknessUsed,
+				"recovery":         "long rest",
+				"spell_level":      2,
+				"duration":         "10 minutes (concentration)",
+				"area":             "15-foot-radius sphere",
+				"description":      "Create magical darkness that even darkvision cannot penetrate",
+				"how_to_use":       "POST /api/characters/infernal-legacy with character_id, spell='darkness'",
+			}
+		}
+		
+		response["infernal_legacy"] = infernalLegacy
+		response["hellish_resistance_tip"] = "🔥 Your Tiefling heritage grants fire resistance (half damage) and Infernal Legacy spells!"
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -9700,6 +9784,64 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"frightened_save_advantage": true,
 			"automatic":                 true,
 			"tip":                       "💪 Your Halfling Brave grants advantage on saves vs frightened effects - stand tall!",
+		}
+	}
+	
+	// v0.9.54: Tiefling Infernal Legacy info
+	if isTiefling(charID) {
+		var hellishRebukeUsed, darknessUsed bool
+		db.QueryRow("SELECT COALESCE(hellish_rebuke_used, false), COALESCE(darkness_racial_used, false) FROM characters WHERE id = $1", charID).Scan(&hellishRebukeUsed, &darknessUsed)
+		
+		infernalLegacy := map[string]interface{}{
+			"hellish_resistance": "You have resistance to fire damage (automatic)",
+			"thaumaturgy":        "You know the Thaumaturgy cantrip (cast at will)",
+		}
+		
+		if level >= 3 {
+			chaMod := modifier(cha)
+			profBonus := proficiencyBonus(level)
+			spellDC := 8 + chaMod + profBonus
+			
+			infernalLegacy["hellish_rebuke"] = map[string]interface{}{
+				"available":        !hellishRebukeUsed,
+				"used_since_rest":  hellishRebukeUsed,
+				"recovery":         "long rest",
+				"damage":           "3d10 fire",
+				"save":             fmt.Sprintf("DC %d DEX", spellDC),
+				"trigger":          "Reaction when damaged by a creature you can see within 60 feet",
+				"how_to_use":       "POST /api/characters/infernal-legacy with spell='hellish_rebuke', target_id",
+			}
+			
+			if !hellishRebukeUsed {
+				infernalLegacy["hellish_rebuke_tip"] = "🔥 Hellish Rebuke ready! When you're damaged, retaliate with 3d10 fire damage (reaction)!"
+			}
+		}
+		
+		if level >= 5 {
+			infernalLegacy["darkness"] = map[string]interface{}{
+				"available":        !darknessUsed,
+				"used_since_rest":  darknessUsed,
+				"recovery":         "long rest",
+				"area":             "15-foot-radius sphere",
+				"duration":         "10 minutes (concentration)",
+				"how_to_use":       "POST /api/characters/infernal-legacy with spell='darkness'",
+			}
+			
+			if !darknessUsed {
+				infernalLegacy["darkness_tip"] = "🌑 Darkness ready! Create magical darkness that even darkvision cannot penetrate."
+			}
+		}
+		
+		response["infernal_legacy"] = infernalLegacy
+		response["hellish_resistance_tip"] = "🔥 Your Tiefling heritage grants fire resistance (half fire damage) and Infernal Legacy spells!"
+		
+		// Add Hellish Rebuke to reactions if available
+		if level >= 3 && !hellishRebukeUsed && !reactionUsed {
+			if opts, ok := response["your_options"].(map[string]interface{}); ok {
+				if reactions, ok := opts["reactions"].([]string); ok {
+					opts["reactions"] = append(reactions, "hellish_rebuke (Infernal Legacy - 3d10 fire damage when you take damage, once per long rest)")
+				}
+			}
 		}
 	}
 	
@@ -36113,7 +36255,9 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			ammo_used_since_rest = 0,
 			class_resources_used = '{}',
 			breath_weapon_used = false,
-			relentless_endurance_used = false
+			relentless_endurance_used = false,
+			hellish_rebuke_used = false,
+			darkness_racial_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -42963,6 +43107,396 @@ func handleCharacterBreathWeapon(w http.ResponseWriter, r *http.Request) {
 		"breath_weapon_available": false,
 		"recovery":      "Take a short or long rest to regain your breath weapon",
 	})
+}
+
+// handleCharacterInfernalLegacy handles Tiefling Infernal Legacy racial spells (v0.9.54 PHB p43)
+// Tieflings know Thaumaturgy cantrip at 1st level
+// At 3rd level: cast Hellish Rebuke once per long rest as 2nd-level spell (CHA-based)
+// At 5th level: cast Darkness once per long rest
+// @Summary Use Tiefling Infernal Legacy
+// @Description Cast Hellish Rebuke (3rd+) or Darkness (5th+) using Infernal Legacy
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param body body object{character_id=int,spell=string,target_id=int} true "Spell to cast (hellish_rebuke or darkness)"
+// @Success 200 {object} object{success=bool,spell=string,damage=int}
+// @Failure 400 {object} object{error=string,message=string}
+// @Router /characters/infernal-legacy [post]
+func handleCharacterInfernalLegacy(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check Infernal Legacy status",
+				"usage":   "GET /api/characters/infernal-legacy?character_id=X",
+			})
+			return
+		}
+		
+		var race string
+		var level int
+		var hellishRebukeUsed, darknessUsed bool
+		err = db.QueryRow(`
+			SELECT race, level, COALESCE(hellish_rebuke_used, false), COALESCE(darkness_racial_used, false)
+			FROM characters WHERE id = $1
+		`, charID).Scan(&race, &level, &hellishRebukeUsed, &darknessUsed)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if !isTiefling(charID) {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_tiefling",
+				"message": fmt.Sprintf("Only Tieflings have the Infernal Legacy feature (character is %s)", race),
+			})
+			return
+		}
+		
+		// Build available spells list
+		spells := []map[string]interface{}{
+			{
+				"name":        "Thaumaturgy",
+				"type":        "cantrip",
+				"available":   true,
+				"description": "You can create minor magical effects: tremors, flames, whispers, eye color change, etc.",
+				"note":        "Cast at will (cantrip)",
+			},
+		}
+		
+		if level >= 3 {
+			spells = append(spells, map[string]interface{}{
+				"name":           "Hellish Rebuke",
+				"type":           "1st-level spell cast as 2nd-level",
+				"available":      !hellishRebukeUsed,
+				"used_since_rest": hellishRebukeUsed,
+				"description":    "Reaction when damaged. Target takes 3d10 fire damage (DEX save for half).",
+				"damage_dice":    "3d10",
+				"damage_type":    "fire",
+				"save":           "DEX",
+				"trigger":        "You are damaged by a creature within 60 feet that you can see",
+				"casting_time":   "1 reaction",
+				"note":           "Cast once per long rest using Infernal Legacy (CHA is your spellcasting ability)",
+			})
+		}
+		
+		if level >= 5 {
+			spells = append(spells, map[string]interface{}{
+				"name":           "Darkness",
+				"type":           "2nd-level spell",
+				"available":      !darknessUsed,
+				"used_since_rest": darknessUsed,
+				"description":    "Magical darkness spreads from a point within range (60ft) to fill a 15-foot-radius sphere.",
+				"duration":       "10 minutes (concentration)",
+				"note":           "Cast once per long rest using Infernal Legacy",
+			})
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":      charID,
+			"race":              race,
+			"level":             level,
+			"feature":           "Infernal Legacy",
+			"spells":            spells,
+			"hellish_resistance": true,
+			"hellish_resistance_note": "You have resistance to fire damage",
+			"spellcasting_ability": "CHA",
+			"recovery":          "long rest",
+			"how_to_use":        "POST /api/characters/infernal-legacy with character_id, spell (hellish_rebuke or darkness), target_id (for hellish_rebuke)",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Spell       string `json:"spell"`     // "hellish_rebuke" or "darkness"
+		TargetID    int    `json:"target_id"` // Required for Hellish Rebuke
+		Description string `json:"description"` // Optional flavor text
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Verify ownership
+	var ownerID int
+	var race, charName string
+	var level, cha int
+	var hellishRebukeUsed, darknessUsed bool
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, race, name, level, cha, COALESCE(hellish_rebuke_used, false), COALESCE(darkness_racial_used, false), campaign_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &race, &charName, &level, &cha, &hellishRebukeUsed, &darknessUsed, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only use Infernal Legacy for your own characters",
+		})
+		return
+	}
+	
+	if !isTiefling(req.CharacterID) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_tiefling",
+			"message": fmt.Sprintf("Only Tieflings have the Infernal Legacy feature (%s is %s)", charName, race),
+		})
+		return
+	}
+	
+	spellLower := strings.ToLower(strings.TrimSpace(req.Spell))
+	
+	switch spellLower {
+	case "hellish_rebuke", "hellish-rebuke", "hellishrebuke":
+		if level < 3 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "level_requirement",
+				"message": fmt.Sprintf("%s must be at least level 3 to cast Hellish Rebuke (currently level %d)", charName, level),
+			})
+			return
+		}
+		
+		if hellishRebukeUsed {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":    "spell_exhausted",
+				"message":  fmt.Sprintf("%s has already used Hellish Rebuke since the last long rest", charName),
+				"recovery": "Take a long rest to regain Infernal Legacy spells",
+			})
+			return
+		}
+		
+		if req.TargetID == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "target_required",
+				"message": "Hellish Rebuke requires a target_id (the creature that damaged you)",
+			})
+			return
+		}
+		
+		// Calculate spell save DC: 8 + prof + CHA mod
+		chaMod := modifier(cha)
+		profBonus := proficiencyBonus(level)
+		spellDC := 8 + profBonus + chaMod
+		
+		// Roll 3d10 fire damage (cast as 2nd level)
+		damage := 0
+		diceRolls := []int{}
+		for i := 0; i < 3; i++ {
+			roll := rollDie(10)
+			diceRolls = append(diceRolls, roll)
+			damage += roll
+		}
+		
+		// Find target and roll save
+		var targetName string
+		var targetDex, targetHP int
+		var isMonster bool
+		var monsterSlug string
+		
+		err := db.QueryRow("SELECT name, dex, hp FROM characters WHERE id = $1", req.TargetID).Scan(&targetName, &targetDex, &targetHP)
+		if err != nil {
+			// Try monsters in combat
+			var lobbyID int
+			db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1", req.CharacterID).Scan(&lobbyID)
+			
+			var combatState string
+			db.QueryRow("SELECT COALESCE(combat_state, '{}') FROM campaigns WHERE id = $1", lobbyID).Scan(&combatState)
+			
+			var cs struct {
+				TurnOrder []struct {
+					ID        int    `json:"id"`
+					Name      string `json:"name"`
+					MonsterID string `json:"monster_id"`
+				} `json:"turn_order"`
+			}
+			json.Unmarshal([]byte(combatState), &cs)
+			
+			for _, entry := range cs.TurnOrder {
+				if entry.ID == req.TargetID && entry.MonsterID != "" {
+					targetName = entry.Name
+					monsterSlug = entry.MonsterID
+					isMonster = true
+					// Get monster DEX from SRD
+					db.QueryRow("SELECT dex FROM monsters WHERE slug = $1", monsterSlug).Scan(&targetDex)
+					break
+				}
+			}
+			
+			if targetName == "" {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "target_not_found",
+					"message": fmt.Sprintf("Target %d not found in campaign", req.TargetID),
+				})
+				return
+			}
+		}
+		
+		// DEX save
+		dexMod := modifier(targetDex)
+		saveRoll := rollDie(20)
+		saveTotal := saveRoll + dexMod
+		saveSuccess := saveTotal >= spellDC
+		
+		// Apply damage
+		finalDamage := damage
+		if saveSuccess {
+			finalDamage = damage / 2
+		}
+		
+		// Apply monster damage resistance/immunity if applicable
+		var damageNotes []string
+		if isMonster && monsterSlug != "" {
+			dmgResult := applyMonsterDamageResistance(monsterSlug, finalDamage, "fire", true, false)
+			if dmgResult.WasNegated {
+				damageNotes = append(damageNotes, fmt.Sprintf("Immune to fire (%s)", strings.Join(dmgResult.Immunities, ", ")))
+			} else if dmgResult.WasHalved {
+				damageNotes = append(damageNotes, fmt.Sprintf("Resistant to fire (%s)", strings.Join(dmgResult.Resistances, ", ")))
+			}
+			finalDamage = dmgResult.FinalDamage
+		} else if !isMonster {
+			// Check player damage resistance
+			dmgResult := applyDamageResistance(req.TargetID, finalDamage, "fire")
+			if dmgResult.WasHalved {
+				damageNotes = append(damageNotes, fmt.Sprintf("Fire resistance: %s", strings.Join(dmgResult.Resistances, ", ")))
+			}
+			finalDamage = dmgResult.FinalDamage
+			
+			// Apply damage to character
+			db.Exec("UPDATE characters SET hp = hp - $1 WHERE id = $2", finalDamage, req.TargetID)
+		}
+		
+		// Mark spell as used
+		db.Exec("UPDATE characters SET hellish_rebuke_used = true WHERE id = $1", req.CharacterID)
+		
+		// Log action if in campaign
+		if campaignID.Valid {
+			actionDesc := fmt.Sprintf("🔥 %s uses Hellish Rebuke (Infernal Legacy) against %s! Dice: %v = %d fire damage. DC %d DEX save: %d+%d = %d (%s). Final damage: %d",
+				charName, targetName, diceRolls, damage, spellDC, saveRoll, dexMod, saveTotal,
+				map[bool]string{true: "SUCCESS - half damage", false: "FAILED - full damage"}[saveSuccess],
+				finalDamage)
+			if len(damageNotes) > 0 {
+				actionDesc += " [" + strings.Join(damageNotes, ", ") + "]"
+			}
+			
+			db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+				VALUES ($1, $2, 'cast', $3, NOW())`, campaignID.Int64, req.CharacterID, actionDesc)
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"spell":         "Hellish Rebuke",
+			"spell_level":   2,
+			"feature":       "Infernal Legacy",
+			"caster":        charName,
+			"target":        targetName,
+			"damage_type":   "fire",
+			"damage_dice":   "3d10",
+			"dice_rolls":    diceRolls,
+			"total_damage":  damage,
+			"spell_dc":      spellDC,
+			"save_type":     "DEX",
+			"save_roll":     saveRoll,
+			"save_modifier": dexMod,
+			"save_total":    saveTotal,
+			"save_success":  saveSuccess,
+			"final_damage":  finalDamage,
+			"damage_notes":  damageNotes,
+			"description":   fmt.Sprintf("%s wreathed in flames as they retaliate against %s with hellfire!", charName, targetName),
+			"recovery":      "Take a long rest to regain Infernal Legacy spells",
+		})
+		
+	case "darkness":
+		if level < 5 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "level_requirement",
+				"message": fmt.Sprintf("%s must be at least level 5 to cast Darkness (currently level %d)", charName, level),
+			})
+			return
+		}
+		
+		if darknessUsed {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":    "spell_exhausted",
+				"message":  fmt.Sprintf("%s has already used Darkness since the last long rest", charName),
+				"recovery": "Take a long rest to regain Infernal Legacy spells",
+			})
+			return
+		}
+		
+		// Mark spell as used
+		db.Exec("UPDATE characters SET darkness_racial_used = true WHERE id = $1", req.CharacterID)
+		
+		// Log action if in campaign
+		if campaignID.Valid {
+			desc := req.Description
+			if desc == "" {
+				desc = fmt.Sprintf("%s casts Darkness (Infernal Legacy), creating a 15-foot-radius sphere of magical darkness", charName)
+			}
+			db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+				VALUES ($1, $2, 'cast', $3, NOW())`, campaignID.Int64, req.CharacterID, "🌑 "+desc)
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":      true,
+			"spell":        "Darkness",
+			"spell_level":  2,
+			"feature":      "Infernal Legacy",
+			"caster":       charName,
+			"range":        "60 feet",
+			"area":         "15-foot-radius sphere",
+			"duration":     "10 minutes",
+			"concentration": true,
+			"effects": []string{
+				"Magical darkness spreads from the point you choose",
+				"Completely blocks darkvision",
+				"Nonmagical light can't illuminate the area",
+				"If any spell-created light overlaps, both spells are dispelled",
+			},
+			"description": req.Description,
+			"note":        "The darkness can be cast on an object you're holding or one that isn't being worn/carried",
+			"recovery":    "Take a long rest to regain Infernal Legacy spells",
+		})
+		
+	default:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":       "invalid_spell",
+			"message":     fmt.Sprintf("Unknown Infernal Legacy spell: %s", req.Spell),
+			"valid_spells": []string{"hellish_rebuke", "darkness"},
+			"note":        "Thaumaturgy is a cantrip - cast it using the regular cast action",
+		})
+	}
 }
 
 // handleUniverseFightingStyles returns all available fighting styles
