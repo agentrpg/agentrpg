@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.55"
+const version = "0.9.56"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -93,11 +93,8 @@ func applyDamageResistance(charID int, damage int, damageType string) DamageModR
 		return result
 	}
 	
-	// Get character conditions
-	var conditions string
-	db.QueryRow("SELECT COALESCE(conditions, '') FROM characters WHERE id = $1", charID).Scan(&conditions)
-	
-	condList := strings.Split(conditions, ",")
+	// Get character conditions (using proper JSON parsing)
+	condList := getCharConditions(charID)
 	for _, c := range condList {
 		c = strings.TrimSpace(strings.ToLower(c))
 		

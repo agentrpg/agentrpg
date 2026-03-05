@@ -121,3 +121,288 @@ func TestSQLiteSaveDisadvantageAndNames(t *testing.T) {
 		t.Fatalf("getCharacterName(999) = %q, want empty string for missing character", got)
 	}
 }
+
+// TestProficiencyBonus tests the 5e proficiency bonus calculation (pure function)
+func TestProficiencyBonus(t *testing.T) {
+	tests := []struct {
+		level    int
+		expected int
+	}{
+		{1, 2}, {2, 2}, {3, 2}, {4, 2},   // Levels 1-4: +2
+		{5, 3}, {6, 3}, {7, 3}, {8, 3},   // Levels 5-8: +3
+		{9, 4}, {10, 4}, {11, 4}, {12, 4}, // Levels 9-12: +4
+		{13, 5}, {14, 5}, {15, 5}, {16, 5}, // Levels 13-16: +5
+		{17, 6}, {18, 6}, {19, 6}, {20, 6}, // Levels 17-20: +6
+	}
+
+	for _, tt := range tests {
+		got := proficiencyBonus(tt.level)
+		if got != tt.expected {
+			t.Errorf("proficiencyBonus(%d) = %d, want %d", tt.level, got, tt.expected)
+		}
+	}
+}
+
+// setupSQLiteTestDBWithRace creates a test DB with race column for racial feature tests
+func setupSQLiteTestDBWithRace(t *testing.T) *sql.DB {
+	t.Helper()
+
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+
+	schema := `
+CREATE TABLE characters (
+	id INTEGER PRIMARY KEY,
+	name TEXT,
+	race TEXT,
+	conditions TEXT,
+	exhaustion_level INTEGER DEFAULT 0,
+	lobby_id INTEGER DEFAULT 0
+);
+CREATE TABLE campaigns (
+	id INTEGER PRIMARY KEY,
+	combat_state TEXT DEFAULT '{}'
+);`
+	if _, err := testDB.Exec(schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	db = testDB
+	t.Cleanup(func() {
+		_ = testDB.Close()
+		db = originalDB
+	})
+
+	return testDB
+}
+
+func seedCharacterWithRace(t *testing.T, testDB *sql.DB, id int, name, race, conditionsJSON string, exhaustion int) {
+	t.Helper()
+	_, err := testDB.Exec(
+		`INSERT INTO characters (id, name, race, conditions, exhaustion_level) VALUES (?, ?, ?, ?, ?)`,
+		id, name, race, conditionsJSON, exhaustion,
+	)
+	if err != nil {
+		t.Fatalf("insert character: %v", err)
+	}
+}
+
+// TestSQLiteRaceDetection tests race detection helpers for racial features
+func TestSQLiteRaceDetection(t *testing.T) {
+	testDB := setupSQLiteTestDBWithRace(t)
+	seedCharacterWithRace(t, testDB, 1, "Bilbo", "Halfling", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 2, "Frodo", "Lightfoot Halfling", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 3, "Gimli", "Dwarf", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 4, "Durkon", "Mountain Dwarf", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 5, "Gromm", "Half-Orc", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 6, "Gnimble", "Forest Gnome", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 7, "Legolas", "Elf", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 8, "Mordai", "Tiefling", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 9, "Human", "Human", `[]`, 0)
+
+	// Test Halfling detection
+	if !isHalfling(1) {
+		t.Error("expected Bilbo (Halfling) to be detected as halfling")
+	}
+	if !isHalfling(2) {
+		t.Error("expected Frodo (Lightfoot Halfling) to be detected as halfling")
+	}
+	if isHalfling(9) {
+		t.Error("expected Human to NOT be detected as halfling")
+	}
+
+	// Test Dwarf detection
+	if !isDwarf(3) {
+		t.Error("expected Gimli (Dwarf) to be detected as dwarf")
+	}
+	if !isDwarf(4) {
+		t.Error("expected Durkon (Mountain Dwarf) to be detected as dwarf")
+	}
+
+	// Test Half-Orc detection
+	if !isHalfOrc(5) {
+		t.Error("expected Gromm (Half-Orc) to be detected as half-orc")
+	}
+
+	// Test Gnome detection
+	if !isGnome(6) {
+		t.Error("expected Gnimble (Forest Gnome) to be detected as gnome")
+	}
+
+	// Test Elf detection
+	if !isElf(7) {
+		t.Error("expected Legolas (Elf) to be detected as elf")
+	}
+
+	// Test Tiefling detection
+	if !isTiefling(8) {
+		t.Error("expected Mordai (Tiefling) to be detected as tiefling")
+	}
+}
+
+// TestSQLiteDamageResistance tests damage resistance from conditions
+func TestSQLiteDamageResistance(t *testing.T) {
+	testDB := setupSQLiteTestDBWithRace(t)
+	seedCharacterWithRace(t, testDB, 1, "Stony", "Human", `["petrified"]`, 0)
+	seedCharacterWithRace(t, testDB, 2, "Normal", "Human", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 3, "Rocky", "Dwarf", `[]`, 0) // Dwarven Resilience: poison resistance
+	seedCharacterWithRace(t, testDB, 4, "Fiery", "Tiefling", `[]`, 0) // Hellish Resistance: fire resistance
+
+	// Test petrified resistance (halves ALL damage)
+	result := applyDamageResistance(1, 20, "fire")
+	if result.FinalDamage != 10 {
+		t.Errorf("petrified damage resistance: got %d, want 10", result.FinalDamage)
+	}
+	if !result.WasHalved {
+		t.Error("expected WasHalved to be true for petrified")
+	}
+
+	// Test normal character (no resistance)
+	result = applyDamageResistance(2, 20, "fire")
+	if result.FinalDamage != 20 {
+		t.Errorf("normal character: got %d damage, want 20", result.FinalDamage)
+	}
+
+	// Test Dwarven Resilience (poison resistance)
+	result = applyDamageResistance(3, 20, "poison")
+	if result.FinalDamage != 10 {
+		t.Errorf("dwarven poison resistance: got %d, want 10", result.FinalDamage)
+	}
+
+	// Test Tiefling Hellish Resistance (fire resistance)
+	result = applyDamageResistance(4, 20, "fire")
+	if result.FinalDamage != 10 {
+		t.Errorf("tiefling fire resistance: got %d, want 10", result.FinalDamage)
+	}
+
+	// Test zero damage (edge case)
+	result = applyDamageResistance(1, 0, "fire")
+	if result.FinalDamage != 0 {
+		t.Errorf("zero damage: got %d, want 0", result.FinalDamage)
+	}
+}
+
+// TestSQLiteHalflingBrave tests the Halfling Brave racial feature (PHB p28)
+func TestSQLiteHalflingBrave(t *testing.T) {
+	testDB := setupSQLiteTestDBWithRace(t)
+	seedCharacterWithRace(t, testDB, 1, "Merry", "Halfling", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 2, "Aragorn", "Human", `[]`, 0)
+
+	// Halfling should get advantage on frighten saves
+	if !checkHalflingBrave(1, "Save against the dragon's frightening presence") {
+		t.Error("expected Halfling Brave to apply to frightening presence save")
+	}
+	if !checkHalflingBrave(1, "Save against being frightened") {
+		t.Error("expected Halfling Brave to apply to being frightened")
+	}
+	if !checkHalflingBrave(1, "Fear effect from the vampire") {
+		t.Error("expected Halfling Brave to apply to fear effect")
+	}
+	if !checkHalflingBrave(1, "The lich casts cause fear") {
+		t.Error("expected Halfling Brave to apply to cause fear spell")
+	}
+
+	// Non-frighten saves should not trigger
+	if checkHalflingBrave(1, "Save against fireball") {
+		t.Error("did not expect Halfling Brave to apply to fireball save")
+	}
+
+	// Non-halflings should not get Halfling Brave
+	if checkHalflingBrave(2, "Save against being frightened") {
+		t.Error("did not expect Human to have Halfling Brave")
+	}
+}
+
+// TestSQLiteFeyAncestry tests Elf/Half-Elf Fey Ancestry (charm advantage)
+func TestSQLiteFeyAncestry(t *testing.T) {
+	testDB := setupSQLiteTestDBWithRace(t)
+	seedCharacterWithRace(t, testDB, 1, "Legolas", "Elf", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 2, "Elrond", "Half-Elf", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 3, "Boromir", "Human", `[]`, 0)
+
+	// Elves have Fey Ancestry
+	if !hasFeyAncestry(1) {
+		t.Error("expected Elf to have Fey Ancestry")
+	}
+	if !hasFeyAncestry(2) {
+		t.Error("expected Half-Elf to have Fey Ancestry")
+	}
+	if hasFeyAncestry(3) {
+		t.Error("did not expect Human to have Fey Ancestry")
+	}
+
+	// Fey Ancestry gives charm save advantage
+	if !checkFeyAncestryCharm(1, "Save against the vampire's charm") {
+		t.Error("expected Fey Ancestry to apply to charm save")
+	}
+	if checkFeyAncestryCharm(1, "Save against fireball") {
+		t.Error("did not expect Fey Ancestry to apply to non-charm save")
+	}
+}
+
+// TestSQLiteGnomeCunning tests Gnome Cunning (magic INT/WIS/CHA save advantage)
+func TestSQLiteGnomeCunning(t *testing.T) {
+	testDB := setupSQLiteTestDBWithRace(t)
+	seedCharacterWithRace(t, testDB, 1, "Gnimble", "Gnome", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 2, "Not-Gnome", "Human", `[]`, 0)
+
+	// Gnome Cunning applies to INT/WIS/CHA saves against magic (from_magic=true)
+	if !checkGnomeCunning(1, "int", true) {
+		t.Error("expected Gnome Cunning to apply to INT saves vs magic")
+	}
+	if !checkGnomeCunning(1, "wis", true) {
+		t.Error("expected Gnome Cunning to apply to WIS saves vs magic")
+	}
+	if !checkGnomeCunning(1, "cha", true) {
+		t.Error("expected Gnome Cunning to apply to CHA saves vs magic")
+	}
+
+	// Does NOT apply to STR/DEX/CON (even against magic)
+	if checkGnomeCunning(1, "str", true) {
+		t.Error("did not expect Gnome Cunning to apply to STR saves")
+	}
+	if checkGnomeCunning(1, "dex", true) {
+		t.Error("did not expect Gnome Cunning to apply to DEX saves")
+	}
+	if checkGnomeCunning(1, "con", true) {
+		t.Error("did not expect Gnome Cunning to apply to CON saves")
+	}
+
+	// Does NOT apply to non-magic saves (from_magic=false)
+	if checkGnomeCunning(1, "int", false) {
+		t.Error("did not expect Gnome Cunning for non-magic INT save")
+	}
+
+	// Non-gnomes don't get it
+	if checkGnomeCunning(2, "int", true) {
+		t.Error("did not expect Human to have Gnome Cunning")
+	}
+}
+
+// TestSQLiteDwarvenResilience tests Dwarf poison save advantage
+func TestSQLiteDwarvenResilience(t *testing.T) {
+	testDB := setupSQLiteTestDBWithRace(t)
+	seedCharacterWithRace(t, testDB, 1, "Thorin", "Dwarf", `[]`, 0)
+	seedCharacterWithRace(t, testDB, 2, "Human", "Human", `[]`, 0)
+
+	// Dwarf gets advantage on poison saves
+	if !checkDwarvenResilience(1, "Save against the poison") {
+		t.Error("expected Dwarven Resilience to apply to poison save")
+	}
+	if !checkDwarvenResilience(1, "poisoned") {
+		t.Error("expected Dwarven Resilience to apply to 'poisoned' keyword")
+	}
+
+	// Non-poison saves don't trigger
+	if checkDwarvenResilience(1, "Save against fireball") {
+		t.Error("did not expect Dwarven Resilience for fireball")
+	}
+
+	// Humans don't get it
+	if checkDwarvenResilience(2, "Save against poison") {
+		t.Error("did not expect Human to have Dwarven Resilience")
+	}
+}
