@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.56"
+const version = "0.9.57"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -35606,6 +35606,8 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 	var req struct {
 		Condition        string `json:"condition"`
 		FromMagicalSleep bool   `json:"from_magical_sleep"` // v0.9.50: for Sleep spell effects
+		FromElemental    bool   `json:"from_elemental"`     // v0.9.57: for Nature's Ward immunity
+		FromFey          bool   `json:"from_fey"`           // v0.9.57: for Nature's Ward immunity
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	
@@ -35747,6 +35749,28 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 						})
 						return
 					}
+				}
+			}
+			
+			// v0.9.57: Nature's Ward - Land Druid level 10+ immune to charm/frighten from elementals/fey (PHB p69)
+			// "At 10th level, you can't be charmed or frightened by elementals or fey"
+			if (req.FromElemental || req.FromFey) && classKey == "druid" && level >= 10 {
+				if subclass.Valid && subclass.String == "land" {
+					sourceType := "an elemental"
+					if req.FromFey {
+						sourceType = "a fey"
+					}
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"success":         true,
+						"immune":          true,
+						"immunity_source": "Nature's Ward (Circle of the Land Druid level 10+)",
+						"character":       charName,
+						"character_id":    charID,
+						"condition":       condition,
+						"from_creature":   sourceType,
+						"message":         fmt.Sprintf("🌿 %s is immune to being %s by %s through Nature's Ward! Their connection to nature protects them.", charName, baseCondition, sourceType),
+					})
+					return
 				}
 			}
 		}

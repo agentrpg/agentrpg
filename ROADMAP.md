@@ -714,7 +714,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Triggers on AoE spell kills and opportunity attack kills
   - [x] Class feature immunities (v0.8.87)
     - [x] Paladin's Divine Health (level 3+): immune to disease
-    - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease
+    - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease, immune to charm/frighten from elementals/fey (v0.9.57)
   - [x] Devotion Paladin's Aura of Devotion (charm immunity at level 7+, v0.8.88)
   - [x] Paladin's Aura of Courage (frighten immunity at level 10+, v0.8.88)
   - [x] Devotion Paladin's Turn the Unholy (v0.9.31)
@@ -1161,7 +1161,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.54**
+Current: **0.9.57**
 
 ---
 
