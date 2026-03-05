@@ -118,7 +118,12 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Set ancestry during character creation (draconic_ancestry field)
   - [x] Shows in character sheet and /api/my-turn for Dragonborn
   - [x] Evasion applies correctly to breath weapon damage
-- [ ] Halfling Lucky (reroll nat 1s) — future work
+- [x] **Halfling Lucky** (v0.9.47, PHB p28)
+  - [x] When rolling a 1 on d20 for attack roll, ability check, or saving throw, reroll and use new result
+  - [x] Applied in: skill checks, tool checks, saving throws, attack rolls, death saves, opportunity attacks
+  - [x] Reroll is mandatory (must use new roll)
+  - [x] Shows "🍀[Lucky: X→Y]" notation in results
+  - [x] Prevents true nat 1 critical failures
 - [ ] Half-Orc Relentless Endurance — future work
 - [ ] Gnome Cunning (advantage on INT/WIS/CHA saves vs magic) — future work
 
@@ -1106,7 +1111,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.46**
+Current: **0.9.47**
 
 ---
 

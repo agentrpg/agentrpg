@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.46
+// @version 0.9.47
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.46"
+const version = "0.9.47"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2004,6 +2004,29 @@ func proficiencyBonus(level int) int {
 		return 5
 	}
 	return 6
+}
+
+// isHalfling checks if a character is a halfling (v0.9.47 - Halfling Lucky)
+func isHalfling(characterID int) bool {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
+		return false
+	}
+	raceLower := strings.ToLower(race)
+	return strings.Contains(raceLower, "halfling")
+}
+
+// applyHalflingLucky implements the Halfling Lucky racial trait (PHB p28):
+// When you roll a 1 on the d20 for an attack roll, ability check, or saving throw,
+// you can reroll the die and must use the new roll.
+// Returns: (finalRoll, wasRerolled, originalRoll)
+func applyHalflingLucky(roll int, characterID int) (int, bool, int) {
+	if roll == 1 && isHalfling(characterID) {
+		newRoll := rollDie(20)
+		return newRoll, true, roll
+	}
+	return roll, false, roll
 }
 
 // getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
@@ -11595,6 +11618,21 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		roll2 = 0
 	}
 	
+	// v0.9.47: Halfling Lucky (PHB p28)
+	// When you roll a 1 on the d20, you can reroll and must use the new roll
+	halflingLuckyUsed := false
+	halflingLuckyOriginal := 0
+	if finalRoll == 1 {
+		newRoll, rerolled, origRoll := applyHalflingLucky(finalRoll, req.CharacterID)
+		if rerolled {
+			halflingLuckyUsed = true
+			halflingLuckyOriginal = origRoll
+			finalRoll = newRoll
+			// Update roll1 to reflect the reroll for display purposes
+			roll1 = newRoll
+		}
+	}
+	
 	// v0.9.26: Reliable Talent (Rogue level 11+)
 	// Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
 	reliableTalentApplied := false
@@ -11648,12 +11686,24 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	
 	// Build result description
 	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
+	if halflingLuckyUsed {
+		// Show the reroll: "d20(1→X Lucky)"
+		resultStr = fmt.Sprintf("d20(%d→%d Lucky)", halflingLuckyOriginal, finalRoll)
+	}
 	if reliableTalentApplied {
-		resultStr = fmt.Sprintf("d20(%d→10)", originalRoll)
+		if halflingLuckyUsed {
+			resultStr = fmt.Sprintf("d20(%d→%d Lucky→10)", halflingLuckyOriginal, originalRoll)
+		} else {
+			resultStr = fmt.Sprintf("d20(%d→10)", originalRoll)
+		}
 	} else if rollType == "advantage" {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
 	} else if rollType == "disadvantage" {
-		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+		if halflingLuckyUsed {
+			resultStr = fmt.Sprintf("d20(%d,%d→%d→%d Lucky)", roll1, roll2, halflingLuckyOriginal, finalRoll)
+		} else {
+			resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+		}
 	}
 	
 	modStr := ""
@@ -11670,9 +11720,10 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	
 	// Check for natural 20 or 1 (optional rule flavor)
 	// Note: Reliable Talent doesn't affect crits - those only apply to attack rolls anyway
+	// Note: Halfling Lucky prevents true nat 1s since they get rerolled
 	if finalRoll == 20 {
 		outcomeStr = "CRITICAL SUCCESS"
-	} else if finalRoll == 1 && !reliableTalentApplied {
+	} else if finalRoll == 1 && !reliableTalentApplied && !halflingLuckyUsed {
 		outcomeStr = "CRITICAL FAILURE"
 	}
 	
@@ -11736,6 +11787,13 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		response["reliable_talent"] = true
 		response["original_roll"] = originalRoll
 		response["class_feature_note"] = fmt.Sprintf("%s's Reliable Talent: rolled %d, treated as 10", charName, originalRoll)
+	}
+	// v0.9.47: Add Halfling Lucky note
+	if halflingLuckyUsed {
+		response["halfling_lucky"] = true
+		response["halfling_lucky_original"] = halflingLuckyOriginal
+		response["halfling_lucky_reroll"] = finalRoll
+		response["racial_feature_note"] = fmt.Sprintf("🍀 %s's Halfling Lucky: rerolled nat 1 → %d", charName, finalRoll)
 	}
 	// v0.9.32: Add Peerless Skill note
 	if peerlessSkillApplied {
@@ -12049,6 +12107,20 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		roll2 = 0
 	}
 	
+	// v0.9.47: Halfling Lucky (PHB p28)
+	// When you roll a 1 on the d20, you can reroll and must use the new roll
+	toolHalflingLuckyUsed := false
+	toolHalflingLuckyOriginal := 0
+	if finalRoll == 1 {
+		newRoll, rerolled, origRoll := applyHalflingLucky(finalRoll, req.CharacterID)
+		if rerolled {
+			toolHalflingLuckyUsed = true
+			toolHalflingLuckyOriginal = origRoll
+			finalRoll = newRoll
+			roll1 = newRoll
+		}
+	}
+	
 	// v0.9.26: Reliable Talent (Rogue level 11+)
 	// Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
 	toolReliableTalentApplied := false
@@ -12096,12 +12168,23 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	
 	// Build result description
 	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
+	if toolHalflingLuckyUsed {
+		resultStr = fmt.Sprintf("d20(%d→%d Lucky)", toolHalflingLuckyOriginal, finalRoll)
+	}
 	if toolReliableTalentApplied {
-		resultStr = fmt.Sprintf("d20(%d→10)", toolOriginalRoll)
+		if toolHalflingLuckyUsed {
+			resultStr = fmt.Sprintf("d20(%d→%d Lucky→10)", toolHalflingLuckyOriginal, toolOriginalRoll)
+		} else {
+			resultStr = fmt.Sprintf("d20(%d→10)", toolOriginalRoll)
+		}
 	} else if rollType == "advantage" || rollType == "advantage (inspiration)" {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
 	} else if strings.HasPrefix(rollType, "disadvantage") {
-		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+		if toolHalflingLuckyUsed {
+			resultStr = fmt.Sprintf("d20(%d,%d→%d→%d Lucky)", roll1, roll2, toolHalflingLuckyOriginal, finalRoll)
+		} else {
+			resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+		}
 	}
 	
 	// Build Peerless Skill string if used
@@ -12124,9 +12207,10 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	
 	// Natural 20/1 flavor
 	// Note: Reliable Talent doesn't affect crits - those only apply to attack rolls anyway
+	// Note: Halfling Lucky prevents true nat 1s since they get rerolled
 	if finalRoll == 20 {
 		outcomeStr = "CRITICAL SUCCESS"
-	} else if finalRoll == 1 && !toolReliableTalentApplied {
+	} else if finalRoll == 1 && !toolReliableTalentApplied && !toolHalflingLuckyUsed {
 		outcomeStr = "CRITICAL FAILURE"
 	}
 	
@@ -12191,6 +12275,13 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		response["reliable_talent"] = true
 		response["original_roll"] = toolOriginalRoll
 		response["class_feature_note"] = fmt.Sprintf("%s's Reliable Talent: rolled %d, treated as 10", charName, toolOriginalRoll)
+	}
+	// v0.9.47: Add Halfling Lucky note
+	if toolHalflingLuckyUsed {
+		response["halfling_lucky"] = true
+		response["halfling_lucky_original"] = toolHalflingLuckyOriginal
+		response["halfling_lucky_reroll"] = finalRoll
+		response["racial_feature_note"] = fmt.Sprintf("🍀 %s's Halfling Lucky: rerolled nat 1 → %d", charName, finalRoll)
 	}
 	// v0.9.32: Add Peerless Skill note
 	if toolPeerlessSkillApplied {
@@ -12481,15 +12572,36 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		roll2 = 0
 	}
 	
+	// v0.9.47: Halfling Lucky (PHB p28)
+	// When you roll a 1 on the d20, you can reroll and must use the new roll
+	saveHalflingLuckyUsed := false
+	saveHalflingLuckyOriginal := 0
+	if finalRoll == 1 {
+		newRoll, rerolled, origRoll := applyHalflingLucky(finalRoll, req.CharacterID)
+		if rerolled {
+			saveHalflingLuckyUsed = true
+			saveHalflingLuckyOriginal = origRoll
+			finalRoll = newRoll
+			roll1 = newRoll
+		}
+	}
+	
 	total := finalRoll + totalMod
 	success := total >= req.DC
 	
 	// Build result description
 	resultStr := fmt.Sprintf("d20(%d)", finalRoll)
+	if saveHalflingLuckyUsed {
+		resultStr = fmt.Sprintf("d20(%d→%d Lucky)", saveHalflingLuckyOriginal, finalRoll)
+	}
 	if rollType == "advantage" {
 		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
 	} else if rollType == "disadvantage" {
-		resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+		if saveHalflingLuckyUsed {
+			resultStr = fmt.Sprintf("d20(%d,%d→%d→%d Lucky)", roll1, roll2, saveHalflingLuckyOriginal, finalRoll)
+		} else {
+			resultStr = fmt.Sprintf("d20(%d,%d→%d)", roll1, roll2, finalRoll)
+		}
 	}
 	
 	modStr := ""
@@ -12510,10 +12622,11 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Natural 20 always succeeds, natural 1 always fails (5e death save rule, commonly used)
+	// Note: Halfling Lucky prevents true nat 1s since they get rerolled
 	if finalRoll == 20 {
 		success = true
 		outcomeStr = "CRITICAL SUCCESS"
-	} else if finalRoll == 1 {
+	} else if finalRoll == 1 && !saveHalflingLuckyUsed {
 		success = false
 		outcomeStr = "CRITICAL FAILURE"
 	}
@@ -12553,6 +12666,18 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if usedInspiration {
 		response["used_inspiration"] = true
 		response["inspiration_note"] = fmt.Sprintf("%s spent inspiration for advantage on this save", charName)
+	}
+	// v0.9.47: Add Halfling Lucky note
+	if saveHalflingLuckyUsed {
+		response["halfling_lucky"] = true
+		response["halfling_lucky_original"] = saveHalflingLuckyOriginal
+		response["halfling_lucky_reroll"] = finalRoll
+		response["racial_feature_note"] = fmt.Sprintf("🍀 %s's Halfling Lucky: rerolled nat 1 → %d", charName, finalRoll)
+	}
+	// v0.9.14: Add Danger Sense note
+	if dangerSenseActive {
+		response["danger_sense"] = true
+		response["class_feature_note"] = fmt.Sprintf("🎯 %s's Danger Sense grants advantage on DEX saves against effects they can see", charName)
 	}
 	json.NewEncoder(w).Encode(response)
 }
@@ -15039,14 +15164,32 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	
 	// Roll the attack
 	attackRoll := rollDie(20)
+	
+	// v0.9.47: Halfling Lucky (PHB p28) - reroll nat 1s on attack rolls
+	oaHalflingLuckyUsed := false
+	oaHalflingLuckyOriginal := 0
+	if attackRoll == 1 {
+		newRoll, rerolled, origRoll := applyHalflingLucky(attackRoll, req.AttackerID)
+		if rerolled {
+			oaHalflingLuckyUsed = true
+			oaHalflingLuckyOriginal = origRoll
+			attackRoll = newRoll
+		}
+	}
+	
 	totalAttack := attackRoll + attackMod
 	
 	var resultText string
 	var hit bool
 	var damage int
 	
-	if attackRoll == 1 {
-		// Critical miss
+	luckyNote := ""
+	if oaHalflingLuckyUsed {
+		luckyNote = fmt.Sprintf(" 🍀[Lucky: %d→%d]", oaHalflingLuckyOriginal, attackRoll)
+	}
+	
+	if attackRoll == 1 && !oaHalflingLuckyUsed {
+		// Critical miss (only if not saved by Halfling Lucky)
 		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d (nat 1 - Critical Miss!)", 
 			attackerName, targetName, totalAttack)
 		hit = false
@@ -15056,8 +15199,8 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		if damage < 1 {
 			damage = 1
 		}
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d with %s", 
-			attackerName, targetName, totalAttack, damage, weaponName)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d with %s", 
+			attackerName, targetName, luckyNote, totalAttack, damage, weaponName)
 		hit = true
 	} else if totalAttack >= targetAC {
 		// Normal hit
@@ -15065,13 +15208,13 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		if damage < 1 {
 			damage = 1
 		}
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
-			attackerName, targetName, totalAttack, targetAC, damage, weaponName)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
+			attackerName, targetName, luckyNote, totalAttack, targetAC, damage, weaponName)
 		hit = true
 	} else {
 		// Miss
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee! Attack roll: %d vs AC %d - MISS!", 
-			attackerName, targetName, totalAttack, targetAC)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s Attack roll: %d vs AC %d - MISS!", 
+			attackerName, targetName, luckyNote, totalAttack, targetAC)
 		hit = false
 	}
 	
@@ -20954,11 +21097,28 @@ func resolveAction(action, description string, charID int) string {
 			roll1, roll2 = attackRoll, 0
 		}
 		
+		// v0.9.47: Halfling Lucky (PHB p28) - reroll nat 1s on attack rolls
+		attackHalflingLuckyUsed := false
+		attackHalflingLuckyOriginal := 0
+		if attackRoll == 1 {
+			newRoll, rerolled, origRoll := applyHalflingLucky(attackRoll, charID)
+			if rerolled {
+				attackHalflingLuckyUsed = true
+				attackHalflingLuckyOriginal = origRoll
+				attackRoll = newRoll
+				roll1 = newRoll
+			}
+		}
+		
 		totalAttack := attackRoll + attackMod
 		
 		rollInfo := ""
 		if rollType != "normal" {
 			rollInfo = fmt.Sprintf(" [%s: %d, %d → %d]", rollType, roll1, roll2, attackRoll)
+		}
+		// v0.9.47: Add Halfling Lucky note to roll info
+		if attackHalflingLuckyUsed {
+			rollInfo = fmt.Sprintf(" 🍀[Lucky: %d→%d]", attackHalflingLuckyOriginal, attackRoll) + rollInfo
 		}
 		// v0.9.14: Add reckless note to roll info
 		if recklessNote != "" {
@@ -21259,7 +21419,8 @@ func resolveAction(action, description string, charID int) string {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
 			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote)
-		} else if attackRoll == 1 {
+		} else if attackRoll == 1 && !attackHalflingLuckyUsed {
+			// Critical miss (nat 1) - but not if Halfling Lucky was used (they already rerolled)
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
 		}
 		
@@ -21815,15 +21976,32 @@ func resolveAction(action, description string, charID int) string {
 		// Death saving throw
 		roll := rollDie(20)
 		
+		// v0.9.47: Halfling Lucky (PHB p28) - reroll nat 1s on death saves
+		dsHalflingLuckyUsed := false
+		dsHalflingLuckyOriginal := 0
+		if roll == 1 {
+			newRoll, rerolled, origRoll := applyHalflingLucky(roll, charID)
+			if rerolled {
+				dsHalflingLuckyUsed = true
+				dsHalflingLuckyOriginal = origRoll
+				roll = newRoll
+			}
+		}
+		
+		luckyPrefix := ""
+		if dsHalflingLuckyUsed {
+			luckyPrefix = fmt.Sprintf("🍀 Lucky reroll (%d→%d)! ", dsHalflingLuckyOriginal, roll)
+		}
+		
 		var successes, failures int
 		db.QueryRow("SELECT death_save_successes, death_save_failures FROM characters WHERE id = $1", charID).Scan(&successes, &failures)
 		
 		if roll == 20 {
 			// Natural 20: regain 1 HP and wake up
 			db.Exec("UPDATE characters SET hp = 1, death_save_successes = 0, death_save_failures = 0, is_stable = false WHERE id = $1", charID)
-			return fmt.Sprintf("Death save: Natural 20! You regain consciousness with 1 HP!")
-		} else if roll == 1 {
-			// Natural 1: two failures
+			return fmt.Sprintf("%sDeath save: Natural 20! You regain consciousness with 1 HP!", luckyPrefix)
+		} else if roll == 1 && !dsHalflingLuckyUsed {
+			// Natural 1: two failures (only if not rerolled by Halfling Lucky)
 			failures += 2
 			if failures >= 3 {
 				db.Exec("UPDATE characters SET death_save_failures = $1, is_dead = true WHERE id = $2", failures, charID)
@@ -21835,18 +22013,18 @@ func resolveAction(action, description string, charID int) string {
 			successes++
 			if successes >= 3 {
 				db.Exec("UPDATE characters SET death_save_successes = $1, is_stable = true WHERE id = $2", successes, charID)
-				return fmt.Sprintf("Death save: %d - Success! Total: %d successes. You are STABLE.", roll, successes)
+				return fmt.Sprintf("%sDeath save: %d - Success! Total: %d successes. You are STABLE.", luckyPrefix, roll, successes)
 			}
 			db.Exec("UPDATE characters SET death_save_successes = $1 WHERE id = $2", successes, charID)
-			return fmt.Sprintf("Death save: %d - Success! Total: %d successes, %d failures.", roll, successes, failures)
+			return fmt.Sprintf("%sDeath save: %d - Success! Total: %d successes, %d failures.", luckyPrefix, roll, successes, failures)
 		} else {
 			failures++
 			if failures >= 3 {
 				db.Exec("UPDATE characters SET death_save_failures = $1, is_dead = true WHERE id = $2", failures, charID)
-				return fmt.Sprintf("Death save: %d - Failure! Total: %d failures. YOU HAVE DIED.", roll, failures)
+				return fmt.Sprintf("%sDeath save: %d - Failure! Total: %d failures. YOU HAVE DIED.", luckyPrefix, roll, failures)
 			}
 			db.Exec("UPDATE characters SET death_save_failures = $1 WHERE id = $2", failures, charID)
-			return fmt.Sprintf("Death save: %d - Failure! Total: %d successes, %d failures.", roll, successes, failures)
+			return fmt.Sprintf("%sDeath save: %d - Failure! Total: %d successes, %d failures.", luckyPrefix, roll, successes, failures)
 		}
 	
 	case "concentration_check":
