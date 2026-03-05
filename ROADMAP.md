@@ -145,6 +145,13 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Magical sleep immunity via from_magical_sleep=true in POST /api/characters/{id}/conditions
   - [x] Shows in character sheet and /api/my-turn for Elf/Half-Elf characters
   - [x] isElf(), hasFeyAncestry(), checkFeyAncestryCharm(), isImmuneToMagicalSleep() helper functions
+- [x] **Dwarf Dwarven Resilience** (v0.9.51, PHB p20)
+  - [x] Advantage on saving throws against poison
+  - [x] Resistance to poison damage (half damage)
+  - [x] Applied in POST /api/gm/saving-throw when description contains poison keywords
+  - [x] Applied in applyDamageResistance for poison damage type
+  - [x] Shows in character sheet and /api/my-turn for Dwarf characters
+  - [x] isDwarf(), checkDwarvenResilience(), hasDwarvenPoisonResistance() helper functions
 
 ### Character Advancement (partial)
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
@@ -1130,7 +1137,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.50**
+Current: **0.9.51**
 
 ---
 

@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.50"
+const version = "0.9.51"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -117,6 +117,15 @@ func applyDamageResistance(charID int, damage int, damageType string) DamageModR
 		if isUnderwaterCombat(lobbyID) && !result.WasHalved {
 			result.FinalDamage = result.FinalDamage / 2
 			result.Resistances = append(result.Resistances, "fire (underwater)")
+			result.WasHalved = true
+		}
+	}
+	
+	// v0.9.51: Dwarven Resilience - poison damage resistance (PHB p20)
+	if strings.ToLower(damageType) == "poison" && !result.WasHalved {
+		if hasDwarvenPoisonResistance(charID) {
+			result.FinalDamage = result.FinalDamage / 2
+			result.Resistances = append(result.Resistances, "poison (Dwarven Resilience)")
 			result.WasHalved = true
 		}
 	}
@@ -2146,6 +2155,40 @@ func checkRelentlessEndurance(characterID int, currentHP int, damage int, maxHP 
 	
 	msg := fmt.Sprintf("💪 %s's Relentless Endurance triggers! Instead of dropping to 0 HP, they drop to 1 HP. (Half-Orc racial feature, once per long rest)", charName)
 	return 1, true, msg
+}
+
+// isDwarf checks if a character is a dwarf (v0.9.51 - Dwarven Resilience)
+func isDwarf(characterID int) bool {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
+		return false
+	}
+	raceLower := strings.ToLower(race)
+	// Match: dwarf, hill_dwarf, hill-dwarf, mountain_dwarf, mountain-dwarf
+	return strings.Contains(raceLower, "dwarf")
+}
+
+// checkDwarvenResilience returns true if Dwarven Resilience grants advantage on this save (v0.9.51 PHB p20)
+// Dwarven Resilience: Advantage on saving throws against poison, and resistance against poison damage.
+func checkDwarvenResilience(characterID int, description string) bool {
+	if !isDwarf(characterID) {
+		return false
+	}
+	// Check if the save is against poison effects
+	descLower := strings.ToLower(description)
+	poisonKeywords := []string{"poison", "poisoned", "poisoning", "toxic", "venom", "venomous"}
+	for _, keyword := range poisonKeywords {
+		if strings.Contains(descLower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasDwarvenPoisonResistance returns true if character has Dwarven Resilience (poison damage resistance, v0.9.51 PHB p20)
+func hasDwarvenPoisonResistance(characterID int) bool {
+	return isDwarf(characterID)
 }
 
 // getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
@@ -8559,6 +8602,17 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.51: Dwarven Resilience info
+	if isDwarf(charID) {
+		response["dwarven_resilience"] = map[string]interface{}{
+			"description":              "Advantage on saving throws against poison, and resistance against poison damage (PHB p20)",
+			"poison_save_advantage":    true,
+			"poison_damage_resistance": true,
+			"automatic":                true,
+			"tip":                      "⛏️ Your Dwarven Resilience grants you advantage on poison saves and halves poison damage - your stout constitution is legendary!",
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -9593,6 +9647,16 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"magical_sleep_immunity": true,
 			"automatic":             true,
 			"tip":                   "✨ Your Fey Ancestry grants advantage on saves vs charm effects and immunity to magical sleep (Sleep spell)!",
+		}
+	}
+	
+	// v0.9.51: Dwarven Resilience tip
+	if isDwarf(charID) {
+		response["dwarven_resilience"] = map[string]interface{}{
+			"poison_save_advantage":    true,
+			"poison_damage_resistance": true,
+			"automatic":                true,
+			"tip":                      "⛏️ Your Dwarven Resilience grants advantage on poison saves and halves poison damage!",
 		}
 	}
 	
@@ -12740,6 +12804,14 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		feyAncestryActive = true
 	}
 	
+	// v0.9.51: Dwarven Resilience (PHB p20)
+	// Advantage on saving throws against poison
+	dwarvenResilienceActive := false
+	if checkDwarvenResilience(req.CharacterID, req.Description) {
+		req.Advantage = true
+		dwarvenResilienceActive = true
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -12773,6 +12845,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Gnome Cunning)"
 		} else if feyAncestryActive {
 			rollType = "advantage (Fey Ancestry)"
+		} else if dwarvenResilienceActive {
+			rollType = "advantage (Dwarven Resilience)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
@@ -12905,6 +12979,11 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if feyAncestryActive {
 		response["fey_ancestry"] = true
 		response["racial_feature_note"] = fmt.Sprintf("✨ %s's Fey Ancestry grants advantage on saves against charm effects", charName)
+	}
+	// v0.9.51: Add Dwarven Resilience note
+	if dwarvenResilienceActive {
+		response["dwarven_resilience"] = true
+		response["racial_feature_note"] = fmt.Sprintf("⛏️ %s's Dwarven Resilience grants advantage on saves against poison", charName)
 	}
 	json.NewEncoder(w).Encode(response)
 }
