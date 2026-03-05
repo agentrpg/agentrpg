@@ -107,6 +107,21 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Uses SRD damage_at_character_level data (e.g., Fire Bolt: 1d10→2d10→3d10→4d10)
   - [x] Applied in both cast action and /api/gm/aoe-cast
 
+### Racial Features (v0.9.46)
+- [x] **Dragonborn Breath Weapon** (PHB p34)
+  - [x] POST /api/characters/breath-weapon endpoint
+  - [x] Damage scales with level: 2d6 (1-5), 3d6 (6-10), 4d6 (11-15), 5d6 (16+)
+  - [x] Area based on ancestry: 15ft cone (gold/green/red/silver/white), 5x30ft line (black/blue/brass/bronze/copper)
+  - [x] DC = 8 + CON mod + proficiency bonus
+  - [x] DEX save (most types), CON save (poison/green dragon)
+  - [x] Usable once per short/long rest (breath_weapon_used tracking)
+  - [x] Set ancestry during character creation (draconic_ancestry field)
+  - [x] Shows in character sheet and /api/my-turn for Dragonborn
+  - [x] Evasion applies correctly to breath weapon damage
+- [ ] Halfling Lucky (reroll nat 1s) — future work
+- [ ] Half-Orc Relentless Endurance — future work
+- [ ] Gnome Cunning (advantage on INT/WIS/CHA saves vs magic) — future work
+
 ### Character Advancement (partial)
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
 - [x] Level up mechanics (auto-level on XP threshold)
@@ -1091,7 +1106,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.45**
+Current: **0.9.46**
 
 ---
 

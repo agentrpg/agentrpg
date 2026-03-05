@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.44
+// @version 0.9.46
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.45"
+const version = "0.9.46"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -485,6 +485,7 @@ func main() {
 	http.HandleFunc("/api/characters/flexible-casting", handleFlexibleCasting)
 	http.HandleFunc("/api/characters/multiclass", handleCharacterMulticlass)
 	http.HandleFunc("/api/characters/fighting-style", handleCharacterFightingStyle)
+	http.HandleFunc("/api/characters/breath-weapon", handleCharacterBreathWeapon)
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
@@ -991,6 +992,14 @@ func initDB() {
 		-- Enables "drop held items when unconscious" per PHB p292
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS equipped_main_hand VARCHAR(100);
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS equipped_off_hand VARCHAR(100);
+		
+		-- Dragonborn Breath Weapon (v0.9.46 - Racial Features)
+		-- Tracks whether breath weapon has been used since last rest
+		-- Resets on short or long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS breath_weapon_used BOOLEAN DEFAULT FALSE;
+		-- Draconic ancestry for Dragonborn characters (separate from sorcerer subclass_choices)
+		-- Determines breath weapon damage type and area shape (PHB p34)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS draconic_ancestry VARCHAR(20);
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -7292,6 +7301,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			Expertise          []string `json:"expertise"`           // e.g., ["stealth", "thieves_tools"] - double prof bonus (Rogues level 1, Bards level 3)
 			ExtraLanguages     []string `json:"extra_languages"`     // e.g., ["Dwarvish"] - for Human's extra language or background-granted languages
 			KnownSpells        []string `json:"known_spells"`        // e.g., ["fireball", "magic-missile"] - spell slugs character knows
+			DraconicAncestry   string   `json:"draconic_ancestry"`   // e.g., "red", "blue" - for Dragonborn breath weapon (PHB p34)
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		
@@ -7562,11 +7572,30 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			knownSpellsJSON, _ = json.Marshal(validSpells)
 		}
 		
+		// Process draconic ancestry for Dragonborn (v0.9.46)
+		// Determines breath weapon damage type and area shape
+		var draconicAncestryStr *string
+		if raceKey == "dragonborn" {
+			ancestryLower := strings.ToLower(strings.TrimSpace(req.DraconicAncestry))
+			if ancestryLower != "" {
+				// Validate it's a valid dragon type
+				if _, ok := dragonAncestryDamageTypes[ancestryLower]; !ok {
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error": "invalid_draconic_ancestry",
+						"message": fmt.Sprintf("'%s' is not a valid draconic ancestry", req.DraconicAncestry),
+						"valid_options": []string{"black", "blue", "brass", "bronze", "copper", "gold", "green", "red", "silver", "white"},
+					})
+					return
+				}
+				draconicAncestryStr = &ancestryLower
+			}
+		}
+		
 		var id int
 		err := db.QueryRow(`
-			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise, language_proficiencies, darkvision_range, known_spells)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) RETURNING id
-		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr, languageProfsStr, darkvisionRange, knownSpellsJSON).Scan(&id)
+			INSERT INTO characters (agent_id, name, class, race, background, str, dex, con, intl, wis, cha, hp, max_hp, ac, gold, skill_proficiencies, tool_proficiencies, weapon_proficiencies, armor_proficiencies, expertise, language_proficiencies, darkvision_range, known_spells, draconic_ancestry)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23) RETURNING id
+		`, agentID, req.Name, req.Class, req.Race, req.Background, req.Str, req.Dex, req.Con, req.Int, req.Wis, req.Cha, hp, ac, startingGold, skillProfsStr, toolProfsStr, weaponProfsStr, armorProfsStr, expertiseStr, languageProfsStr, darkvisionRange, knownSpellsJSON, draconicAncestryStr).Scan(&id)
 		
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -8307,6 +8336,47 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			response["training_in_progress"] = trainingList
 			response["training_tip"] = "Use POST /api/characters/downtime with activity='train' to continue training."
 		}
+	}
+	
+	// v0.9.46: Dragonborn Breath Weapon status
+	if strings.ToLower(race) == "dragonborn" {
+		var breathWeaponUsed bool
+		var draconicAncestry sql.NullString
+		db.QueryRow("SELECT COALESCE(breath_weapon_used, false), draconic_ancestry FROM characters WHERE id = $1", charID).Scan(&breathWeaponUsed, &draconicAncestry)
+		
+		ancestry := ""
+		if draconicAncestry.Valid {
+			ancestry = draconicAncestry.String
+		}
+		
+		breathWeaponInfo := map[string]interface{}{
+			"available":        !breathWeaponUsed,
+			"used_since_rest":  breathWeaponUsed,
+			"recovery":         "short or long rest",
+		}
+		
+		if ancestry != "" {
+			damageType := dragonAncestryDamageTypes[ancestry]
+			area := dragonAncestryAreaShapes[ancestry]
+			savingThrow := dragonAncestryBreathSavingThrows[ancestry]
+			damageDice := getBreathWeaponDamageDice(level)
+			dc := 8 + modifier(con) + proficiencyBonus(level)
+			
+			breathWeaponInfo["draconic_ancestry"] = ancestry
+			breathWeaponInfo["damage_type"] = damageType
+			breathWeaponInfo["damage_dice"] = damageDice
+			breathWeaponInfo["area"] = area
+			breathWeaponInfo["saving_throw"] = savingThrow
+			breathWeaponInfo["dc"] = dc
+			breathWeaponInfo["dc_formula"] = "8 + CON mod + proficiency"
+			breathWeaponInfo["how_to_use"] = "POST /api/characters/breath-weapon with character_id, target_ids, description"
+		} else {
+			breathWeaponInfo["ancestry_required"] = true
+			breathWeaponInfo["set_ancestry"] = "Set ancestry during character creation with draconic_ancestry field"
+			breathWeaponInfo["valid_ancestries"] = []string{"black", "blue", "brass", "bronze", "copper", "gold", "green", "red", "silver", "white"}
+		}
+		
+		response["breath_weapon"] = breathWeaponInfo
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -9251,6 +9321,60 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	// Add recent campaign messages (last 6 hours)
 	if len(recentMessages) > 0 {
 		response["campaign_messages"] = recentMessages
+	}
+	
+	// v0.9.46: Dragonborn Breath Weapon info
+	if strings.ToLower(race) == "dragonborn" {
+		var breathWeaponUsed bool
+		var draconicAncestry sql.NullString
+		db.QueryRow("SELECT COALESCE(breath_weapon_used, false), draconic_ancestry FROM characters WHERE id = $1", charID).Scan(&breathWeaponUsed, &draconicAncestry)
+		
+		ancestry := ""
+		if draconicAncestry.Valid {
+			ancestry = draconicAncestry.String
+		}
+		
+		breathWeaponInfo := map[string]interface{}{
+			"available":        !breathWeaponUsed,
+			"used_since_rest":  breathWeaponUsed,
+			"recovery":         "short or long rest",
+		}
+		
+		if ancestry != "" {
+			damageType := dragonAncestryDamageTypes[ancestry]
+			area := dragonAncestryAreaShapes[ancestry]
+			savingThrow := dragonAncestryBreathSavingThrows[ancestry]
+			damageDice := getBreathWeaponDamageDice(level)
+			dc := 8 + modifier(con) + proficiencyBonus(level)
+			
+			breathWeaponInfo["draconic_ancestry"] = ancestry
+			breathWeaponInfo["damage_type"] = damageType
+			breathWeaponInfo["damage_dice"] = damageDice
+			breathWeaponInfo["area"] = area
+			breathWeaponInfo["saving_throw"] = savingThrow
+			breathWeaponInfo["dc"] = dc
+			breathWeaponInfo["dc_formula"] = "8 + CON mod + proficiency"
+			breathWeaponInfo["how_to_use"] = "POST /api/characters/breath-weapon with character_id, target_ids (array), description"
+			
+			if !breathWeaponUsed {
+				breathWeaponInfo["tip"] = fmt.Sprintf("🔥 Breath Weapon ready! %s %s damage in %s, DC %d %s save for half.", damageDice, damageType, area, dc, savingThrow)
+			}
+		} else {
+			breathWeaponInfo["ancestry_required"] = true
+			breathWeaponInfo["warning"] = "Draconic ancestry not set! Set it during character creation or via POST /api/characters/set-ancestry"
+			breathWeaponInfo["valid_ancestries"] = []string{"black", "blue", "brass", "bronze", "copper", "gold", "green", "red", "silver", "white"}
+		}
+		
+		response["breath_weapon"] = breathWeaponInfo
+		
+		// Add breath weapon to bonus actions if available and unused
+		if !breathWeaponUsed && ancestry != "" && !bonusActionUsed {
+			if opts, ok := response["your_options"].(map[string]interface{}); ok {
+				if bonusActions, ok := opts["bonus_actions"].([]string); ok {
+					opts["bonus_actions"] = append(bonusActions, "breath_weapon (Dragonborn racial - once per short/long rest)")
+				}
+			}
+		}
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -35153,6 +35277,17 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	// Recover class resources that refresh on short rest (v0.8.69)
 	classResourcesRecovered := recoverClassResources(charID, false)
 	
+	// v0.9.46: Reset Dragonborn breath weapon on short rest
+	var breathWeaponReset bool
+	var charRace string
+	db.QueryRow("SELECT race, COALESCE(breath_weapon_used, false) FROM characters WHERE id = $1", charID).Scan(&charRace, &breathWeaponReset)
+	if strings.ToLower(charRace) == "dragonborn" && breathWeaponReset {
+		db.Exec("UPDATE characters SET breath_weapon_used = false WHERE id = $1", charID)
+		breathWeaponReset = true
+	} else {
+		breathWeaponReset = false
+	}
+	
 	response := map[string]interface{}{
 		"success":             true,
 		"hit_dice_spent":      req.HitDice,
@@ -35179,6 +35314,11 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	// Show recovered class resources
 	if len(classResourcesRecovered) > 0 {
 		response["class_resources_recovered"] = classResourcesRecovered
+	}
+	
+	// v0.9.46: Show breath weapon recovery
+	if breathWeaponReset {
+		response["breath_weapon_recovered"] = true
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -35262,7 +35402,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			reaction_used = false,
 			movement_remaining = 30,
 			ammo_used_since_rest = 0,
-			class_resources_used = '{}'
+			class_resources_used = '{}',
+			breath_weapon_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -41739,6 +41880,378 @@ func handleCharacterFightingStyle(w http.ResponseWriter, r *http.Request) {
 			"protection":           "Reaction to impose disadvantage on attack vs adjacent ally (requires shield)",
 			"two_weapon_fighting":   "Add ability modifier to off-hand attack damage",
 		}[styleSlug],
+	})
+}
+
+// Dragonborn breath weapon area shapes (PHB p34)
+// Line breaths: black, blue, brass, bronze, copper
+// Cone breaths: gold, green, red, silver, white
+var dragonAncestryAreaShapes = map[string]string{
+	"black":  "5x30ft line",
+	"blue":   "5x30ft line",
+	"brass":  "5x30ft line",
+	"bronze": "5x30ft line",
+	"copper": "5x30ft line",
+	"gold":   "15ft cone",
+	"green":  "15ft cone",
+	"red":    "15ft cone",
+	"silver": "15ft cone",
+	"white":  "15ft cone",
+}
+
+// dragonAncestryBreathSavingThrows maps dragon ancestry to saving throw (PHB p34)
+// DEX save: fire, lightning, cold, acid breaths
+// CON save: poison breath
+var dragonAncestryBreathSavingThrows = map[string]string{
+	"black":  "DEX", // acid
+	"blue":   "DEX", // lightning
+	"brass":  "DEX", // fire
+	"bronze": "DEX", // lightning
+	"copper": "DEX", // acid
+	"gold":   "DEX", // fire
+	"green":  "CON", // poison
+	"red":    "DEX", // fire
+	"silver": "DEX", // cold
+	"white":  "DEX", // cold
+}
+
+// getBreathWeaponDamageDice returns damage dice based on character level (PHB p34)
+func getBreathWeaponDamageDice(level int) string {
+	switch {
+	case level >= 16:
+		return "5d6"
+	case level >= 11:
+		return "4d6"
+	case level >= 6:
+		return "3d6"
+	default:
+		return "2d6"
+	}
+}
+
+// handleCharacterBreathWeapon godoc
+// @Summary Use Dragonborn breath weapon
+// @Description Dragonborn racial feature: use breath weapon against targets in area (5x30ft line or 15ft cone). Usable once per short/long rest.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param body body object{character_id=int,target_ids=[]int,description=string} true "Breath weapon request"
+// @Success 200 {object} object{success=bool,damage_type=string,damage=int,area=string,targets=[]object}
+// @Failure 400 {object} object{error=string,message=string}
+// @Router /characters/breath-weapon [post]
+func handleCharacterBreathWeapon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check breath weapon status",
+				"usage":   "GET /api/characters/breath-weapon?character_id=X",
+			})
+			return
+		}
+		
+		var race string
+		var level int
+		var breathWeaponUsed bool
+		var draconicAncestry sql.NullString
+		err = db.QueryRow(`
+			SELECT race, level, COALESCE(breath_weapon_used, false), draconic_ancestry
+			FROM characters WHERE id = $1
+		`, charID).Scan(&race, &level, &breathWeaponUsed, &draconicAncestry)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(race) != "dragonborn" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_dragonborn",
+				"message": fmt.Sprintf("Only Dragonborn have the Breath Weapon feature (character is %s)", race),
+			})
+			return
+		}
+		
+		ancestry := ""
+		if draconicAncestry.Valid {
+			ancestry = draconicAncestry.String
+		}
+		
+		damageType := ""
+		area := ""
+		savingThrow := ""
+		if ancestry != "" {
+			damageType = dragonAncestryDamageTypes[ancestry]
+			area = dragonAncestryAreaShapes[ancestry]
+			savingThrow = dragonAncestryBreathSavingThrows[ancestry]
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":       charID,
+			"race":               race,
+			"level":              level,
+			"draconic_ancestry":  ancestry,
+			"damage_type":        damageType,
+			"area":               area,
+			"saving_throw":       savingThrow,
+			"damage_dice":        getBreathWeaponDamageDice(level),
+			"available":          !breathWeaponUsed,
+			"used_since_rest":    breathWeaponUsed,
+			"recovery":           "short or long rest",
+			"dc_calculation":     "8 + CON modifier + proficiency bonus",
+			"how_to_use":         "POST /api/characters/breath-weapon with character_id, target_ids, description",
+			"ancestry_required":  ancestry == "",
+			"set_ancestry_note":  func() string {
+				if ancestry == "" {
+					return "Set ancestry during character creation with draconic_ancestry field, or POST /api/characters/set-ancestry"
+				}
+				return ""
+			}(),
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		TargetIDs   []int  `json:"target_ids"` // Character/monster IDs in the breath area
+		Description string `json:"description"` // e.g., "I breathe fire at the goblin group"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Verify ownership
+	var ownerID int
+	var race, charName string
+	var level, con int
+	var breathWeaponUsed bool
+	var draconicAncestry sql.NullString
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, race, name, level, con, COALESCE(breath_weapon_used, false), draconic_ancestry, campaign_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &race, &charName, &level, &con, &breathWeaponUsed, &draconicAncestry, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only use breath weapon for your own characters",
+		})
+		return
+	}
+	
+	if strings.ToLower(race) != "dragonborn" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_dragonborn",
+			"message": fmt.Sprintf("Only Dragonborn have the Breath Weapon feature (%s is %s)", charName, race),
+		})
+		return
+	}
+	
+	ancestry := ""
+	if draconicAncestry.Valid {
+		ancestry = draconicAncestry.String
+	}
+	
+	if ancestry == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_ancestry",
+			"message": "Draconic ancestry not set. Set it during character creation or via POST /api/characters/set-ancestry",
+			"valid_ancestries": []string{"black", "blue", "brass", "bronze", "copper", "gold", "green", "red", "silver", "white"},
+		})
+		return
+	}
+	
+	if breathWeaponUsed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":    "breath_weapon_exhausted",
+			"message":  fmt.Sprintf("%s has already used their breath weapon since the last rest", charName),
+			"recovery": "Take a short or long rest to regain your breath weapon",
+		})
+		return
+	}
+	
+	if len(req.TargetIDs) == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_targets",
+			"message": "Specify at least one target_id for the breath weapon",
+		})
+		return
+	}
+	
+	// Calculate DC: 8 + CON mod + proficiency bonus
+	conMod := modifier(con)
+	profBonus := proficiencyBonus(level)
+	dc := 8 + conMod + profBonus
+	
+	// Roll damage
+	damageDice := getBreathWeaponDamageDice(level)
+	damageType := dragonAncestryDamageTypes[ancestry]
+	area := dragonAncestryAreaShapes[ancestry]
+	savingThrowAbility := dragonAncestryBreathSavingThrows[ancestry]
+	
+	// Parse damage dice (e.g., "3d6" -> 3, 6)
+	parts := strings.Split(damageDice, "d")
+	numDice, _ := strconv.Atoi(parts[0])
+	dieSize, _ := strconv.Atoi(parts[1])
+	
+	// Roll total damage
+	totalDamage := 0
+	diceRolls := []int{}
+	for i := 0; i < numDice; i++ {
+		roll := rollDie(dieSize)
+		diceRolls = append(diceRolls, roll)
+		totalDamage += roll
+	}
+	
+	// Process each target
+	type targetResult struct {
+		TargetID    int    `json:"target_id"`
+		TargetName  string `json:"target_name"`
+		TargetType  string `json:"target_type"` // "character" or "monster"
+		SaveRoll    int    `json:"save_roll"`
+		SaveTotal   int    `json:"save_total"`
+		SaveSuccess bool   `json:"save_success"`
+		DamageTaken int    `json:"damage_taken"`
+		Notes       string `json:"notes,omitempty"`
+	}
+	
+	targetResults := []targetResult{}
+	
+	for _, targetID := range req.TargetIDs {
+		result := targetResult{TargetID: targetID}
+		
+		// Try to find as character first
+		var targetName string
+		var targetCon, targetLevel int
+		var targetHasEvasion bool
+		err := db.QueryRow(`
+			SELECT name, con, level FROM characters WHERE id = $1
+		`, targetID).Scan(&targetName, &targetCon, &targetLevel)
+		
+		if err == nil {
+			result.TargetName = targetName
+			result.TargetType = "character"
+			
+			// Check for Evasion (Monk 7+, Rogue 7+)
+			targetHasEvasion = hasEvasion(targetID)
+			
+			// Roll saving throw
+			saveMod := 0
+			if savingThrowAbility == "DEX" {
+				var dex int
+				db.QueryRow("SELECT dex FROM characters WHERE id = $1", targetID).Scan(&dex)
+				saveMod = modifier(dex)
+			} else {
+				saveMod = modifier(targetCon)
+			}
+			saveRoll := rollDie(20)
+			result.SaveRoll = saveRoll
+			result.SaveTotal = saveRoll + saveMod + proficiencyBonus(targetLevel)
+			result.SaveSuccess = result.SaveTotal >= dc
+			
+			// Calculate damage
+			if result.SaveSuccess {
+				if targetHasEvasion {
+					result.DamageTaken = 0
+					result.Notes = "Evasion: no damage on successful save"
+				} else {
+					result.DamageTaken = totalDamage / 2
+					result.Notes = "Saved for half damage"
+				}
+			} else {
+				if targetHasEvasion {
+					result.DamageTaken = totalDamage / 2
+					result.Notes = "Evasion: half damage on failed save"
+				} else {
+					result.DamageTaken = totalDamage
+				}
+			}
+			
+			// Apply damage to character
+			db.Exec("UPDATE characters SET hp = hp - $1 WHERE id = $2", result.DamageTaken, targetID)
+			
+		} else {
+			// Try as monster combatant in combat
+			// For now, just record as unknown - GM should handle monster damage via narrate
+			result.TargetName = fmt.Sprintf("Target #%d", targetID)
+			result.TargetType = "unknown"
+			result.DamageTaken = totalDamage // GM applies half if saved
+			result.Notes = "GM should determine save result and apply damage"
+		}
+		
+		targetResults = append(targetResults, result)
+	}
+	
+	// Mark breath weapon as used
+	db.Exec("UPDATE characters SET breath_weapon_used = true WHERE id = $1", req.CharacterID)
+	
+	// Log action to campaign if in one
+	if campaignID.Valid {
+		actionData := map[string]interface{}{
+			"action":      "breath_weapon",
+			"damage_type": damageType,
+			"damage":      totalDamage,
+			"area":        area,
+			"dc":          dc,
+			"targets":     targetResults,
+		}
+		actionJSON, _ := json.Marshal(actionData)
+		db.Exec(`
+			INSERT INTO actions (campaign_id, character_id, action_type, description, result, metadata)
+			VALUES ($1, $2, 'breath_weapon', $3, $4, $5)
+		`, campaignID.Int64, req.CharacterID, 
+			fmt.Sprintf("%s uses their %s breath weapon!", charName, damageType),
+			fmt.Sprintf("DC %d %s save, %s %s damage", dc, savingThrowAbility, damageDice, damageType),
+			actionJSON)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"character":     charName,
+		"ancestry":      ancestry,
+		"damage_type":   damageType,
+		"area":          area,
+		"damage_dice":   damageDice,
+		"dice_rolls":    diceRolls,
+		"total_damage":  totalDamage,
+		"dc":            dc,
+		"save_ability":  savingThrowAbility,
+		"dc_breakdown":  fmt.Sprintf("8 + %d (CON mod) + %d (proficiency) = %d", conMod, profBonus, dc),
+		"targets":       targetResults,
+		"description":   req.Description,
+		"breath_weapon_available": false,
+		"recovery":      "Take a short or long rest to regain your breath weapon",
 	})
 }
 
