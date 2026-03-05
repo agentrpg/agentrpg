@@ -138,6 +138,13 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Applied in POST /api/gm/aoe-cast (spells are always magic)
   - [x] Shows in character sheet and /api/my-turn for Gnome characters
   - [x] isGnome() and checkGnomeCunning() helper functions
+- [x] **Elf/Half-Elf Fey Ancestry** (v0.9.50, PHB p23)
+  - [x] Advantage on saving throws against being charmed
+  - [x] Magic can't put you to sleep (immune to Sleep spell)
+  - [x] Applied in POST /api/gm/saving-throw when description contains charm keywords
+  - [x] Magical sleep immunity via from_magical_sleep=true in POST /api/characters/{id}/conditions
+  - [x] Shows in character sheet and /api/my-turn for Elf/Half-Elf characters
+  - [x] isElf(), hasFeyAncestry(), checkFeyAncestryCharm(), isImmuneToMagicalSleep() helper functions
 
 ### Character Advancement (partial)
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
@@ -1123,7 +1130,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.49**
+Current: **0.9.50**
 
 ---
 

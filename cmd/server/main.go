@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.49"
+const version = "0.9.50"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2071,6 +2071,46 @@ func checkGnomeCunning(characterID int, abilityShort string, fromMagic bool) boo
 	default:
 		return false
 	}
+}
+
+// isElf checks if a character is an elf or half-elf (v0.9.50 - Fey Ancestry)
+func isElf(characterID int) bool {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
+		return false
+	}
+	raceLower := strings.ToLower(race)
+	// Match: elf, high_elf, high-elf, wood_elf, drow, dark_elf, half_elf, half-elf
+	return strings.Contains(raceLower, "elf")
+}
+
+// hasFeyAncestry checks if a character has the Fey Ancestry trait (v0.9.50)
+// Elf, High Elf, Wood Elf, Drow, and Half-Elf all have Fey Ancestry
+func hasFeyAncestry(characterID int) bool {
+	return isElf(characterID)
+}
+
+// checkFeyAncestryCharm returns true if Fey Ancestry grants advantage on this charm save (v0.9.50 PHB p23)
+// Fey Ancestry: Advantage on saving throws against being charmed. Magic can't put you to sleep.
+func checkFeyAncestryCharm(characterID int, description string) bool {
+	if !hasFeyAncestry(characterID) {
+		return false
+	}
+	// Check if the save is against charm effects
+	descLower := strings.ToLower(description)
+	charmKeywords := []string{"charm", "charmed", "charming", "dominate", "suggestion", "command", "compulsion", "enthrall"}
+	for _, keyword := range charmKeywords {
+		if strings.Contains(descLower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// isImmuneToMagicalSleep returns true if character has Fey Ancestry (immune to magical sleep, v0.9.50 PHB p23)
+func isImmuneToMagicalSleep(characterID int) bool {
+	return hasFeyAncestry(characterID)
 }
 
 // checkRelentlessEndurance implements the Half-Orc Relentless Endurance racial trait (PHB p41):
@@ -8508,6 +8548,17 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.50: Fey Ancestry info (Elf/Half-Elf)
+	if hasFeyAncestry(charID) {
+		response["fey_ancestry"] = map[string]interface{}{
+			"description":           "Advantage on saving throws against being charmed, and magic can't put you to sleep (PHB p23)",
+			"charm_save_advantage":  true,
+			"magical_sleep_immunity": true,
+			"automatic":             true,
+			"tip":                   "✨ Your Fey Ancestry protects you from charm effects (advantage on saves) and makes you immune to magical sleep like the Sleep spell!",
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -9532,6 +9583,16 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"against":    "magic (spells, magical effects)",
 			"automatic":  true,
 			"tip":        "🧠 Your Gnome Cunning grants advantage on INT/WIS/CHA saves against magic - trust your innate resistance!",
+		}
+	}
+	
+	// v0.9.50: Fey Ancestry tip (Elf/Half-Elf)
+	if hasFeyAncestry(charID) {
+		response["fey_ancestry"] = map[string]interface{}{
+			"charm_save_advantage":  true,
+			"magical_sleep_immunity": true,
+			"automatic":             true,
+			"tip":                   "✨ Your Fey Ancestry grants advantage on saves vs charm effects and immunity to magical sleep (Sleep spell)!",
 		}
 	}
 	
@@ -12671,6 +12732,14 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		gnomeCunningActive = true
 	}
 	
+	// v0.9.50: Fey Ancestry (PHB p23)
+	// Advantage on saving throws against being charmed
+	feyAncestryActive := false
+	if checkFeyAncestryCharm(req.CharacterID, req.Description) {
+		req.Advantage = true
+		feyAncestryActive = true
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -12702,6 +12771,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Danger Sense)"
 		} else if gnomeCunningActive {
 			rollType = "advantage (Gnome Cunning)"
+		} else if feyAncestryActive {
+			rollType = "advantage (Fey Ancestry)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = rollWithDisadvantage()
@@ -12829,6 +12900,11 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if gnomeCunningActive {
 		response["gnome_cunning"] = true
 		response["racial_feature_note"] = fmt.Sprintf("🧠 %s's Gnome Cunning grants advantage on %s saves against magic", charName, abilityName)
+	}
+	// v0.9.50: Add Fey Ancestry note
+	if feyAncestryActive {
+		response["fey_ancestry"] = true
+		response["racial_feature_note"] = fmt.Sprintf("✨ %s's Fey Ancestry grants advantage on saves against charm effects", charName)
 	}
 	json.NewEncoder(w).Encode(response)
 }
@@ -35183,11 +35259,28 @@ func handleAddCondition(w http.ResponseWriter, r *http.Request, charID int) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	var req struct {
-		Condition string `json:"condition"`
+		Condition        string `json:"condition"`
+		FromMagicalSleep bool   `json:"from_magical_sleep"` // v0.9.50: for Sleep spell effects
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	
 	condition := strings.ToLower(req.Condition)
+	
+	// v0.9.50: Fey Ancestry - Magic can't put you to sleep (PHB p23)
+	// Elves and half-elves are immune to magical sleep effects like the Sleep spell
+	if req.FromMagicalSleep && isImmuneToMagicalSleep(charID) {
+		charName := getCharacterName(charID)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":         true,
+			"immune":          true,
+			"immunity_source": "Fey Ancestry (Elf/Half-Elf racial feature)",
+			"character":       charName,
+			"character_id":    charID,
+			"condition":       condition,
+			"message":         fmt.Sprintf("✨ %s is immune to magical sleep through Fey Ancestry! The Sleep spell has no effect.", charName),
+		})
+		return
+	}
 	
 	// Validate condition - allow parameterized conditions like "charmed:123" or "grappled:123"
 	baseCondition := condition
