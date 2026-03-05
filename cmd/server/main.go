@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.47
+// @version 0.9.48
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.47"
+const version = "0.9.48"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1000,6 +1000,10 @@ func initDB() {
 		-- Draconic ancestry for Dragonborn characters (separate from sorcerer subclass_choices)
 		-- Determines breath weapon damage type and area shape (PHB p34)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS draconic_ancestry VARCHAR(20);
+		-- Half-Orc Relentless Endurance tracking (v0.9.48)
+		-- When reduced to 0 HP but not killed outright, can drop to 1 HP instead
+		-- Resets on long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS relentless_endurance_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2027,6 +2031,52 @@ func applyHalflingLucky(roll int, characterID int) (int, bool, int) {
 		return newRoll, true, roll
 	}
 	return roll, false, roll
+}
+
+// isHalfOrc checks if a character is a half-orc (v0.9.48 - Relentless Endurance)
+func isHalfOrc(characterID int) bool {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
+		return false
+	}
+	raceLower := strings.ToLower(race)
+	return strings.Contains(raceLower, "half-orc") || strings.Contains(raceLower, "halforc") || strings.Contains(raceLower, "half_orc")
+}
+
+// checkRelentlessEndurance implements the Half-Orc Relentless Endurance racial trait (PHB p41):
+// When you are reduced to 0 HP but not killed outright, you can drop to 1 HP instead.
+// You can't use this feature again until you finish a long rest.
+// Returns: (newHP, wasUsed, message) - if wasUsed is true, HP should be set to 1
+func checkRelentlessEndurance(characterID int, currentHP int, damage int, maxHP int) (int, bool, string) {
+	// Only applies when dropping to exactly 0 or below (but not killed outright by massive damage)
+	newHP := currentHP - damage
+	if newHP > 0 {
+		return newHP, false, ""
+	}
+	
+	// Check for massive damage (instant death) - Relentless Endurance doesn't apply
+	if newHP <= -maxHP {
+		return 0, false, ""
+	}
+	
+	// Check if character is a half-orc and hasn't used the ability
+	if !isHalfOrc(characterID) {
+		return 0, false, ""
+	}
+	
+	var relentlessUsed bool
+	var charName string
+	err := db.QueryRow("SELECT COALESCE(relentless_endurance_used, false), name FROM characters WHERE id = $1", characterID).Scan(&relentlessUsed, &charName)
+	if err != nil || relentlessUsed {
+		return 0, false, ""
+	}
+	
+	// Use Relentless Endurance - set HP to 1 and mark as used
+	db.Exec("UPDATE characters SET relentless_endurance_used = true WHERE id = $1", characterID)
+	
+	msg := fmt.Sprintf("💪 %s's Relentless Endurance triggers! Instead of dropping to 0 HP, they drop to 1 HP. (Half-Orc racial feature, once per long rest)", charName)
+	return 1, true, msg
 }
 
 // getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
@@ -8402,6 +8452,22 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["breath_weapon"] = breathWeaponInfo
 	}
 	
+	// v0.9.48: Half-Orc Relentless Endurance status
+	if isHalfOrc(charID) {
+		var relentlessUsed bool
+		db.QueryRow("SELECT COALESCE(relentless_endurance_used, false) FROM characters WHERE id = $1", charID).Scan(&relentlessUsed)
+		
+		relentlessInfo := map[string]interface{}{
+			"available":        !relentlessUsed,
+			"used_since_rest":  relentlessUsed,
+			"recovery":         "long rest",
+			"description":      "When reduced to 0 HP but not killed outright, you can drop to 1 HP instead (PHB p41)",
+			"trigger":          "automatic when dropping to 0 HP",
+		}
+		
+		response["relentless_endurance"] = relentlessInfo
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -9398,6 +9464,25 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	}
+	
+	// v0.9.48: Half-Orc Relentless Endurance status
+	if isHalfOrc(charID) {
+		var relentlessUsed bool
+		db.QueryRow("SELECT COALESCE(relentless_endurance_used, false) FROM characters WHERE id = $1", charID).Scan(&relentlessUsed)
+		
+		relentlessInfo := map[string]interface{}{
+			"available":        !relentlessUsed,
+			"used_since_rest":  relentlessUsed,
+			"recovery":         "long rest",
+			"trigger":          "automatic when dropping to 0 HP (not killed outright)",
+		}
+		
+		if !relentlessUsed {
+			relentlessInfo["tip"] = "💪 Relentless Endurance ready! If you drop to 0 HP (but not from massive damage), you'll drop to 1 HP instead. (Half-Orc racial, once per long rest)"
+		}
+		
+		response["relentless_endurance"] = relentlessInfo
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -15227,12 +15312,22 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 			resultText += fmt.Sprintf(" (Resisted: %s, damage halved to %d)", strings.Join(dmgMod.Resistances, ", "), damage)
 		}
 		
-		var currentHP int
-		db.QueryRow(`SELECT hp FROM characters WHERE id = $1`, req.TargetID).Scan(&currentHP)
+		var currentHP, maxHP int
+		db.QueryRow(`SELECT hp, max_hp FROM characters WHERE id = $1`, req.TargetID).Scan(&currentHP, &maxHP)
 		newHP := currentHP - damage
 		if newHP < 0 {
 			newHP = 0
 		}
+		
+		// v0.9.48: Check Half-Orc Relentless Endurance
+		if newHP == 0 {
+			relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessEndurance(req.TargetID, currentHP, damage, maxHP)
+			if relentlessUsed {
+				newHP = relentlessHP
+				resultText += " " + relentlessMsg
+			}
+		}
+		
 		db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, req.TargetID)
 		
 		if newHP == 0 {
@@ -16559,6 +16654,19 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 				if newHP < 0 {
 					newHP = 0
 				}
+				
+				// v0.9.48: Check Half-Orc Relentless Endurance
+				if newHP == 0 {
+					var charMaxHP int
+					db.QueryRow("SELECT max_hp FROM characters WHERE id = $1", targetID).Scan(&charMaxHP)
+					relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessEndurance(targetID, targetHP, damage, charMaxHP)
+					if relentlessUsed {
+						newHP = relentlessHP
+						result["relentless_endurance"] = true
+						result["racial_feature_note"] = relentlessMsg
+					}
+				}
+				
 				db.Exec(`UPDATE characters SET hp = $1 WHERE id = $2`, newHP, targetID)
 				result["hp_before"] = targetHP
 				result["hp_after"] = newHP
@@ -24462,6 +24570,18 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 		newHP = 0
 	}
 	
+	// v0.9.48: Check Half-Orc Relentless Endurance
+	relentlessTriggered := false
+	relentlessMsg := ""
+	if newHP == 0 {
+		relentlessHP, relentlessUsed, msg := checkRelentlessEndurance(req.CharacterID, currentHP, finalDamage, maxHP)
+		if relentlessUsed {
+			newHP = relentlessHP
+			relentlessTriggered = true
+			relentlessMsg = msg
+		}
+	}
+	
 	_, err = db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, req.CharacterID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -24471,7 +24591,9 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	
 	// Determine consequence
 	consequence := ""
-	if newHP == 0 {
+	if relentlessTriggered {
+		consequence = relentlessMsg
+	} else if newHP == 0 {
 		consequence = "💀 Character is unconscious and must make death saving throws!"
 	} else if newHP <= maxHP/4 {
 		consequence = "⚠️ Character is badly hurt!"
@@ -32971,11 +33093,24 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 		
 		// Apply damage
 		newHP := currentHP
+		relentlessTriggered := false
+		relentlessMsg := ""
 		if damageTaken > 0 {
 			newHP = currentHP - damageTaken
 			if newHP < 0 {
 				newHP = 0
 			}
+			
+			// v0.9.48: Check Half-Orc Relentless Endurance
+			if newHP == 0 {
+				relentlessHP, relentlessUsed, msg := checkRelentlessEndurance(req.CharacterID, currentHP, damageTaken, maxHP)
+				if relentlessUsed {
+					newHP = relentlessHP
+					relentlessTriggered = true
+					relentlessMsg = msg
+				}
+			}
+			
 			db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, req.CharacterID)
 		}
 		
@@ -33074,7 +33209,10 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 			response["description"] = trap.Description
 		}
 		
-		if newHP == 0 {
+		if relentlessTriggered {
+			response["relentless_endurance"] = true
+			response["racial_feature_note"] = relentlessMsg
+		} else if newHP == 0 {
 			response["unconscious"] = true
 			response["death_saves_needed"] = true
 		}
@@ -34861,13 +34999,25 @@ func handleDamage(w http.ResponseWriter, r *http.Request, charID int) {
 			db.Exec("UPDATE characters SET hp = 0, temp_hp = $1, is_dead = true WHERE id = $2", tempHP, charID)
 			result["status"] = "INSTANT_DEATH"
 			result["message"] = "Massive damage (damage exceeded max HP) - instant death!"
+			hp = 0
 		} else {
-			// Fall unconscious, start death saves
-			db.Exec("UPDATE characters SET hp = 0, temp_hp = $1, concentrating_on = NULL WHERE id = $2", tempHP, charID)
-			result["status"] = "unconscious"
-			result["message"] = "Dropped to 0 HP - unconscious and making death saves"
+			// v0.9.48: Check Half-Orc Relentless Endurance before falling unconscious
+			relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessEndurance(charID, hp+damage, damage, maxHP)
+			if relentlessUsed {
+				hp = relentlessHP
+				db.Exec("UPDATE characters SET hp = $1, temp_hp = $2 WHERE id = $3", hp, tempHP, charID)
+				result["status"] = "relentless_endurance"
+				result["message"] = relentlessMsg
+				result["relentless_endurance"] = true
+				result["racial_feature_note"] = relentlessMsg
+			} else {
+				// Fall unconscious, start death saves
+				db.Exec("UPDATE characters SET hp = 0, temp_hp = $1, concentrating_on = NULL WHERE id = $2", tempHP, charID)
+				result["status"] = "unconscious"
+				result["message"] = "Dropped to 0 HP - unconscious and making death saves"
+				hp = 0
+			}
 		}
-		hp = 0
 	} else {
 		db.Exec("UPDATE characters SET hp = $1, temp_hp = $2 WHERE id = $3", hp, tempHP, charID)
 		result["status"] = "damaged"
@@ -35581,7 +35731,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			movement_remaining = 30,
 			ammo_used_since_rest = 0,
 			class_resources_used = '{}',
-			breath_weapon_used = false
+			breath_weapon_used = false,
+			relentless_endurance_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	

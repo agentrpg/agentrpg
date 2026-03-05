@@ -124,7 +124,14 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Reroll is mandatory (must use new roll)
   - [x] Shows "🍀[Lucky: X→Y]" notation in results
   - [x] Prevents true nat 1 critical failures
-- [ ] Half-Orc Relentless Endurance — future work
+- [x] **Half-Orc Relentless Endurance** (v0.9.48, PHB p41)
+  - [x] When reduced to 0 HP but not killed outright, drop to 1 HP instead
+  - [x] Can only use once per long rest (relentless_endurance_used tracking)
+  - [x] Applied in: damage handler, opportunity attacks, AoE spells, falling damage, trap damage
+  - [x] Does NOT apply to massive damage (instant death from damage exceeding max HP)
+  - [x] Shows in character sheet and /api/my-turn for Half-Orcs
+  - [x] Shows "💪 Relentless Endurance triggers!" notification when used
+  - [x] Resets on long rest
 - [ ] Gnome Cunning (advantage on INT/WIS/CHA saves vs magic) — future work
 
 ### Character Advancement (partial)
@@ -1111,7 +1118,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.47**
+Current: **0.9.48**
 
 ---
 
