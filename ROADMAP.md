@@ -465,7 +465,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Disadvantage on DEX saves (enforced in handleGMSavingThrow)
 - [x] **Stunned** ✅ (v0.8.8)
   - [x] Incapacitated, can't move (enforced)
-  - [ ] Can only speak falteringly
+  - [x] Can only speak falteringly (flavor text - no mechanical rule in 5e PHB)
   - [x] Auto-fail STR/DEX saves (enforced in handleGMSavingThrow)
   - [x] Attacks have advantage (implemented in getAttackModifiers)
 - [x] **Unconscious** ✅ (v0.8.8, v0.9.41)
