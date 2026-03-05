@@ -102,6 +102,10 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Area of effect targeting (POST /api/gm/aoe-cast for multi-target spells, v0.8.5)
 - [x] Ritual casting (spells with ritual tag can be cast without spell slots, v0.8.5)
 - [x] Concentration management
+- [x] Cantrip damage scaling (v0.9.45)
+  - [x] Damage scales at character levels 5, 11, 17 (not caster level)
+  - [x] Uses SRD damage_at_character_level data (e.g., Fire Bolt: 1d10→2d10→3d10→4d10)
+  - [x] Applied in both cast action and /api/gm/aoe-cast
 
 ### Character Advancement (partial)
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
@@ -1087,7 +1091,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.44**
+Current: **0.9.45**
 
 ---
 

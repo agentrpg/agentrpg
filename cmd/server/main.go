@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.44"
+const version = "0.9.45"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -873,6 +873,9 @@ func initDB() {
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS material TEXT;
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS material_cost INTEGER DEFAULT 0;
 		ALTER TABLE spells ADD COLUMN IF NOT EXISTS material_consumed BOOLEAN DEFAULT FALSE;
+		-- Cantrip damage scaling (v0.9.45)
+		-- JSONB map of character level -> damage dice (e.g., {"1":"1d10","5":"2d10","11":"3d10","17":"4d10"})
+		ALTER TABLE spells ADD COLUMN IF NOT EXISTS damage_at_character_level JSONB DEFAULT '{}';
 		
 		-- Legendary Resistances (v0.8.29 - Phase 8 P2)
 		-- Number of legendary resistances a monster has (usually 3 for bosses)
@@ -1470,6 +1473,7 @@ func seedSpellsFromAPI() {
 		
 		damageDice, damageType, savingThrow, healing := "", "", "", ""
 		damageAtSlotLevel := map[string]string{}
+		damageAtCharLevel := map[string]string{} // v0.9.45: Cantrip scaling
 		healAtSlotLevel := map[string]string{}
 		spellLevel := 0
 		if lvl, ok := detail["level"].(float64); ok {
@@ -1484,6 +1488,18 @@ func seedSpellsFromAPI() {
 				// Use base spell level as damage_dice for backward compat
 				if baseDmg, ok := damageAtSlotLevel[spellLevelStr]; ok {
 					damageDice = baseDmg
+				}
+			}
+			// v0.9.45: Extract cantrip damage scaling (damage_at_character_level)
+			if charLevel, ok := dmg["damage_at_character_level"].(map[string]interface{}); ok {
+				for k, v := range charLevel {
+					damageAtCharLevel[k] = v.(string)
+				}
+				// For cantrips (level 0), use level 1 damage as base damage_dice
+				if spellLevel == 0 {
+					if baseDmg, ok := damageAtCharLevel["1"]; ok {
+						damageDice = baseDmg
+					}
 				}
 			}
 			if dtype, ok := dmg["damage_type"].(map[string]interface{}); ok {
@@ -1506,6 +1522,7 @@ func seedSpellsFromAPI() {
 			}
 		}
 		damageAtSlotLevelJSON, _ := json.Marshal(damageAtSlotLevel)
+		damageAtCharLevelJSON, _ := json.Marshal(damageAtCharLevel) // v0.9.45
 		healAtSlotLevelJSON, _ := json.Marshal(healAtSlotLevel)
 		
 		// Check for ritual tag
@@ -1545,8 +1562,8 @@ func seedSpellsFromAPI() {
 			}
 		}
 		
-		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size, damage_at_slot_level, heal_at_slot_level, material, material_cost, material_consumed)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		db.Exec(`INSERT INTO spells (slug, name, level, school, casting_time, range, components, duration, description, damage_dice, damage_type, saving_throw, healing, is_ritual, aoe_shape, aoe_size, damage_at_slot_level, heal_at_slot_level, material, material_cost, material_consumed, damage_at_character_level)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
 			ON CONFLICT (slug) DO UPDATE SET
 				name = EXCLUDED.name, level = EXCLUDED.level, school = EXCLUDED.school,
 				casting_time = EXCLUDED.casting_time, range = EXCLUDED.range,
@@ -1558,10 +1575,11 @@ func seedSpellsFromAPI() {
 				damage_at_slot_level = EXCLUDED.damage_at_slot_level,
 				heal_at_slot_level = EXCLUDED.heal_at_slot_level,
 				material = EXCLUDED.material, material_cost = EXCLUDED.material_cost,
-				material_consumed = EXCLUDED.material_consumed`,
+				material_consumed = EXCLUDED.material_consumed,
+				damage_at_character_level = EXCLUDED.damage_at_character_level`,
 			r["index"], detail["name"], int(detail["level"].(float64)), school, detail["casting_time"], detail["range"],
 			components, detail["duration"], desc, damageDice, damageType, savingThrow, healing, isRitual, aoeShape, aoeSize,
-			damageAtSlotLevelJSON, healAtSlotLevelJSON, material, materialCost, materialConsumed)
+			damageAtSlotLevelJSON, healAtSlotLevelJSON, material, materialCost, materialConsumed, damageAtCharLevelJSON)
 	}
 	log.Println("Spells seeded")
 }
@@ -1866,20 +1884,23 @@ func loadSRDFromDB() {
 	// Load spells (for resolveAction)
 	// v0.8.38: Added casting_time for bonus action spell restriction
 	// v0.9.27: Added material, material_cost, material_consumed for costly/consumed components
-	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, ''), COALESCE(damage_at_slot_level, '{}'), COALESCE(heal_at_slot_level, '{}'), COALESCE(casting_time, '1 action'), COALESCE(material, ''), COALESCE(material_cost, 0), COALESCE(material_consumed, false) FROM spells")
+	// v0.9.45: Added damage_at_character_level for cantrip scaling
+	rows, err = db.Query("SELECT slug, name, level, school, damage_dice, damage_type, saving_throw, healing, description, COALESCE(is_ritual, false), COALESCE(aoe_shape, ''), COALESCE(aoe_size, 0), COALESCE(components, ''), COALESCE(damage_at_slot_level, '{}'), COALESCE(heal_at_slot_level, '{}'), COALESCE(casting_time, '1 action'), COALESCE(material, ''), COALESCE(material_cost, 0), COALESCE(material_consumed, false), COALESCE(damage_at_character_level, '{}') FROM spells")
 	if err == nil {
 		defer rows.Close()
 		for rows.Next() {
 			var slug, name, school, damageDice, damageType, save, healing, desc, aoeShape, components, castingTime, material string
-			var damageAtSlotLevelJSON, healAtSlotLevelJSON []byte
+			var damageAtSlotLevelJSON, healAtSlotLevelJSON, damageAtCharLevelJSON []byte
 			var level, aoeSize, materialCost int
 			var isRitual, materialConsumed bool
-			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components, &damageAtSlotLevelJSON, &healAtSlotLevelJSON, &castingTime, &material, &materialCost, &materialConsumed)
+			rows.Scan(&slug, &name, &level, &school, &damageDice, &damageType, &save, &healing, &desc, &isRitual, &aoeShape, &aoeSize, &components, &damageAtSlotLevelJSON, &healAtSlotLevelJSON, &castingTime, &material, &materialCost, &materialConsumed, &damageAtCharLevelJSON)
 			damageAtSlotLevel := map[string]string{}
+			damageAtCharLevel := map[string]string{}
 			healAtSlotLevel := map[string]string{}
 			json.Unmarshal(damageAtSlotLevelJSON, &damageAtSlotLevel)
+			json.Unmarshal(damageAtCharLevelJSON, &damageAtCharLevel)
 			json.Unmarshal(healAtSlotLevelJSON, &healAtSlotLevel)
-			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, CastingTime: castingTime, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components, DamageAtSlotLevel: damageAtSlotLevel, HealAtSlotLevel: healAtSlotLevel, Material: material, MaterialCost: materialCost, MaterialConsumed: materialConsumed}
+			srdSpellsMemory[slug] = SRDSpell{Name: name, Level: level, School: school, CastingTime: castingTime, DamageDice: damageDice, DamageType: damageType, SavingThrow: save, Healing: healing, Description: desc, IsRitual: isRitual, AoEShape: aoeShape, AoESize: aoeSize, Components: components, DamageAtSlotLevel: damageAtSlotLevel, DamageAtCharLevel: damageAtCharLevel, HealAtSlotLevel: healAtSlotLevel, Material: material, MaterialCost: materialCost, MaterialConsumed: materialConsumed}
 		}
 		log.Printf("Loaded %d spells from DB", len(srdSpellsMemory))
 	}
@@ -1974,6 +1995,27 @@ func proficiencyBonus(level int) int {
 		return 5
 	}
 	return 6
+}
+
+// getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
+// Cantrips scale at character levels 5, 11, and 17 (not caster level - uses total character level)
+// Example: Fire Bolt {"1":"1d10","5":"2d10","11":"3d10","17":"4d10"}
+func getScaledCantripDamage(damageAtCharLevel map[string]string, charLevel int) string {
+	// Find the highest threshold that doesn't exceed the character's level
+	thresholds := []int{17, 11, 5, 1}
+	for _, threshold := range thresholds {
+		if charLevel >= threshold {
+			key := fmt.Sprintf("%d", threshold)
+			if dice, ok := damageAtCharLevel[key]; ok {
+				return dice
+			}
+		}
+	}
+	// Fallback to level 1 damage if no match found
+	if dice, ok := damageAtCharLevel["1"]; ok {
+		return dice
+	}
+	return "" // No damage data available
 }
 
 // getExtraAttackCount returns the number of attacks a character can make with a single Attack action
@@ -16005,6 +16047,21 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			actualDamageDice = upcastDice
 		}
 	}
+	
+	// v0.9.45: Cantrip damage scaling based on caster's character level
+	// Get damage_at_character_level from spell if it's a cantrip
+	if spellLevel == 0 && req.CasterID > 0 {
+		var damageAtCharLevelJSON []byte
+		var casterCharLevel int
+		db.QueryRow(`SELECT COALESCE(damage_at_character_level, '{}') FROM spells WHERE slug = $1`, req.SpellSlug).Scan(&damageAtCharLevelJSON)
+		db.QueryRow(`SELECT level FROM characters WHERE id = $1`, req.CasterID).Scan(&casterCharLevel)
+		damageAtCharLevel := map[string]string{}
+		json.Unmarshal(damageAtCharLevelJSON, &damageAtCharLevel)
+		if len(damageAtCharLevel) > 0 && casterCharLevel > 0 {
+			actualDamageDice = getScaledCantripDamage(damageAtCharLevel, casterCharLevel)
+		}
+	}
+	
 	baseDamage := 0
 	if actualDamageDice != "" {
 		baseDamage = rollDamage(actualDamageDice, false)
@@ -21524,6 +21581,11 @@ func resolveAction(action, description string, charID int) string {
 					if upcastDice, ok := spell.DamageAtSlotLevel[slotKey]; ok {
 						damageDice = upcastDice
 					}
+				}
+				
+				// v0.9.45: Cantrip damage scaling based on character level
+				if spell.Level == 0 && len(spell.DamageAtCharLevel) > 0 {
+					damageDice = getScaledCantripDamage(spell.DamageAtCharLevel, level)
 				}
 				
 				dmg := rollDamage(damageDice, false)
@@ -38212,6 +38274,7 @@ type SRDSpell struct {
 	AoEShape           string            `json:"aoe_shape,omitempty"`
 	AoESize            int               `json:"aoe_size,omitempty"`
 	DamageAtSlotLevel  map[string]string `json:"damage_at_slot_level,omitempty"`
+	DamageAtCharLevel  map[string]string `json:"damage_at_character_level,omitempty"` // v0.9.45: Cantrip scaling
 	HealAtSlotLevel    map[string]string `json:"heal_at_slot_level,omitempty"`
 	Material           string            `json:"material,omitempty"`
 	MaterialCost       int               `json:"material_cost,omitempty"`
