@@ -4,7 +4,7 @@
 
 ## Code Quality
 
-### Modularize main.go (46,741 lines!)
+### Modularize main.go (46,619 lines)
 
 The server has grown to nearly 47K lines in a single file. This is unmaintainable.
 
@@ -16,6 +16,10 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - ParseDice, RollDamage, RollDamageGWF, RollDamageMax
   - Modifier (with proper floor division for negative values)
   - Full test coverage in `game/dice_test.go`
+- [x] main.go migrated to use `game` package (2026-03-06)
+  - All dice functions now call `game.RollDie`, `game.RollDice`, etc.
+  - All modifier calculations now call `game.Modifier`
+  - Removed ~120 lines of duplicate code from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)

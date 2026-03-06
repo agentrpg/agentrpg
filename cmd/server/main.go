@@ -34,6 +34,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentrpg/agentrpg/game"
+
 	_ "github.com/lib/pq"
 )
 
@@ -1962,48 +1964,6 @@ func loadSRDFromDB() {
 // In-memory spell cache for resolveAction (separate from srdSpells which is removed)
 var srdSpellsMemory = map[string]SRDSpell{}
 
-// Dice rolling with crypto/rand
-func rollDie(sides int) int {
-	n, _ := rand.Int(rand.Reader, big.NewInt(int64(sides)))
-	return int(n.Int64()) + 1
-}
-
-func rollDice(count, sides int) ([]int, int) {
-	rolls := make([]int, count)
-	total := 0
-	for i := 0; i < count; i++ {
-		rolls[i] = rollDie(sides)
-		total += rolls[i]
-	}
-	return rolls, total
-}
-
-// Roll with advantage (take highest of two d20s)
-func rollWithAdvantage() (int, int, int) {
-	roll1 := rollDie(20)
-	roll2 := rollDie(20)
-	result := roll1
-	if roll2 > roll1 {
-		result = roll2
-	}
-	return result, roll1, roll2
-}
-
-// Roll with disadvantage (take lowest of two d20s)
-func rollWithDisadvantage() (int, int, int) {
-	roll1 := rollDie(20)
-	roll2 := rollDie(20)
-	result := roll1
-	if roll2 < roll1 {
-		result = roll2
-	}
-	return result, roll1, roll2
-}
-
-func modifier(stat int) int {
-	return (stat - 10) / 2
-}
-
 // getMonkDie returns the monk's Martial Arts damage die based on level (v0.9.2)
 func getMonkDie(level int) string {
 	if level >= 17 {
@@ -2067,7 +2027,7 @@ func isHalfling(characterID int) bool {
 // Returns: (finalRoll, wasRerolled, originalRoll)
 func applyHalflingLucky(roll int, characterID int) (int, bool, int) {
 	if roll == 1 && isHalfling(characterID) {
-		newRoll := rollDie(20)
+		newRoll := game.RollDie(20)
 		return newRoll, true, roll
 	}
 	return roll, false, roll
@@ -2722,7 +2682,7 @@ func getCurrentClassResources(charID int) map[string]int {
 	used := make(map[string]int)
 	json.Unmarshal(usedJSON, &used)
 	
-	chaMod := modifier(cha)
+	chaMod := game.Modifier(cha)
 	maxResources := getAllMaxClassResources(class, level, chaMod)
 	
 	current := make(map[string]int)
@@ -2753,7 +2713,7 @@ func useClassResource(charID int, resourceKey string, amount int) (bool, string,
 	used := make(map[string]int)
 	json.Unmarshal(usedJSON, &used)
 	
-	chaMod := modifier(cha)
+	chaMod := game.Modifier(cha)
 	max := getMaxClassResource(class, level, resourceKey, chaMod)
 	
 	if max == 0 {
@@ -3830,7 +3790,7 @@ func getHitDie(class string) int {
 
 // Roll initiative for a character
 func rollInitiative(dexMod int, initiativeBonus int) int {
-	return rollDie(20) + dexMod + initiativeBonus
+	return game.RollDie(20) + dexMod + initiativeBonus
 }
 
 // Auth helpers
@@ -7834,8 +7794,8 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		hp := hitDie + modifier(req.Con) // Level 1: max hit die + CON mod
-		ac := 10 + modifier(req.Dex)
+		hp := hitDie + game.Modifier(req.Con) // Level 1: max hit die + CON mod
+		ac := 10 + game.Modifier(req.Dex)
 		
 		// Validate skill proficiency choices
 		skillProfsStr := ""
@@ -8276,11 +8236,11 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		spellAbility = c.Spellcasting
 		switch c.Spellcasting {
 		case "INT":
-			spellMod = modifier(intl)
+			spellMod = game.Modifier(intl)
 		case "WIS":
-			spellMod = modifier(wis)
+			spellMod = game.Modifier(wis)
 		case "CHA":
-			spellMod = modifier(cha)
+			spellMod = game.Modifier(cha)
 		}
 	}
 	
@@ -8335,8 +8295,8 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			"int": intl, "wis": wis, "cha": cha,
 		},
 		"modifiers": map[string]int{
-			"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
-			"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
+			"str": game.Modifier(str), "dex": game.Modifier(dex), "con": game.Modifier(con),
+			"int": game.Modifier(intl), "wis": game.Modifier(wis), "cha": game.Modifier(cha),
 		},
 		"conditions":          conditions,
 		"proficiency_bonus":   proficiencyBonus(level),
@@ -8581,7 +8541,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	if subclassRaw.Valid && subclassRaw.String != "" {
 		naturalACBase = getNaturalACBase(subclassRaw.String, level)
 	}
-	calculatedAC := calculateArmorACWithNatural(modifier(dex), equippedArmor.String, equippedShield, naturalACBase)
+	calculatedAC := calculateArmorACWithNatural(game.Modifier(dex), equippedArmor.String, equippedShield, naturalACBase)
 	
 	// v0.9.29: Defense Fighting Style (+1 AC while wearing armor)
 	defenseBonus := 0
@@ -8764,7 +8724,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Class Resources (v0.8.69 - Ki, Rage, Sorcery Points, etc.)
-	chaMod := modifier(cha)
+	chaMod := game.Modifier(cha)
 	maxResources := getAllMaxClassResources(class, level, chaMod)
 	if len(maxResources) > 0 {
 		// Get current resource usage
@@ -8837,7 +8797,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			area := dragonAncestryAreaShapes[ancestry]
 			savingThrow := dragonAncestryBreathSavingThrows[ancestry]
 			damageDice := getBreathWeaponDamageDice(level)
-			dc := 8 + modifier(con) + proficiencyBonus(level)
+			dc := 8 + game.Modifier(con) + proficiencyBonus(level)
 			
 			breathWeaponInfo["draconic_ancestry"] = ancestry
 			breathWeaponInfo["damage_type"] = damageType
@@ -8933,7 +8893,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		if level >= 3 {
-			chaMod := modifier(cha)
+			chaMod := game.Modifier(cha)
 			profBonus := proficiencyBonus(level)
 			spellDC := 8 + chaMod + profBonus
 			
@@ -9214,11 +9174,11 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		spellMod := 0
 		switch c.Spellcasting {
 		case "INT":
-			spellMod = modifier(intl)
+			spellMod = game.Modifier(intl)
 		case "WIS":
-			spellMod = modifier(wis)
+			spellMod = game.Modifier(wis)
 		case "CHA":
-			spellMod = modifier(cha)
+			spellMod = game.Modifier(cha)
 		}
 		saveDC := spellSaveDC(level, spellMod)
 		rulesReminder["spellcasting"] = fmt.Sprintf("Your spellcasting ability is %s. Spell save DC: %d. Spell attack bonus: +%d.", c.Spellcasting, saveDC, spellMod+proficiencyBonus(level))
@@ -9358,8 +9318,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"int": intl, "wis": wis, "cha": cha,
 		},
 		"modifiers": map[string]int{
-			"str": modifier(str), "dex": modifier(dex), "con": modifier(con),
-			"int": modifier(intl), "wis": modifier(wis), "cha": modifier(cha),
+			"str": game.Modifier(str), "dex": game.Modifier(dex), "con": game.Modifier(con),
+			"int": game.Modifier(intl), "wis": game.Modifier(wis), "cha": game.Modifier(cha),
 		},
 	}
 	
@@ -9380,7 +9340,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Add class resources (v0.8.69 - Ki, Rage, Sorcery Points, etc.)
-	myTurnChaMod := modifier(cha)
+	myTurnChaMod := game.Modifier(cha)
 	maxResources := getAllMaxClassResources(class, level, myTurnChaMod)
 	if len(maxResources) > 0 {
 		currentResources := getCurrentClassResources(charID)
@@ -9431,7 +9391,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			"speed":   beastSpeed,
 			"stats": map[string]interface{}{
 				"str": beastStr, "dex": beastDex, "con": beastCon,
-				"str_mod": modifier(beastStr), "dex_mod": modifier(beastDex), "con_mod": modifier(beastCon),
+				"str_mod": game.Modifier(beastStr), "dex_mod": game.Modifier(beastDex), "con_mod": game.Modifier(beastCon),
 			},
 			"actions": actionNames,
 			"note":    "You use the beast's physical stats (STR, DEX, CON), AC, HP, and speed. You keep your INT, WIS, CHA, proficiencies, and class features. You can't cast spells unless you have Beast Spells (level 18).",
@@ -9953,7 +9913,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			area := dragonAncestryAreaShapes[ancestry]
 			savingThrow := dragonAncestryBreathSavingThrows[ancestry]
 			damageDice := getBreathWeaponDamageDice(level)
-			dc := 8 + modifier(con) + proficiencyBonus(level)
+			dc := 8 + game.Modifier(con) + proficiencyBonus(level)
 			
 			breathWeaponInfo["draconic_ancestry"] = ancestry
 			breathWeaponInfo["damage_type"] = damageType
@@ -10054,7 +10014,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		if level >= 3 {
-			chaMod := modifier(cha)
+			chaMod := game.Modifier(cha)
 			profBonus := proficiencyBonus(level)
 			spellDC := 8 + chaMod + profBonus
 			
@@ -11725,7 +11685,7 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		result := ""
 		if err == nil {
 			// Monster found, resolve attack
-			attackMod := modifier(mStr) + 2 // Simplified proficiency
+			attackMod := game.Modifier(mStr) + 2 // Simplified proficiency
 			
 			// Check for specific action bonus
 			var actions []map[string]interface{}
@@ -11739,22 +11699,22 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			
-			attackRoll := rollDie(20)
+			attackRoll := game.RollDie(20)
 			totalAttack := attackRoll + attackMod
 			
 			if attackRoll == 20 {
-				damage := rollDie(6) + rollDie(6) + modifier(mStr) // Crit damage
+				damage := game.RollDie(6) + game.RollDie(6) + game.Modifier(mStr) // Crit damage
 				result = fmt.Sprintf("Attack: %d (CRITICAL!) - %d damage", totalAttack, damage)
 			} else if attackRoll == 1 {
 				result = fmt.Sprintf("Attack: %d (Critical Miss!)", totalAttack)
 			} else {
-				damage := rollDie(6) + modifier(mStr)
+				damage := game.RollDie(6) + game.Modifier(mStr)
 				result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", totalAttack, damage)
 			}
 		} else {
 			// Generic monster attack
-			attackRoll := rollDie(20)
-			damage := rollDie(6) + 2
+			attackRoll := game.RollDie(20)
+			damage := game.RollDie(6) + 2
 			result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", attackRoll+4, damage)
 		}
 		
@@ -12254,26 +12214,26 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	var abilityName string
 	switch abilityUsed {
 	case "str", "strength":
-		abilityMod = modifier(str)
+		abilityMod = game.Modifier(str)
 		abilityName = "Strength"
 	case "dex", "dexterity":
-		abilityMod = modifier(dex)
+		abilityMod = game.Modifier(dex)
 		abilityName = "Dexterity"
 	case "con", "constitution":
-		abilityMod = modifier(con)
+		abilityMod = game.Modifier(con)
 		abilityName = "Constitution"
 	case "int", "intelligence":
-		abilityMod = modifier(intl)
+		abilityMod = game.Modifier(intl)
 		abilityName = "Intelligence"
 	case "wis", "wisdom":
-		abilityMod = modifier(wis)
+		abilityMod = game.Modifier(wis)
 		abilityName = "Wisdom"
 	case "cha", "charisma":
-		abilityMod = modifier(cha)
+		abilityMod = game.Modifier(cha)
 		abilityName = "Charisma"
 	default:
 		// Default to wisdom for unknown skills
-		abilityMod = modifier(wis)
+		abilityMod = game.Modifier(wis)
 		abilityName = "Wisdom"
 	}
 	
@@ -12373,7 +12333,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	rollType := "normal"
 	
 	if req.Advantage && !req.Disadvantage {
-		roll1, roll2, finalRoll = rollWithAdvantage()
+		roll1, roll2, finalRoll = game.RollWithAdvantage()
 		rollType = "advantage"
 		if usedInspiration {
 			rollType = "advantage (inspiration)"
@@ -12382,7 +12342,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (charmed)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
-		roll1, roll2, finalRoll = rollWithDisadvantage()
+		roll1, roll2, finalRoll = game.RollWithDisadvantage()
 		rollType = "disadvantage"
 		// Build descriptive reason for disadvantage
 		reasons := []string{}
@@ -12399,7 +12359,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 			rollType = "disadvantage (" + strings.Join(reasons, ", ") + ")"
 		}
 	} else {
-		finalRoll = rollDie(20)
+		finalRoll = game.RollDie(20)
 		roll1 = finalRoll
 		roll2 = 0
 	}
@@ -12456,7 +12416,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		
 		// Roll the Bardic Inspiration die
 		dieSize := getBardicInspirationDie(level)
-		peerlessSkillRoll = rollDie(dieSize)
+		peerlessSkillRoll = game.RollDie(dieSize)
 		peerlessSkillApplied = true
 		peerlessSkillRemaining = remaining
 	}
@@ -12758,25 +12718,25 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	var abilityName string
 	switch abilityUsed {
 	case "str", "strength":
-		abilityMod = modifier(str)
+		abilityMod = game.Modifier(str)
 		abilityName = "Strength"
 	case "dex", "dexterity":
-		abilityMod = modifier(dex)
+		abilityMod = game.Modifier(dex)
 		abilityName = "Dexterity"
 	case "con", "constitution":
-		abilityMod = modifier(con)
+		abilityMod = game.Modifier(con)
 		abilityName = "Constitution"
 	case "int", "intelligence":
-		abilityMod = modifier(intl)
+		abilityMod = game.Modifier(intl)
 		abilityName = "Intelligence"
 	case "wis", "wisdom":
-		abilityMod = modifier(wis)
+		abilityMod = game.Modifier(wis)
 		abilityName = "Wisdom"
 	case "cha", "charisma":
-		abilityMod = modifier(cha)
+		abilityMod = game.Modifier(cha)
 		abilityName = "Charisma"
 	default:
-		abilityMod = modifier(dex)
+		abilityMod = game.Modifier(dex)
 		abilityName = "Dexterity"
 	}
 	
@@ -12865,13 +12825,13 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	rollType := "normal"
 	
 	if req.Advantage && !req.Disadvantage {
-		roll1, roll2, finalRoll = rollWithAdvantage()
+		roll1, roll2, finalRoll = game.RollWithAdvantage()
 		rollType = "advantage"
 		if usedInspiration {
 			rollType = "advantage (inspiration)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
-		roll1, roll2, finalRoll = rollWithDisadvantage()
+		roll1, roll2, finalRoll = game.RollWithDisadvantage()
 		rollType = "disadvantage"
 		// Build descriptive reason for disadvantage
 		toolReasons := []string{}
@@ -12888,7 +12848,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 			rollType = "disadvantage (" + strings.Join(toolReasons, ", ") + ")"
 		}
 	} else {
-		finalRoll = rollDie(20)
+		finalRoll = game.RollDie(20)
 		roll1 = finalRoll
 		roll2 = 0
 	}
@@ -12944,7 +12904,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		
 		// Roll the Bardic Inspiration die
 		dieSize := getBardicInspirationDie(level)
-		toolPeerlessSkillRoll = rollDie(dieSize)
+		toolPeerlessSkillRoll = game.RollDie(dieSize)
 		toolPeerlessSkillApplied = true
 		toolPeerlessSkillRemaining = remaining
 	}
@@ -13204,27 +13164,27 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	
 	switch abilityUsed {
 	case "str", "strength":
-		abilityMod = modifier(str)
+		abilityMod = game.Modifier(str)
 		abilityName = "Strength"
 		abilityShort = "str"
 	case "dex", "dexterity":
-		abilityMod = modifier(dex)
+		abilityMod = game.Modifier(dex)
 		abilityName = "Dexterity"
 		abilityShort = "dex"
 	case "con", "constitution":
-		abilityMod = modifier(con)
+		abilityMod = game.Modifier(con)
 		abilityName = "Constitution"
 		abilityShort = "con"
 	case "int", "intelligence":
-		abilityMod = modifier(intl)
+		abilityMod = game.Modifier(intl)
 		abilityName = "Intelligence"
 		abilityShort = "int"
 	case "wis", "wisdom":
-		abilityMod = modifier(wis)
+		abilityMod = game.Modifier(wis)
 		abilityName = "Wisdom"
 		abilityShort = "wis"
 	case "cha", "charisma":
-		abilityMod = modifier(cha)
+		abilityMod = game.Modifier(cha)
 		abilityName = "Charisma"
 		abilityShort = "cha"
 	default:
@@ -13377,7 +13337,7 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	rollType := "normal"
 	
 	if req.Advantage && !req.Disadvantage {
-		roll1, roll2, finalRoll = rollWithAdvantage()
+		roll1, roll2, finalRoll = game.RollWithAdvantage()
 		rollType = "advantage"
 		if usedInspiration {
 			rollType = "advantage (inspiration)"
@@ -13395,16 +13355,16 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Steel Will)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
-		roll1, roll2, finalRoll = rollWithDisadvantage()
+		roll1, roll2, finalRoll = game.RollWithDisadvantage()
 		rollType = "disadvantage"
 	} else if req.Advantage && req.Disadvantage {
 		// Advantage and disadvantage cancel out
-		finalRoll = rollDie(20)
+		finalRoll = game.RollDie(20)
 		roll1 = finalRoll
 		roll2 = 0
 		rollType = "normal (advantage and disadvantage cancel)"
 	} else {
-		finalRoll = rollDie(20)
+		finalRoll = game.RollDie(20)
 		roll1 = finalRoll
 		roll2 = 0
 	}
@@ -13646,54 +13606,54 @@ func handleGMContestedCheck(w http.ResponseWriter, r *http.Request) {
 		// Skills map to abilities
 		switch skill {
 		case "athletics":
-			return modifier(str) + proficiencyBonus(level), "Athletics"
+			return game.Modifier(str) + proficiencyBonus(level), "Athletics"
 		case "acrobatics":
-			return modifier(dex) + proficiencyBonus(level), "Acrobatics"
+			return game.Modifier(dex) + proficiencyBonus(level), "Acrobatics"
 		case "sleight_of_hand", "sleightofhand":
-			return modifier(dex) + proficiencyBonus(level), "Sleight of Hand"
+			return game.Modifier(dex) + proficiencyBonus(level), "Sleight of Hand"
 		case "stealth":
-			return modifier(dex) + proficiencyBonus(level), "Stealth"
+			return game.Modifier(dex) + proficiencyBonus(level), "Stealth"
 		case "arcana":
-			return modifier(intl) + proficiencyBonus(level), "Arcana"
+			return game.Modifier(intl) + proficiencyBonus(level), "Arcana"
 		case "history":
-			return modifier(intl) + proficiencyBonus(level), "History"
+			return game.Modifier(intl) + proficiencyBonus(level), "History"
 		case "investigation":
-			return modifier(intl) + proficiencyBonus(level), "Investigation"
+			return game.Modifier(intl) + proficiencyBonus(level), "Investigation"
 		case "nature":
-			return modifier(intl) + proficiencyBonus(level), "Nature"
+			return game.Modifier(intl) + proficiencyBonus(level), "Nature"
 		case "religion":
-			return modifier(intl) + proficiencyBonus(level), "Religion"
+			return game.Modifier(intl) + proficiencyBonus(level), "Religion"
 		case "animal_handling", "animalhandling":
-			return modifier(wis) + proficiencyBonus(level), "Animal Handling"
+			return game.Modifier(wis) + proficiencyBonus(level), "Animal Handling"
 		case "insight":
-			return modifier(wis) + proficiencyBonus(level), "Insight"
+			return game.Modifier(wis) + proficiencyBonus(level), "Insight"
 		case "medicine":
-			return modifier(wis) + proficiencyBonus(level), "Medicine"
+			return game.Modifier(wis) + proficiencyBonus(level), "Medicine"
 		case "perception":
-			return modifier(wis) + proficiencyBonus(level), "Perception"
+			return game.Modifier(wis) + proficiencyBonus(level), "Perception"
 		case "survival":
-			return modifier(wis) + proficiencyBonus(level), "Survival"
+			return game.Modifier(wis) + proficiencyBonus(level), "Survival"
 		case "deception":
-			return modifier(cha) + proficiencyBonus(level), "Deception"
+			return game.Modifier(cha) + proficiencyBonus(level), "Deception"
 		case "intimidation":
-			return modifier(cha) + proficiencyBonus(level), "Intimidation"
+			return game.Modifier(cha) + proficiencyBonus(level), "Intimidation"
 		case "performance":
-			return modifier(cha) + proficiencyBonus(level), "Performance"
+			return game.Modifier(cha) + proficiencyBonus(level), "Performance"
 		case "persuasion":
-			return modifier(cha) + proficiencyBonus(level), "Persuasion"
+			return game.Modifier(cha) + proficiencyBonus(level), "Persuasion"
 		// Raw abilities (no proficiency)
 		case "str", "strength":
-			return modifier(str), "Strength"
+			return game.Modifier(str), "Strength"
 		case "dex", "dexterity":
-			return modifier(dex), "Dexterity"
+			return game.Modifier(dex), "Dexterity"
 		case "con", "constitution":
-			return modifier(con), "Constitution"
+			return game.Modifier(con), "Constitution"
 		case "int", "intelligence":
-			return modifier(intl), "Intelligence"
+			return game.Modifier(intl), "Intelligence"
 		case "wis", "wisdom":
-			return modifier(wis), "Wisdom"
+			return game.Modifier(wis), "Wisdom"
 		case "cha", "charisma":
-			return modifier(cha), "Charisma"
+			return game.Modifier(cha), "Charisma"
 		default:
 			return 0, skill // Unknown, return as-is
 		}
@@ -13723,13 +13683,13 @@ func handleGMContestedCheck(w http.ResponseWriter, r *http.Request) {
 	var initRoll1, initRoll2, initFinalRoll int
 	initRollType := "normal"
 	if req.InitiatorAdvantage && !req.InitiatorDisadvantage {
-		initRoll1, initRoll2, initFinalRoll = rollWithAdvantage()
+		initRoll1, initRoll2, initFinalRoll = game.RollWithAdvantage()
 		initRollType = "advantage"
 	} else if req.InitiatorDisadvantage && !req.InitiatorAdvantage {
-		initRoll1, initRoll2, initFinalRoll = rollWithDisadvantage()
+		initRoll1, initRoll2, initFinalRoll = game.RollWithDisadvantage()
 		initRollType = "disadvantage"
 	} else {
-		initFinalRoll = rollDie(20)
+		initFinalRoll = game.RollDie(20)
 		initRoll1 = initFinalRoll
 	}
 	initTotal := initFinalRoll + initMod
@@ -13738,13 +13698,13 @@ func handleGMContestedCheck(w http.ResponseWriter, r *http.Request) {
 	var defRoll1, defRoll2, defFinalRoll int
 	defRollType := "normal"
 	if req.DefenderAdvantage && !req.DefenderDisadvantage {
-		defRoll1, defRoll2, defFinalRoll = rollWithAdvantage()
+		defRoll1, defRoll2, defFinalRoll = game.RollWithAdvantage()
 		defRollType = "advantage"
 	} else if req.DefenderDisadvantage && !req.DefenderAdvantage {
-		defRoll1, defRoll2, defFinalRoll = rollWithDisadvantage()
+		defRoll1, defRoll2, defFinalRoll = game.RollWithDisadvantage()
 		defRollType = "disadvantage"
 	} else {
-		defFinalRoll = rollDie(20)
+		defFinalRoll = game.RollDie(20)
 		defRoll1 = defFinalRoll
 	}
 	defTotal := defFinalRoll + defMod
@@ -13913,11 +13873,11 @@ func handleGMShove(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate attacker's Athletics modifier
-	attackerMod := modifier(attackerStr) + proficiencyBonus(attackerLevel)
+	attackerMod := game.Modifier(attackerStr) + proficiencyBonus(attackerLevel)
 	
 	// Calculate target's choice of Athletics or Acrobatics (use higher)
-	targetAthMod := modifier(targetStr) + proficiencyBonus(targetLevel)
-	targetAcrMod := modifier(targetDex) + proficiencyBonus(targetLevel)
+	targetAthMod := game.Modifier(targetStr) + proficiencyBonus(targetLevel)
+	targetAcrMod := game.Modifier(targetDex) + proficiencyBonus(targetLevel)
 	targetMod := targetAthMod
 	targetSkill := "Athletics"
 	if targetAcrMod > targetAthMod {
@@ -13926,8 +13886,8 @@ func handleGMShove(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the contest
-	attackerRoll := rollDie(20)
-	targetRoll := rollDie(20)
+	attackerRoll := game.RollDie(20)
+	targetRoll := game.RollDie(20)
 	
 	attackerTotal := attackerRoll + attackerMod
 	targetTotal := targetRoll + targetMod
@@ -14130,7 +14090,7 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal(targetExpertiseJSON, &targetExpertise)
 	
 	// Calculate attacker's Athletics modifier
-	attackerMod := modifier(attackerStr)
+	attackerMod := game.Modifier(attackerStr)
 	if containsSkill(attackerSkills, "athletics") {
 		if containsSkill(attackerExpertise, "athletics") {
 			attackerMod += proficiencyBonus(attackerLevel) * 2 // expertise
@@ -14140,7 +14100,7 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate target's choice of Athletics or Acrobatics (use higher)
-	targetAthMod := modifier(targetStr)
+	targetAthMod := game.Modifier(targetStr)
 	if containsSkill(targetSkills, "athletics") {
 		if containsSkill(targetExpertise, "athletics") {
 			targetAthMod += proficiencyBonus(targetLevel) * 2
@@ -14149,7 +14109,7 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
-	targetAcrMod := modifier(targetDex)
+	targetAcrMod := game.Modifier(targetDex)
 	if containsSkill(targetSkills, "acrobatics") {
 		if containsSkill(targetExpertise, "acrobatics") {
 			targetAcrMod += proficiencyBonus(targetLevel) * 2
@@ -14166,8 +14126,8 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the contest
-	attackerRoll := rollDie(20)
-	targetRoll := rollDie(20)
+	attackerRoll := game.RollDie(20)
+	targetRoll := game.RollDie(20)
 	
 	attackerTotal := attackerRoll + attackerMod
 	targetTotal := targetRoll + targetMod
@@ -14365,7 +14325,7 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 	var escaperMod int
 	var escaperSkill string
 	if req.UseAcrobatics {
-		escaperMod = modifier(charDex)
+		escaperMod = game.Modifier(charDex)
 		escaperSkill = "Acrobatics"
 		if containsSkill(charSkills, "acrobatics") {
 			if containsSkill(charExpertise, "acrobatics") {
@@ -14375,7 +14335,7 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	} else {
-		escaperMod = modifier(charStr)
+		escaperMod = game.Modifier(charStr)
 		escaperSkill = "Athletics"
 		if containsSkill(charSkills, "athletics") {
 			if containsSkill(charExpertise, "athletics") {
@@ -14387,7 +14347,7 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate grappler's Athletics modifier
-	grapplerMod := modifier(grapplerStr)
+	grapplerMod := game.Modifier(grapplerStr)
 	if containsSkill(grapplerSkills, "athletics") {
 		if containsSkill(grapplerExpertise, "athletics") {
 			grapplerMod += proficiencyBonus(grapplerLevel) * 2
@@ -14397,8 +14357,8 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the contest
-	escaperRoll := rollDie(20)
-	grapplerRoll := rollDie(20)
+	escaperRoll := game.RollDie(20)
+	grapplerRoll := game.RollDie(20)
 	
 	escaperTotal := escaperRoll + escaperMod
 	grapplerTotal := grapplerRoll + grapplerMod
@@ -14762,9 +14722,9 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	
 	// Calculate attacker's attack modifier
 	// Use STR for melee, DEX for finesse/ranged - simplified: use higher of STR/DEX
-	attackMod := modifier(attackerStr)
-	if modifier(attackerDex) > attackMod {
-		attackMod = modifier(attackerDex)
+	attackMod := game.Modifier(attackerStr)
+	if game.Modifier(attackerDex) > attackMod {
+		attackMod = game.Modifier(attackerDex)
 	}
 	attackMod += proficiencyBonus(attackerLevel) // Assume proficiency with attack
 	
@@ -14780,7 +14740,7 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Athletics (STR-based)
-	targetAthMod := modifier(targetStr)
+	targetAthMod := game.Modifier(targetStr)
 	if containsSkill(targetSkills, "athletics") {
 		if containsSkill(targetExpSkills, "athletics") {
 			targetAthMod += proficiencyBonus(targetLevel) * 2 // Expertise
@@ -14790,7 +14750,7 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Acrobatics (DEX-based)
-	targetAcrMod := modifier(targetDex)
+	targetAcrMod := game.Modifier(targetDex)
 	if containsSkill(targetSkills, "acrobatics") {
 		if containsSkill(targetExpSkills, "acrobatics") {
 			targetAcrMod += proficiencyBonus(targetLevel) * 2 // Expertise
@@ -14809,21 +14769,21 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	
 	// Roll the contest
 	// Attacker makes attack roll
-	attackerRoll := rollDie(20)
+	attackerRoll := game.RollDie(20)
 	
 	// Target makes skill check, with disadvantage if two-handed
 	var targetRoll int
 	if req.TwoHanded {
 		// Disadvantage: roll twice, take lower
-		roll1 := rollDie(20)
-		roll2 := rollDie(20)
+		roll1 := game.RollDie(20)
+		roll2 := game.RollDie(20)
 		if roll1 < roll2 {
 			targetRoll = roll1
 		} else {
 			targetRoll = roll2
 		}
 	} else {
-		targetRoll = rollDie(20)
+		targetRoll = game.RollDie(20)
 	}
 	
 	attackerTotal := attackerRoll + attackMod
@@ -15904,8 +15864,8 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 			
 			if err == nil {
 				// Use STR for melee
-				attackMod = modifier(mStr)
-				damageMod = modifier(mStr)
+				attackMod = game.Modifier(mStr)
+				damageMod = game.Modifier(mStr)
 				
 				// Try to find a melee attack in actions
 				var actions []map[string]interface{}
@@ -16006,8 +15966,8 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.AttackerID)
 		
 		// Determine weapon and modifiers
-		attackMod = modifier(str)
-		damageMod = modifier(str)
+		attackMod = game.Modifier(str)
+		damageMod = game.Modifier(str)
 		damageDice = "1d6"
 		weaponName = "unarmed strike"
 		weaponKey := ""
@@ -16019,8 +15979,8 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 				weaponName = weapon.Name
 				damageDice = weapon.Damage
 				if weapon.Type == "ranged" || containsProperty(weapon.Properties, "finesse") {
-					attackMod = modifier(dex)
-					damageMod = modifier(dex)
+					attackMod = game.Modifier(dex)
+					damageMod = game.Modifier(dex)
 				}
 			}
 		}
@@ -16045,9 +16005,9 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	var attackRoll int
 	var oaRoll1, oaRoll2 int
 	if escapeTheHordeActive {
-		oaRoll1, oaRoll2, attackRoll = rollWithDisadvantage()
+		oaRoll1, oaRoll2, attackRoll = game.RollWithDisadvantage()
 	} else {
-		attackRoll = rollDie(20)
+		attackRoll = game.RollDie(20)
 		oaRoll1 = attackRoll
 		oaRoll2 = 0
 	}
@@ -16086,7 +16046,7 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		hit = false
 	} else if attackRoll == 20 {
 		// Critical hit - double damage dice
-		damage = rollDamage(damageDice, true) + damageMod
+		damage = game.RollDamage(damageDice, true) + damageMod
 		if damage < 1 {
 			damage = 1
 		}
@@ -16097,7 +16057,7 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 			if len(parts) == 2 {
 				sides, _ := strconv.Atoi(parts[1])
 				if sides > 0 {
-					savageDmg := rollDie(sides)
+					savageDmg := game.RollDie(sides)
 					damage += savageDmg
 					savageAttacksNote = fmt.Sprintf(" (+%d Savage Attacks)", savageDmg)
 				}
@@ -16113,7 +16073,7 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		}
 	} else if totalAttack >= targetAC {
 		// Normal hit
-		damage = rollDamage(damageDice, false) + damageMod
+		damage = game.RollDamage(damageDice, false) + damageMod
 		if damage < 1 {
 			damage = 1
 		}
@@ -16367,8 +16327,8 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
 	
 	// Determine weapon and modifiers
-	attackMod := modifier(str)
-	damageMod := modifier(str)
+	attackMod := game.Modifier(str)
+	damageMod := game.Modifier(str)
 	damageDice := "1d6"
 	weaponName := "unarmed strike"
 	weaponKey := ""
@@ -16380,8 +16340,8 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 			weaponName = weapon.Name
 			damageDice = weapon.Damage
 			if weapon.Type == "ranged" || containsProperty(weapon.Properties, "finesse") {
-				attackMod = modifier(dex)
-				damageMod = modifier(dex)
+				attackMod = game.Modifier(dex)
+				damageMod = game.Modifier(dex)
 			}
 		}
 	}
@@ -16402,7 +16362,7 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the attack
-	attackRoll := rollDie(20)
+	attackRoll := game.RollDie(20)
 	totalAttack := attackRoll + attackMod
 	
 	var resultText string
@@ -16416,7 +16376,7 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 		hit = false
 	} else if attackRoll == 20 {
 		// Critical hit - double damage dice
-		damage = rollDamage(damageDice, true) + damageMod
+		damage = game.RollDamage(damageDice, true) + damageMod
 		if damage < 1 {
 			damage = 1
 		}
@@ -16425,7 +16385,7 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 		hit = true
 	} else if totalAttack >= targetAC {
 		// Normal hit
-		damage = rollDamage(damageDice, false) + damageMod
+		damage = game.RollDamage(damageDice, false) + damageMod
 		if damage < 1 {
 			damage = 1
 		}
@@ -16590,8 +16550,8 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
 	
 	// Determine weapon and modifiers (melee only for Retaliation)
-	attackMod := modifier(str)
-	damageMod := modifier(str)
+	attackMod := game.Modifier(str)
+	damageMod := game.Modifier(str)
 	damageDice := "1d4"
 	weaponName := "unarmed strike"
 	weaponKey := ""
@@ -16606,8 +16566,8 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 				damageDice = weapon.Damage
 				// Finesse weapons can use DEX
 				if containsProperty(weapon.Properties, "finesse") && dex > str {
-					attackMod = modifier(dex)
-					damageMod = modifier(dex)
+					attackMod = game.Modifier(dex)
+					damageMod = game.Modifier(dex)
 				}
 			} else {
 				w.WriteHeader(http.StatusBadRequest)
@@ -16662,7 +16622,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the attack
-	attackRoll := rollDie(20)
+	attackRoll := game.RollDie(20)
 	totalAttack := attackRoll + attackMod
 	
 	var resultText string
@@ -16676,7 +16636,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 		hit = false
 	} else if attackRoll == 20 {
 		// Critical hit - double damage dice
-		damage = rollDamage(damageDice, true) + damageMod + rageBonus
+		damage = game.RollDamage(damageDice, true) + damageMod + rageBonus
 		if damage < 1 {
 			damage = 1
 		}
@@ -16695,7 +16655,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 				if sides > 0 {
 					brutalDmg := 0
 					for i := 0; i < brutalDice; i++ {
-						brutalDmg += rollDie(sides)
+						brutalDmg += game.RollDie(sides)
 					}
 					damage += brutalDmg
 					brutalCritText = fmt.Sprintf(" (+%d Brutal Critical)", brutalDmg)
@@ -16709,7 +16669,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 			if len(parts) == 2 {
 				sides, _ := strconv.Atoi(parts[1])
 				if sides > 0 {
-					savageDmg := rollDie(sides)
+					savageDmg := game.RollDie(sides)
 					damage += savageDmg
 					savageAttacksText = fmt.Sprintf(" (+%d Savage Attacks)", savageDmg)
 				}
@@ -16720,7 +16680,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 		hit = true
 	} else if totalAttack >= targetAC {
 		// Normal hit
-		damage = rollDamage(damageDice, false) + damageMod + rageBonus
+		damage = game.RollDamage(damageDice, false) + damageMod + rageBonus
 		if damage < 1 {
 			damage = 1
 		}
@@ -16944,7 +16904,7 @@ func handleGMStandAgainstTheTide(w http.ResponseWriter, r *http.Request) {
 	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
 	
 	// Roll the redirected attack
-	attackRoll := rollDie(20)
+	attackRoll := game.RollDie(20)
 	totalAttack := attackRoll + req.AttackerAttackBonus
 	
 	var resultText string
@@ -16967,7 +16927,7 @@ func handleGMStandAgainstTheTide(w http.ResponseWriter, r *http.Request) {
 		hit = false
 	} else if attackRoll == 20 {
 		// Critical hit - double damage dice
-		damage = rollDamage(damageDice, true) + req.DamageBonus
+		damage = game.RollDamage(damageDice, true) + req.DamageBonus
 		if damage < 1 {
 			damage = 1
 		}
@@ -16976,7 +16936,7 @@ func handleGMStandAgainstTheTide(w http.ResponseWriter, r *http.Request) {
 		hit = true
 	} else if totalAttack >= newTargetAC {
 		// Normal hit
-		damage = rollDamage(damageDice, false) + req.DamageBonus
+		damage = game.RollDamage(damageDice, false) + req.DamageBonus
 		if damage < 1 {
 			damage = 1
 		}
@@ -17494,11 +17454,11 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			if c, ok := srdClasses[classKey]; ok {
 				switch c.Spellcasting {
 				case "INT":
-					spellMod = modifier(intl)
+					spellMod = game.Modifier(intl)
 				case "WIS":
-					spellMod = modifier(wis)
+					spellMod = game.Modifier(wis)
 				case "CHA":
-					spellMod = modifier(cha)
+					spellMod = game.Modifier(cha)
 				}
 			}
 			dc = spellSaveDC(level, spellMod)
@@ -17536,7 +17496,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 	
 	baseDamage := 0
 	if actualDamageDice != "" {
-		baseDamage = rollDamage(actualDamageDice, false)
+		baseDamage = game.RollDamage(actualDamageDice, false)
 	}
 	
 	// Evocation Wizard features (v0.8.81)
@@ -17555,7 +17515,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		if subclass.Valid && subclass.String != "" {
 			// Check for Empowered Evocation (level 10 Evocation Wizard feature)
 			if hasSubclassFeature(subclass.String, casterLevel, "empowered_evocation") {
-				empoweredEvocationBonus = modifier(casterInt)
+				empoweredEvocationBonus = game.Modifier(casterInt)
 				baseDamage += empoweredEvocationBonus
 			}
 			
@@ -17580,7 +17540,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			if hasSubclassFeature(subclass.String, casterLevel, "elemental_affinity") {
 				ancestryDamageType := getDragonAncestryDamageType(req.CasterID)
 				if ancestryDamageType != "" && strings.ToLower(damageType) == ancestryDamageType {
-					elementalAffinityBonus = modifier(casterCha)
+					elementalAffinityBonus = game.Modifier(casterCha)
 					elementalAffinityAncestry = ancestryDamageType
 					baseDamage += elementalAffinityBonus
 				}
@@ -17656,27 +17616,27 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 			db.QueryRow(`SELECT str, dex, con, intl, wis, cha FROM characters WHERE id = $1`, targetID).Scan(&str, &dex, &con, &intl, &wis, &cha)
 			switch strings.ToUpper(savingThrow) {
 			case "STR":
-				saveMod = modifier(str)
+				saveMod = game.Modifier(str)
 			case "DEX":
-				saveMod = modifier(dex)
+				saveMod = game.Modifier(dex)
 			case "CON":
-				saveMod = modifier(con)
+				saveMod = game.Modifier(con)
 			case "INT":
-				saveMod = modifier(intl)
+				saveMod = game.Modifier(intl)
 			case "WIS":
-				saveMod = modifier(wis)
+				saveMod = game.Modifier(wis)
 			case "CHA":
-				saveMod = modifier(cha)
+				saveMod = game.Modifier(cha)
 			}
 		}
 		
 		// Roll saving throw
 		// v0.9.49: Gnome Cunning - advantage on INT/WIS/CHA saves against magic (spells ARE magic)
 		gnomeCunningAoE := false
-		saveRoll := rollDie(20)
+		saveRoll := game.RollDie(20)
 		if targetID > 0 && checkGnomeCunning(targetID, strings.ToLower(savingThrow), true) {
 			// Roll with advantage
-			roll2 := rollDie(20)
+			roll2 := game.RollDie(20)
 			gnomeCunningAoE = true
 			if roll2 > saveRoll {
 				saveRoll = roll2
@@ -19335,7 +19295,7 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate new AC with natural AC base from subclass (v0.8.79)
-	dexMod := modifier(charDex)
+	dexMod := game.Modifier(charDex)
 	naturalACBase := 10
 	if charSubclass.Valid && charSubclass.String != "" {
 		naturalACBase = getNaturalACBase(charSubclass.String, charLevel)
@@ -19500,7 +19460,7 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate new AC with natural AC base from subclass (v0.8.79)
-	dexMod := modifier(charDex)
+	dexMod := game.Modifier(charDex)
 	naturalACBase := 10
 	if charSubclass.Valid && charSubclass.String != "" {
 		naturalACBase = getNaturalACBase(charSubclass.String, charLevel)
@@ -20035,36 +19995,36 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 				skillUsed = toolProfs[0]
 				// Most tools use DEX or WIS
 				if strings.Contains(strings.ToLower(skillUsed), "thieves") {
-					abilityMod = modifier(charDex)
+					abilityMod = game.Modifier(charDex)
 				} else {
-					abilityMod = modifier(charWis)
+					abilityMod = game.Modifier(charWis)
 				}
 				isProficient = true
 				isExpert = containsSkill(expSkills, skillUsed)
 			} else if containsSkill(skillProfs, "performance") {
 				skillUsed = "Performance"
-				abilityMod = modifier(charCha)
+				abilityMod = game.Modifier(charCha)
 				isProficient = true
 				isExpert = containsSkill(expSkills, "performance")
 			} else if containsSkill(skillProfs, "persuasion") {
 				skillUsed = "Persuasion"
-				abilityMod = modifier(charCha)
+				abilityMod = game.Modifier(charCha)
 				isProficient = true
 				isExpert = containsSkill(expSkills, "persuasion")
 			} else {
 				// Default to Persuasion unproficient
 				skillUsed = "Persuasion"
-				abilityMod = modifier(charCha)
+				abilityMod = game.Modifier(charCha)
 			}
 		} else {
 			// Use specified skill
 			skillLower := strings.ToLower(skillUsed)
 			if skillLower == "performance" {
-				abilityMod = modifier(charCha)
+				abilityMod = game.Modifier(charCha)
 				isProficient = containsSkill(skillProfs, "performance")
 				isExpert = containsSkill(expSkills, "performance")
 			} else if skillLower == "persuasion" {
-				abilityMod = modifier(charCha)
+				abilityMod = game.Modifier(charCha)
 				isProficient = containsSkill(skillProfs, "persuasion")
 				isExpert = containsSkill(expSkills, "persuasion")
 			} else {
@@ -20074,11 +20034,11 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 				// Determine ability based on tool type
 				toolLower := strings.ToLower(skillUsed)
 				if strings.Contains(toolLower, "thieves") || strings.Contains(toolLower, "artisan") {
-					abilityMod = modifier(charDex)
+					abilityMod = game.Modifier(charDex)
 				} else if strings.Contains(toolLower, "herbalism") || strings.Contains(toolLower, "navigator") {
-					abilityMod = modifier(charWis)
+					abilityMod = game.Modifier(charWis)
 				} else {
-					abilityMod = modifier(charDex) // Default
+					abilityMod = game.Modifier(charDex) // Default
 				}
 			}
 		}
@@ -20099,7 +20059,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		totalGold := 0
 		
 		for day := 1; day <= req.Days; day++ {
-			roll := rollDie(20)
+			roll := game.RollDie(20)
 			total := roll + totalMod
 			
 			var lifestyle string
@@ -20619,7 +20579,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		// Get Intelligence modifier
 		var charInt int
 		db.QueryRow(`SELECT int FROM characters WHERE id = $1`, req.CharacterID).Scan(&charInt)
-		intMod := modifier(charInt)
+		intMod := game.Modifier(charInt)
 		
 		// Check for Investigation proficiency
 		isProficient := containsSkill(skillProfs, "investigation")
@@ -20650,7 +20610,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		bestRoll := 0
 		
 		for day := 1; day <= req.Days; day++ {
-			roll := rollDie(20)
+			roll := game.RollDie(20)
 			total := roll + totalMod
 			if total > bestRoll {
 				bestRoll = total
@@ -22163,12 +22123,12 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Determine attack modifier (STR for melee, DEX for ranged/finesse)
-		attackMod := modifier(str)
-		damageMod := modifier(str)
+		attackMod := game.Modifier(str)
+		damageMod := game.Modifier(str)
 		if hasWeapon {
 			if weapon.Type == "ranged" || containsProperty(weapon.Properties, "finesse") {
-				attackMod = modifier(dex)
-				damageMod = modifier(dex)
+				attackMod = game.Modifier(dex)
+				damageMod = game.Modifier(dex)
 			}
 		}
 		
@@ -22235,7 +22195,7 @@ func resolveAction(action, description string, charID int) string {
 				isSTRMelee := !isRangedAttack
 				if hasWeapon && containsProperty(weapon.Properties, "finesse") {
 					// Finesse weapons can use DEX - only grant advantage if using STR (higher mod)
-					if modifier(str) < modifier(dex) {
+					if game.Modifier(str) < game.Modifier(dex) {
 						isSTRMelee = false
 					}
 				}
@@ -22332,13 +22292,13 @@ func resolveAction(action, description string, charID int) string {
 		var attackRoll, roll1, roll2 int
 		rollType := "normal"
 		if hasAdvantage && !hasDisadvantage {
-			attackRoll, roll1, roll2 = rollWithAdvantage()
+			attackRoll, roll1, roll2 = game.RollWithAdvantage()
 			rollType = "advantage"
 		} else if hasDisadvantage && !hasAdvantage {
-			attackRoll, roll1, roll2 = rollWithDisadvantage()
+			attackRoll, roll1, roll2 = game.RollWithDisadvantage()
 			rollType = "disadvantage"
 		} else {
-			attackRoll = rollDie(20)
+			attackRoll = game.RollDie(20)
 			roll1, roll2 = attackRoll, 0
 		}
 		
@@ -22389,10 +22349,10 @@ func resolveAction(action, description string, charID int) string {
 			
 			var dmg int
 			if autoCritIsTwoHanded && hasFightingStyle(charID, "great_weapon_fighting") {
-				dmg = rollDamageGWF(damageDice, true) + damageMod
+				dmg = game.RollDamageGWF(damageDice, true) + damageMod
 				autoCritGWFNote = " (GWF)"
 			} else {
-				dmg = rollDamage(damageDice, true) + damageMod
+				dmg = game.RollDamage(damageDice, true) + damageMod
 			}
 			
 			// v0.9.29: Dueling - +2 damage with one-handed melee
@@ -22419,7 +22379,7 @@ func resolveAction(action, description string, charID int) string {
 					var targetHP, targetMaxHP int
 					err := db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", targetID).Scan(&targetHP, &targetMaxHP)
 					if err == nil && targetHP < targetMaxHP {
-						colossusSlayerDmg := rollDie(8) + rollDie(8)
+						colossusSlayerDmg := game.RollDie(8) + game.RollDie(8)
 						dmg += colossusSlayerDmg
 						colossusSlayerNote = fmt.Sprintf(" (+%d Colossus Slayer, 2d8 vs wounded)", colossusSlayerDmg)
 					}
@@ -22432,11 +22392,11 @@ func resolveAction(action, description string, charID int) string {
 			if strings.ToLower(class) == "cleric" && subclass.Valid && subclass.String == "life" && level >= 8 {
 				var divineStrikeDmg int
 				if level >= 14 {
-					divineStrikeDmg = rollDie(8) + rollDie(8) + rollDie(8) + rollDie(8) // 4d8 on crit
+					divineStrikeDmg = game.RollDie(8) + game.RollDie(8) + game.RollDie(8) + game.RollDie(8) // 4d8 on crit
 					dmg += divineStrikeDmg
 					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 4d8 radiant)", divineStrikeDmg)
 				} else {
-					divineStrikeDmg = rollDie(8) + rollDie(8) // 2d8 on crit
+					divineStrikeDmg = game.RollDie(8) + game.RollDie(8) // 2d8 on crit
 					dmg += divineStrikeDmg
 					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 2d8 radiant)", divineStrikeDmg)
 				}
@@ -22451,7 +22411,7 @@ func resolveAction(action, description string, charID int) string {
 				
 				if !sneakUsed && canSneakAttack(charID, weaponKey, hasAdvantage, hasDisadvantage, targetID) {
 					sneakDice := getSneakAttackDice(level)
-					sneakDmg := rollDamage(sneakDice, true) // Doubled on crit
+					sneakDmg := game.RollDamage(sneakDice, true) // Doubled on crit
 					dmg += sneakDmg
 					// Parse dice count for display (e.g., "3d6" -> "6d6" on crit)
 					var diceCount int
@@ -22485,7 +22445,7 @@ func resolveAction(action, description string, charID int) string {
 			// Paladin 11+: automatic +1d8 radiant on all melee hits (doubled on crit)
 			improvedSmiteNote := ""
 			if strings.ToLower(class) == "paladin" && level >= 11 && !isRangedAttack {
-				improvedSmiteDmg := rollDie(8) + rollDie(8) // 2d8 on crit
+				improvedSmiteDmg := game.RollDie(8) + game.RollDie(8) // 2d8 on crit
 				dmg += improvedSmiteDmg
 				improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 2d8 radiant)", improvedSmiteDmg)
 			}
@@ -22503,7 +22463,7 @@ func resolveAction(action, description string, charID int) string {
 						if sides > 0 {
 							brutalDmg := 0
 							for i := 0; i < brutalDice; i++ {
-								brutalDmg += rollDie(sides)
+								brutalDmg += game.RollDie(sides)
 							}
 							dmg += brutalDmg
 							brutalCritNote = fmt.Sprintf(" (+%d Brutal Critical, %dd%d)", brutalDmg, brutalDice, sides)
@@ -22520,7 +22480,7 @@ func resolveAction(action, description string, charID int) string {
 				if len(parts) == 2 {
 					sides, _ := strconv.Atoi(parts[1])
 					if sides > 0 {
-						savageDmg := rollDie(sides)
+						savageDmg := game.RollDie(sides)
 						dmg += savageDmg
 						savageAttacksNote = fmt.Sprintf(" (+%d Savage Attacks, 1d%d)", savageDmg, sides)
 					}
@@ -22551,10 +22511,10 @@ func resolveAction(action, description string, charID int) string {
 			
 			var dmg int
 			if critIsTwoHanded && hasFightingStyle(charID, "great_weapon_fighting") {
-				dmg = rollDamageGWF(damageDice, true) + damageMod
+				dmg = game.RollDamageGWF(damageDice, true) + damageMod
 				critGWFNote = " (GWF)"
 			} else {
-				dmg = rollDamage(damageDice, true) + damageMod
+				dmg = game.RollDamage(damageDice, true) + damageMod
 			}
 			
 			// v0.9.29: Dueling - +2 damage with one-handed melee
@@ -22582,7 +22542,7 @@ func resolveAction(action, description string, charID int) string {
 					var targetHP, targetMaxHP int
 					err := db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", targetID).Scan(&targetHP, &targetMaxHP)
 					if err == nil && targetHP < targetMaxHP {
-						colossusSlayerDmg := rollDie(8) + rollDie(8) // Doubled on crit
+						colossusSlayerDmg := game.RollDie(8) + game.RollDie(8) // Doubled on crit
 						dmg += colossusSlayerDmg
 						colossusSlayerNote = fmt.Sprintf(" (+%d Colossus Slayer, 2d8 vs wounded)", colossusSlayerDmg)
 					}
@@ -22595,11 +22555,11 @@ func resolveAction(action, description string, charID int) string {
 			if strings.ToLower(class) == "cleric" && subclass.Valid && subclass.String == "life" && level >= 8 {
 				var divineStrikeDmg int
 				if level >= 14 {
-					divineStrikeDmg = rollDie(8) + rollDie(8) + rollDie(8) + rollDie(8) // 4d8 on crit
+					divineStrikeDmg = game.RollDie(8) + game.RollDie(8) + game.RollDie(8) + game.RollDie(8) // 4d8 on crit
 					dmg += divineStrikeDmg
 					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 4d8 radiant)", divineStrikeDmg)
 				} else {
-					divineStrikeDmg = rollDie(8) + rollDie(8) // 2d8 on crit
+					divineStrikeDmg = game.RollDie(8) + game.RollDie(8) // 2d8 on crit
 					dmg += divineStrikeDmg
 					divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 2d8 radiant)", divineStrikeDmg)
 				}
@@ -22614,7 +22574,7 @@ func resolveAction(action, description string, charID int) string {
 				
 				if !sneakUsed && canSneakAttack(charID, weaponKey, hasAdvantage, hasDisadvantage, targetID) {
 					sneakDice := getSneakAttackDice(level)
-					sneakDmg := rollDamage(sneakDice, true) // Doubled on crit
+					sneakDmg := game.RollDamage(sneakDice, true) // Doubled on crit
 					dmg += sneakDmg
 					var diceCount int
 					fmt.Sscanf(sneakDice, "%dd6", &diceCount)
@@ -22647,7 +22607,7 @@ func resolveAction(action, description string, charID int) string {
 			// Paladin 11+: automatic +1d8 radiant on all melee hits (doubled on crit)
 			improvedSmiteNote := ""
 			if strings.ToLower(class) == "paladin" && level >= 11 && !isRangedAttack {
-				improvedSmiteDmg := rollDie(8) + rollDie(8) // 2d8 on crit
+				improvedSmiteDmg := game.RollDie(8) + game.RollDie(8) // 2d8 on crit
 				dmg += improvedSmiteDmg
 				improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 2d8 radiant)", improvedSmiteDmg)
 			}
@@ -22665,7 +22625,7 @@ func resolveAction(action, description string, charID int) string {
 						if sides > 0 {
 							brutalDmg := 0
 							for i := 0; i < brutalDice; i++ {
-								brutalDmg += rollDie(sides)
+								brutalDmg += game.RollDie(sides)
 							}
 							dmg += brutalDmg
 							brutalCritNote = fmt.Sprintf(" (+%d Brutal Critical, %dd%d)", brutalDmg, brutalDice, sides)
@@ -22682,7 +22642,7 @@ func resolveAction(action, description string, charID int) string {
 				if len(parts) == 2 {
 					sides, _ := strconv.Atoi(parts[1])
 					if sides > 0 {
-						savageDmg := rollDie(sides)
+						savageDmg := game.RollDie(sides)
 						dmg += savageDmg
 						savageAttacksNote = fmt.Sprintf(" (+%d Savage Attacks, 1d%d)", savageDmg, sides)
 					}
@@ -22715,10 +22675,10 @@ func resolveAction(action, description string, charID int) string {
 		// Roll damage (with GWF rerolls if applicable)
 		var dmg int
 		if isTwoHanded && hasFightingStyle(charID, "great_weapon_fighting") {
-			dmg = rollDamageGWF(damageDice, false) + damageMod
+			dmg = game.RollDamageGWF(damageDice, false) + damageMod
 			gwfNote = " (GWF)"
 		} else {
-			dmg = rollDamage(damageDice, false) + damageMod
+			dmg = game.RollDamage(damageDice, false) + damageMod
 		}
 		
 		// v0.9.29: Dueling - +2 damage with one-handed melee, no other weapons
@@ -22746,7 +22706,7 @@ func resolveAction(action, description string, charID int) string {
 				var targetHP, targetMaxHP int
 				err := db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", targetID).Scan(&targetHP, &targetMaxHP)
 				if err == nil && targetHP < targetMaxHP {
-					colossusSlayerDmg = rollDie(8)
+					colossusSlayerDmg = game.RollDie(8)
 					dmg += colossusSlayerDmg
 					colossusSlayerNote = fmt.Sprintf(" (+%d Colossus Slayer, 1d8 vs wounded)", colossusSlayerDmg)
 				}
@@ -22759,11 +22719,11 @@ func resolveAction(action, description string, charID int) string {
 		if strings.ToLower(class) == "cleric" && subclass.Valid && subclass.String == "life" && level >= 8 {
 			var divineStrikeDmg int
 			if level >= 14 {
-				divineStrikeDmg = rollDie(8) + rollDie(8)
+				divineStrikeDmg = game.RollDie(8) + game.RollDie(8)
 				dmg += divineStrikeDmg
 				divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 2d8 radiant)", divineStrikeDmg)
 			} else {
-				divineStrikeDmg = rollDie(8)
+				divineStrikeDmg = game.RollDie(8)
 				dmg += divineStrikeDmg
 				divineStrikeNote = fmt.Sprintf(" (+%d Divine Strike, 1d8 radiant)", divineStrikeDmg)
 			}
@@ -22779,7 +22739,7 @@ func resolveAction(action, description string, charID int) string {
 			
 			if !sneakUsed && canSneakAttack(charID, weaponKey, hasAdvantage, hasDisadvantage, targetID) {
 				sneakDice := getSneakAttackDice(level)
-				sneakDmg := rollDamage(sneakDice, false)
+				sneakDmg := game.RollDamage(sneakDice, false)
 				dmg += sneakDmg
 				sneakAttackNote = fmt.Sprintf(" (+%d Sneak Attack, %s)", sneakDmg, sneakDice)
 				
@@ -22814,7 +22774,7 @@ func resolveAction(action, description string, charID int) string {
 		// Paladin 11+: automatic +1d8 radiant on all melee weapon hits
 		improvedSmiteNote := ""
 		if strings.ToLower(class) == "paladin" && level >= 11 && !isRangedAttack {
-			improvedSmiteDmg := rollDie(8)
+			improvedSmiteDmg := game.RollDie(8)
 			dmg += improvedSmiteDmg
 			improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 1d8 radiant)", improvedSmiteDmg)
 		}
@@ -22878,11 +22838,11 @@ func resolveAction(action, description string, charID int) string {
 		if c, ok := srdClasses[classKey]; ok {
 			switch c.Spellcasting {
 			case "INT":
-				spellMod = modifier(intl)
+				spellMod = game.Modifier(intl)
 			case "WIS":
-				spellMod = modifier(wis)
+				spellMod = game.Modifier(wis)
 			case "CHA":
-				spellMod = modifier(cha)
+				spellMod = game.Modifier(cha)
 			}
 		}
 		
@@ -23010,13 +22970,13 @@ func resolveAction(action, description string, charID int) string {
 					case "heightened":
 						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Heightened (%d SP): one target has disadvantage on first save", cost))
 					case "empowered":
-						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Empowered (%d SP): reroll up to %d damage dice", cost, modifier(cha)))
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Empowered (%d SP): reroll up to %d damage dice", cost, game.Modifier(cha)))
 					case "extended":
 						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Extended (%d SP): duration doubled (max 24h)", cost))
 					case "distant":
 						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Distant (%d SP): range doubled (or 30ft if touch)", cost))
 					case "careful":
-						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Careful (%d SP): up to %d creatures auto-succeed on save", cost, max(1, modifier(cha))))
+						metamagicEffects = append(metamagicEffects, fmt.Sprintf("Careful (%d SP): up to %d creatures auto-succeed on save", cost, max(1, game.Modifier(cha))))
 					}
 				}
 				
@@ -23148,7 +23108,7 @@ func resolveAction(action, description string, charID int) string {
 					damageDice = getScaledCantripDamage(spell.DamageAtCharLevel, level)
 				}
 				
-				dmg := rollDamage(damageDice, false)
+				dmg := game.RollDamage(damageDice, false)
 				
 				// v0.9.38: Elemental Affinity (Draconic Sorcerer level 6+)
 				// Add CHA mod to damage when spell damage type matches dragon ancestry
@@ -23157,7 +23117,7 @@ func resolveAction(action, description string, charID int) string {
 					if hasSubclassFeature(subclass.String, level, "elemental_affinity") {
 						ancestryDamageType := getDragonAncestryDamageType(charID)
 						if ancestryDamageType != "" && strings.ToLower(spell.DamageType) == ancestryDamageType {
-							chaBonus := modifier(cha)
+							chaBonus := game.Modifier(cha)
 							dmg += chaBonus
 							elementalAffinityNote = fmt.Sprintf(" (Elemental Affinity: +%d)", chaBonus)
 						}
@@ -23192,10 +23152,10 @@ func resolveAction(action, description string, charID int) string {
 				
 				// Check for Supreme Healing (Life Domain level 17) - use max dice instead of rolling
 				if hasSubclassFeature(subclassSlug, level, "supreme_healing") {
-					heal = rollDamageMax(healDice) + spellMod
+					heal = game.RollDamageMax(healDice) + spellMod
 					bonusInfo = " (Supreme Healing: max dice)"
 				} else {
-					heal = rollDamage(healDice, false) + spellMod
+					heal = game.RollDamage(healDice, false) + spellMod
 				}
 				
 				// Check for Disciple of Life (Life Domain level 1) - add 2 + spell level bonus
@@ -23249,7 +23209,7 @@ func resolveAction(action, description string, charID int) string {
 	
 	case "death_save":
 		// Death saving throw
-		roll := rollDie(20)
+		roll := game.RollDie(20)
 		
 		// v0.9.47: Halfling Lucky (PHB p28) - reroll nat 1s on death saves
 		dsHalflingLuckyUsed := false
@@ -23313,13 +23273,13 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		conMod := modifier(intl) // Should be spellcasting ability but CON for check
+		conMod := game.Modifier(intl) // Should be spellcasting ability but CON for check
 		// Actually concentration uses CON
-		conMod = modifier(dex) // Get CON from the row... we need to query again
+		conMod = game.Modifier(dex) // Get CON from the row... we need to query again
 		db.QueryRow("SELECT con FROM characters WHERE id = $1", charID).Scan(&intl) // reusing var
-		conMod = modifier(intl)
+		conMod = game.Modifier(intl)
 		
-		roll := rollDie(20)
+		roll := game.RollDie(20)
 		total := roll + conMod + proficiencyBonus(level) // Assume proficient in CON saves
 		
 		var concSpell string
@@ -23646,7 +23606,7 @@ func resolveAction(action, description string, charID int) string {
 			"Wild Shape: %s\n"+
 			"Note: You keep your INT, WIS, CHA, proficiencies, and class features. You can't cast spells (except with Beast Spells at level 18). When beast HP drops to 0, excess damage carries over to your normal form.",
 			beastName, beastAC, beastHP, beastHP, beastSpeed,
-			beastStr, modifier(beastStr), beastDex, modifier(beastDex), beastCon, modifier(beastCon),
+			beastStr, game.Modifier(beastStr), beastDex, game.Modifier(beastDex), beastCon, game.Modifier(beastCon),
 			actionsStr, usesInfo)
 
 	case "revert_wild_shape":
@@ -23732,7 +23692,7 @@ func resolveAction(action, description string, charID int) string {
 		switch item.Effect {
 		case "heal":
 			// Roll healing dice
-			healing := rollDamage(item.Dice, false)
+			healing := game.RollDamage(item.Dice, false)
 			// Add any flat bonus from dice string (e.g., "2d4+2")
 			if idx := strings.Index(item.Dice, "+"); idx > 0 {
 				bonus, _ := strconv.Atoi(item.Dice[idx+1:])
@@ -23767,7 +23727,7 @@ func resolveAction(action, description string, charID int) string {
 		case "spell":
 			// Cast spell from scroll
 			if item.Dice != "" {
-				dmg := rollDamage(item.Dice, false)
+				dmg := game.RollDamage(item.Dice, false)
 				return fmt.Sprintf("Read %s! Cast %s for %d damage. %s", item.Name, item.SpellName, dmg, item.Description)
 			}
 			return fmt.Sprintf("Read %s! Cast %s. %s", item.Name, item.SpellName, item.Description)
@@ -23808,9 +23768,9 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Determine attack modifier (DEX for finesse, STR otherwise)
-		attackMod := modifier(str)
+		attackMod := game.Modifier(str)
 		if containsProperty(weapon.Properties, "finesse") {
-			attackMod = modifier(dex)
+			attackMod = game.Modifier(dex)
 		}
 		
 		// Add proficiency bonus only if proficient
@@ -23834,13 +23794,13 @@ func resolveAction(action, description string, charID int) string {
 		var attackRoll, roll1, roll2 int
 		rollType := "normal"
 		if hasAdvantage && !hasDisadvantage {
-			attackRoll, roll1, roll2 = rollWithAdvantage()
+			attackRoll, roll1, roll2 = game.RollWithAdvantage()
 			rollType = "advantage"
 		} else if hasDisadvantage && !hasAdvantage {
-			attackRoll, roll1, roll2 = rollWithDisadvantage()
+			attackRoll, roll1, roll2 = game.RollWithDisadvantage()
 			rollType = "disadvantage"
 		} else {
-			attackRoll = rollDie(20)
+			attackRoll = game.RollDie(20)
 			roll1, roll2 = attackRoll, 0
 		}
 		
@@ -23863,9 +23823,9 @@ func resolveAction(action, description string, charID int) string {
 		if hasTWFStyle {
 			// Get the ability modifier used for the attack
 			if containsProperty(weapon.Properties, "finesse") {
-				damageMod = modifier(dex)
+				damageMod = game.Modifier(dex)
 			} else {
-				damageMod = modifier(str)
+				damageMod = game.Modifier(str)
 			}
 			twfNote = fmt.Sprintf(" (TWF Style +%d)", damageMod)
 		}
@@ -23873,7 +23833,7 @@ func resolveAction(action, description string, charID int) string {
 		// Critical hit
 		if attackRoll == 20 {
 			// Double damage dice
-			dmg := rollDamage(weapon.Damage, true) // crit = double dice
+			dmg := game.RollDamage(weapon.Damage, true) // crit = double dice
 			dmg += damageMod // Add ability mod if have TWF style
 			return fmt.Sprintf("Offhand attack with %s%s: %d (nat 20 CRITICAL!)%s Damage: %d%s", 
 				weapon.Name, profInfo, totalAttack, rollInfo, dmg, twfNote)
@@ -23886,7 +23846,7 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Normal hit
-		dmg := rollDamage(weapon.Damage, false)
+		dmg := game.RollDamage(weapon.Damage, false)
 		dmg += damageMod // Add ability mod if have TWF style
 		return fmt.Sprintf("Offhand attack with %s%s: %d to hit%s. Damage: %d%s", 
 			weapon.Name, profInfo, totalAttack, rollInfo, dmg, twfNote)
@@ -23942,11 +23902,11 @@ func resolveAction(action, description string, charID int) string {
 		}
 
 		// Determine attack modifier (DEX for finesse, STR otherwise)
-		frenzyAttackMod := modifier(str)
+		frenzyAttackMod := game.Modifier(str)
 		if containsProperty(weapon.Properties, "finesse") {
 			// Barbarian can use DEX for finesse weapons, but rage bonus only applies to STR attacks
 			// Most barbarians use STR anyway
-			frenzyAttackMod = modifier(dex)
+			frenzyAttackMod = game.Modifier(dex)
 		}
 
 		// Add proficiency bonus if proficient
@@ -23970,13 +23930,13 @@ func resolveAction(action, description string, charID int) string {
 		var frenzyRoll, fRoll1, fRoll2 int
 		frenzyRollType := "normal"
 		if frenzyAdvantage && !frenzyDisadvantage {
-			frenzyRoll, fRoll1, fRoll2 = rollWithAdvantage()
+			frenzyRoll, fRoll1, fRoll2 = game.RollWithAdvantage()
 			frenzyRollType = "advantage"
 		} else if frenzyDisadvantage && !frenzyAdvantage {
-			frenzyRoll, fRoll1, fRoll2 = rollWithDisadvantage()
+			frenzyRoll, fRoll1, fRoll2 = game.RollWithDisadvantage()
 			frenzyRollType = "disadvantage"
 		} else {
-			frenzyRoll = rollDie(20)
+			frenzyRoll = game.RollDie(20)
 			fRoll1, fRoll2 = frenzyRoll, 0
 		}
 
@@ -23993,7 +23953,7 @@ func resolveAction(action, description string, charID int) string {
 		}
 
 		// Determine damage modifier (STR for melee, rage bonus applies to STR attacks)
-		frenzyDamageMod := modifier(str)
+		frenzyDamageMod := game.Modifier(str)
 		// Add rage damage bonus (+2 at most levels, +3 at 9+, +4 at 16+)
 		rageDamageBonus := 2
 		if level >= 16 {
@@ -24008,7 +23968,7 @@ func resolveAction(action, description string, charID int) string {
 
 		// Critical hit
 		if frenzyRoll >= critThreshold {
-			frenzyDmg := rollDamage(weapon.Damage, true) + frenzyDamageMod // crit = double dice
+			frenzyDmg := game.RollDamage(weapon.Damage, true) + frenzyDamageMod // crit = double dice
 			// v0.9.35: Brutal Critical on frenzy attack crits (Barbarians get extra dice at 9/13/17)
 			brutalCritText := ""
 			brutalDice := getBrutalCriticalDice(class, level)
@@ -24019,7 +23979,7 @@ func resolveAction(action, description string, charID int) string {
 					if sides > 0 {
 						brutalDmg := 0
 						for i := 0; i < brutalDice; i++ {
-							brutalDmg += rollDie(sides)
+							brutalDmg += game.RollDie(sides)
 						}
 						frenzyDmg += brutalDmg
 						brutalCritText = fmt.Sprintf(" (+%d Brutal Critical)", brutalDmg)
@@ -24033,14 +23993,14 @@ func resolveAction(action, description string, charID int) string {
 				if len(parts) == 2 {
 					sides, _ := strconv.Atoi(parts[1])
 					if sides > 0 {
-						savageDmg := rollDie(sides)
+						savageDmg := game.RollDie(sides)
 						frenzyDmg += savageDmg
 						savageAttacksText = fmt.Sprintf(" (+%d Savage Attacks)", savageDmg)
 					}
 				}
 			}
 			return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d (nat %d CRITICAL!)%s Damage: %d%s%s (%s + %d STR + %d rage)",
-				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRoll, frenzyRollInfo, frenzyDmg, brutalCritText, savageAttacksText, weapon.Damage, modifier(str), rageDamageBonus)
+				weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRoll, frenzyRollInfo, frenzyDmg, brutalCritText, savageAttacksText, weapon.Damage, game.Modifier(str), rageDamageBonus)
 		}
 
 		// Critical miss
@@ -24050,9 +24010,9 @@ func resolveAction(action, description string, charID int) string {
 		}
 
 		// Normal hit
-		frenzyDmg := rollDamage(weapon.Damage, false) + frenzyDamageMod
+		frenzyDmg := game.RollDamage(weapon.Damage, false) + frenzyDamageMod
 		return fmt.Sprintf("🔥 Frenzy attack with %s%s: %d to hit%s. Damage: %d (%s + %d STR + %d rage)",
-			weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRollInfo, frenzyDmg, weapon.Damage, modifier(str), rageDamageBonus)
+			weapon.Name, frenzyProfInfo, frenzyTotalAttack, frenzyRollInfo, frenzyDmg, weapon.Damage, game.Modifier(str), rageDamageBonus)
 
 	case "horde_breaker":
 		// v0.8.93: Hunter Ranger's Horde Breaker
@@ -24106,11 +24066,11 @@ func resolveAction(action, description string, charID int) string {
 		db.Exec(`UPDATE characters SET horde_breaker_used = true WHERE id = $1`, charID)
 		
 		// Determine attack modifier
-		hbAttackMod := modifier(str)
-		hbDamageMod := modifier(str)
+		hbAttackMod := game.Modifier(str)
+		hbDamageMod := game.Modifier(str)
 		if hbWeapon.Type == "ranged" || containsProperty(hbWeapon.Properties, "finesse") {
-			hbAttackMod = modifier(dex)
-			hbDamageMod = modifier(dex)
+			hbAttackMod = game.Modifier(dex)
+			hbDamageMod = game.Modifier(dex)
 		}
 		
 		// Add proficiency bonus if proficient
@@ -24138,13 +24098,13 @@ func resolveAction(action, description string, charID int) string {
 		var hbRoll, hbRoll1, hbRoll2 int
 		hbRollType := "normal"
 		if hbAdvantage && !hbDisadvantage {
-			hbRoll, hbRoll1, hbRoll2 = rollWithAdvantage()
+			hbRoll, hbRoll1, hbRoll2 = game.RollWithAdvantage()
 			hbRollType = "advantage"
 		} else if hbDisadvantage && !hbAdvantage {
-			hbRoll, hbRoll1, hbRoll2 = rollWithDisadvantage()
+			hbRoll, hbRoll1, hbRoll2 = game.RollWithDisadvantage()
 			hbRollType = "disadvantage"
 		} else {
-			hbRoll = rollDie(20)
+			hbRoll = game.RollDie(20)
 			hbRoll1, hbRoll2 = hbRoll, 0
 		}
 		
@@ -24165,7 +24125,7 @@ func resolveAction(action, description string, charID int) string {
 		
 		// Critical hit
 		if hbRoll == 20 {
-			hbDmg := rollDamage(hbWeapon.Damage, true) + hbDamageMod
+			hbDmg := game.RollDamage(hbWeapon.Damage, true) + hbDamageMod
 			return fmt.Sprintf("🏹 Horde Breaker with %s%s: %d (nat 20 CRITICAL!)%s Damage: %d (attacking second target within 5ft of original)",
 				hbWeapon.Name, hbProfInfo, hbTotalAttack, hbRollInfo, hbDmg)
 		}
@@ -24177,7 +24137,7 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Normal hit
-		hbDmg := rollDamage(hbWeapon.Damage, false) + hbDamageMod
+		hbDmg := game.RollDamage(hbWeapon.Damage, false) + hbDamageMod
 		return fmt.Sprintf("🏹 Horde Breaker with %s%s: %d to hit%s. Damage: %d (attacking second target within 5ft of original)",
 			hbWeapon.Name, hbProfInfo, hbTotalAttack, hbRollInfo, hbDmg)
 
@@ -24261,8 +24221,8 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Determine attack modifier
-		volleyAttackMod := modifier(dex) // Ranged weapons use DEX
-		volleyDamageMod := modifier(dex)
+		volleyAttackMod := game.Modifier(dex) // Ranged weapons use DEX
+		volleyDamageMod := game.Modifier(dex)
 		
 		// Add proficiency bonus if proficient
 		volleyProficient := isWeaponProficient(weaponProfsStr, volleyWeaponKey)
@@ -24299,13 +24259,13 @@ func resolveAction(action, description string, charID int) string {
 			var vRoll, vRoll1, vRoll2 int
 			vRollType := "normal"
 			if volleyAdvantage && !volleyDisadvantage {
-				vRoll, vRoll1, vRoll2 = rollWithAdvantage()
+				vRoll, vRoll1, vRoll2 = game.RollWithAdvantage()
 				vRollType = "advantage"
 			} else if volleyDisadvantage && !volleyAdvantage {
-				vRoll, vRoll1, vRoll2 = rollWithDisadvantage()
+				vRoll, vRoll1, vRoll2 = game.RollWithDisadvantage()
 				vRollType = "disadvantage"
 			} else {
-				vRoll = rollDie(20)
+				vRoll = game.RollDie(20)
 				vRoll1, vRoll2 = vRoll, 0
 			}
 			
@@ -24316,7 +24276,7 @@ func resolveAction(action, description string, charID int) string {
 			}
 			
 			if vRoll == 20 {
-				vDmg := rollDamage(volleyWeapon.Damage, true) + volleyDamageMod
+				vDmg := game.RollDamage(volleyWeapon.Damage, true) + volleyDamageMod
 				volleyResults = append(volleyResults, fmt.Sprintf("Target %d: %d (CRIT!)%s → %d dmg", i, vTotal, vRollInfo, vDmg))
 				volleyHits++
 				volleyCrits++
@@ -24324,7 +24284,7 @@ func resolveAction(action, description string, charID int) string {
 			} else if vRoll == 1 {
 				volleyResults = append(volleyResults, fmt.Sprintf("Target %d: %d (miss)%s", i, vTotal, vRollInfo))
 			} else {
-				vDmg := rollDamage(volleyWeapon.Damage, false) + volleyDamageMod
+				vDmg := game.RollDamage(volleyWeapon.Damage, false) + volleyDamageMod
 				volleyResults = append(volleyResults, fmt.Sprintf("Target %d: %d to hit%s → %d dmg", i, vTotal, vRollInfo, vDmg))
 				volleyHits++
 				volleyTotalDamage += vDmg
@@ -24397,12 +24357,12 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Determine attack modifier (STR by default for melee, or DEX for finesse)
-		wwAttackMod := modifier(str)
-		wwDamageMod := modifier(str)
+		wwAttackMod := game.Modifier(str)
+		wwDamageMod := game.Modifier(str)
 		if containsProperty(wwWeapon.Properties, "finesse") {
-			if modifier(dex) > modifier(str) {
-				wwAttackMod = modifier(dex)
-				wwDamageMod = modifier(dex)
+			if game.Modifier(dex) > game.Modifier(str) {
+				wwAttackMod = game.Modifier(dex)
+				wwDamageMod = game.Modifier(dex)
 			}
 		}
 		
@@ -24453,13 +24413,13 @@ func resolveAction(action, description string, charID int) string {
 			var wRoll, wRoll1, wRoll2 int
 			wRollType := "normal"
 			if wwAdvantage && !wwDisadvantage {
-				wRoll, wRoll1, wRoll2 = rollWithAdvantage()
+				wRoll, wRoll1, wRoll2 = game.RollWithAdvantage()
 				wRollType = "advantage"
 			} else if wwDisadvantage && !wwAdvantage {
-				wRoll, wRoll1, wRoll2 = rollWithDisadvantage()
+				wRoll, wRoll1, wRoll2 = game.RollWithDisadvantage()
 				wRollType = "disadvantage"
 			} else {
-				wRoll = rollDie(20)
+				wRoll = game.RollDie(20)
 				wRoll1, wRoll2 = wRoll, 0
 			}
 			
@@ -24470,7 +24430,7 @@ func resolveAction(action, description string, charID int) string {
 			}
 			
 			if wRoll == 20 {
-				wDmg := rollDamage(wwWeapon.Damage, true) + wwDamageMod + wwRageBonus
+				wDmg := game.RollDamage(wwWeapon.Damage, true) + wwDamageMod + wwRageBonus
 				wwResults = append(wwResults, fmt.Sprintf("Target %d: %d (CRIT!)%s → %d dmg", i, wTotal, wRollInfo, wDmg))
 				wwHits++
 				wwCrits++
@@ -24478,7 +24438,7 @@ func resolveAction(action, description string, charID int) string {
 			} else if wRoll == 1 {
 				wwResults = append(wwResults, fmt.Sprintf("Target %d: %d (miss)%s", i, wTotal, wRollInfo))
 			} else {
-				wDmg := rollDamage(wwWeapon.Damage, false) + wwDamageMod + wwRageBonus
+				wDmg := game.RollDamage(wwWeapon.Damage, false) + wwDamageMod + wwRageBonus
 				wwResults = append(wwResults, fmt.Sprintf("Target %d: %d to hit%s → %d dmg", i, wTotal, wRollInfo, wDmg))
 				wwHits++
 				wwTotalDamage += wDmg
@@ -24519,11 +24479,11 @@ func resolveAction(action, description string, charID int) string {
 		monkDie := getMonkDie(level)
 		
 		// Monks can use DEX or STR for unarmed strikes (Martial Arts)
-		flurryAttackMod := modifier(dex)
-		flurryDamageMod := modifier(dex)
-		if modifier(str) > modifier(dex) {
-			flurryAttackMod = modifier(str)
-			flurryDamageMod = modifier(str)
+		flurryAttackMod := game.Modifier(dex)
+		flurryDamageMod := game.Modifier(dex)
+		if game.Modifier(str) > game.Modifier(dex) {
+			flurryAttackMod = game.Modifier(str)
+			flurryDamageMod = game.Modifier(str)
 		}
 		
 		// Add proficiency bonus (monks are proficient with unarmed strikes)
@@ -24577,13 +24537,13 @@ func resolveAction(action, description string, charID int) string {
 			var fRoll, fRoll1, fRoll2 int
 			fRollType := "normal"
 			if flurryAdvantage && !flurryDisadvantage {
-				fRoll, fRoll1, fRoll2 = rollWithAdvantage()
+				fRoll, fRoll1, fRoll2 = game.RollWithAdvantage()
 				fRollType = "advantage"
 			} else if flurryDisadvantage && !flurryAdvantage {
-				fRoll, fRoll1, fRoll2 = rollWithDisadvantage()
+				fRoll, fRoll1, fRoll2 = game.RollWithDisadvantage()
 				fRollType = "disadvantage"
 			} else {
-				fRoll = rollDie(20)
+				fRoll = game.RollDie(20)
 				fRoll1, fRoll2 = fRoll, 0
 			}
 			
@@ -24596,7 +24556,7 @@ func resolveAction(action, description string, charID int) string {
 			
 			// Critical hit
 			if fRoll == 20 {
-				fDmg := rollDamage(monkDie, true) + flurryDamageMod
+				fDmg := game.RollDamage(monkDie, true) + flurryDamageMod
 				totalDamage += fDmg
 				strikeResult := fmt.Sprintf("Strike %d: %d (nat 20 CRITICAL!)%s - %d damage", strike, fTotalAttack, fRollInfo, fDmg)
 				
@@ -24615,7 +24575,7 @@ func resolveAction(action, description string, charID int) string {
 			}
 			
 			// Normal hit (damage calculated, GM determines if it hits)
-			fDmg := rollDamage(monkDie, false) + flurryDamageMod
+			fDmg := game.RollDamage(monkDie, false) + flurryDamageMod
 			totalDamage += fDmg
 			strikeResult := fmt.Sprintf("Strike %d: %d to hit%s - %d damage", strike, fTotalAttack, fRollInfo, fDmg)
 			
@@ -24717,7 +24677,7 @@ func resolveAction(action, description string, charID int) string {
 		// Calculate ki save DC: 8 + proficiency + WIS modifier
 		var wis int
 		db.QueryRow("SELECT wis FROM characters WHERE id = $1", charID).Scan(&wis)
-		kiSaveDC := 8 + proficiencyBonus(level) + modifier(wis)
+		kiSaveDC := 8 + proficiencyBonus(level) + game.Modifier(wis)
 		
 		return fmt.Sprintf("⚡ Stunning Strike! (1 ki spent, %d remaining) Target must make CON save DC %d or be STUNNED until the end of your next turn.", ssRemaining, kiSaveDC)
 
@@ -24756,7 +24716,7 @@ func resolveAction(action, description string, charID int) string {
 				json.Unmarshal(skillProfs, &skills)
 				json.Unmarshal(expertiseList, &expertise)
 				
-				bonus := modifier(dex)
+				bonus := game.Modifier(dex)
 				isProficient := false
 				hasExpertise := false
 				for _, s := range skills {
@@ -24778,7 +24738,7 @@ func resolveAction(action, description string, charID int) string {
 					bonus += proficiencyBonus(level)
 				}
 				
-				roll := rollDie(20)
+				roll := game.RollDie(20)
 				total := roll + bonus
 				
 				return fmt.Sprintf("🤏 Fast Hands (Sleight of Hand)! Rolled %d + %d = %d", roll, bonus, total)
@@ -24795,7 +24755,7 @@ func resolveAction(action, description string, charID int) string {
 				json.Unmarshal(toolProfs, &tools)
 				json.Unmarshal(expertiseList, &expertise)
 				
-				bonus := modifier(dex)
+				bonus := game.Modifier(dex)
 				isProficient := false
 				hasExpertise := false
 				for _, t := range tools {
@@ -24817,7 +24777,7 @@ func resolveAction(action, description string, charID int) string {
 					bonus += proficiencyBonus(level)
 				}
 				
-				roll := rollDie(20)
+				roll := game.RollDie(20)
 				total := roll + bonus
 				
 				action := "disarm trap or open lock"
@@ -24855,7 +24815,7 @@ func resolveAction(action, description string, charID int) string {
 			json.Unmarshal(skillProfs, &skills)
 			json.Unmarshal(expertiseList, &expertise)
 			
-			bonus := modifier(dex)
+			bonus := game.Modifier(dex)
 			isProficient := false
 			hasExpertise := false
 			for _, s := range skills {
@@ -24877,7 +24837,7 @@ func resolveAction(action, description string, charID int) string {
 				bonus += proficiencyBonus(level)
 			}
 			
-			roll := rollDie(20)
+			roll := game.RollDie(20)
 			total := roll + bonus
 			
 			// Add hidden condition
@@ -24922,7 +24882,7 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Roll 1d10 + fighter level
-		healRoll := rollDie(10)
+		healRoll := game.RollDie(10)
 		totalHeal := healRoll + level
 		
 		// Apply healing (up to max HP)
@@ -25195,7 +25155,7 @@ func resolveAction(action, description string, charID int) string {
 		searchDescLower := strings.ToLower(description)
 		
 		searchSkill := "perception"
-		searchAbilityMod := modifier(wis)
+		searchAbilityMod := game.Modifier(wis)
 		searchAbilityName := "WIS"
 		
 		// Check for Investigation keywords
@@ -25204,7 +25164,7 @@ func resolveAction(action, description string, charID int) string {
 			strings.Contains(searchDescLower, "examine closely") || strings.Contains(searchDescLower, "study") ||
 			strings.Contains(searchDescLower, "look for clues") {
 			searchSkill = "investigation"
-			searchAbilityMod = modifier(intl)
+			searchAbilityMod = game.Modifier(intl)
 			searchAbilityName = "INT"
 		}
 		
@@ -25242,7 +25202,7 @@ func resolveAction(action, description string, charID int) string {
 		searchHasReliableTalent := searchIsProficient && strings.ToLower(class) == "rogue" && level >= 11
 		
 		// Roll the check
-		searchRoll := rollDie(20)
+		searchRoll := game.RollDie(20)
 		searchOriginalRoll := searchRoll
 		
 		// Reliable Talent: treat rolls of 9 or lower as 10
@@ -25698,88 +25658,6 @@ func recoverAmmo(charID int, ammoType string) (int, error) {
 	return recovered, nil
 }
 
-// Roll damage dice (e.g., "2d6", "1d8+2")
-func rollDamage(dice string, critical bool) int {
-	dice = strings.ToLower(dice)
-	// Remove any +X modifier for now, just roll dice
-	if idx := strings.Index(dice, "+"); idx > 0 {
-		dice = dice[:idx]
-	}
-	
-	parts := strings.Split(dice, "d")
-	if len(parts) != 2 {
-		return rollDie(6)
-	}
-	
-	count, _ := strconv.Atoi(parts[0])
-	sides, _ := strconv.Atoi(parts[1])
-	if count < 1 { count = 1 }
-	if sides < 1 { sides = 6 }
-	
-	if critical {
-		count *= 2 // Double dice on crit
-	}
-	
-	_, total := rollDice(count, sides)
-	return total
-}
-
-// rollDamageGWF rolls damage with Great Weapon Fighting style (v0.9.29)
-// Rerolls 1s and 2s once (must use new roll)
-func rollDamageGWF(dice string, critical bool) int {
-	dice = strings.ToLower(dice)
-	// Remove any +X modifier for now, just roll dice
-	if idx := strings.Index(dice, "+"); idx > 0 {
-		dice = dice[:idx]
-	}
-	
-	parts := strings.Split(dice, "d")
-	if len(parts) != 2 {
-		return rollDie(6)
-	}
-	
-	count, _ := strconv.Atoi(parts[0])
-	sides, _ := strconv.Atoi(parts[1])
-	if count < 1 { count = 1 }
-	if sides < 1 { sides = 6 }
-	
-	if critical {
-		count *= 2 // Double dice on crit
-	}
-	
-	total := 0
-	for i := 0; i < count; i++ {
-		roll := rollDie(sides)
-		// GWF: reroll 1s and 2s once
-		if roll == 1 || roll == 2 {
-			roll = rollDie(sides) // Must use new roll
-		}
-		total += roll
-	}
-	return total
-}
-
-// rollDamageMax returns the maximum possible roll for a dice string (for Supreme Healing)
-func rollDamageMax(dice string) int {
-	dice = strings.ToLower(dice)
-	// Remove any +X modifier for now, just calculate max dice
-	if idx := strings.Index(dice, "+"); idx > 0 {
-		dice = dice[:idx]
-	}
-	
-	parts := strings.Split(dice, "d")
-	if len(parts) != 2 {
-		return 6 // Default d6 max
-	}
-	
-	count, _ := strconv.Atoi(parts[0])
-	sides, _ := strconv.Atoi(parts[1])
-	if count < 1 { count = 1 }
-	if sides < 1 { sides = 6 }
-	
-	return count * sides // Max roll = count * sides
-}
-
 // handleTriggerReadied godoc
 // @Summary Trigger your readied action
 // @Description When the trigger condition for your readied action occurs, use this endpoint to execute it. Costs your reaction.
@@ -26053,7 +25931,7 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the dice
-	rolls, totalDamage := rollDice(diceCount, 6)
+	rolls, totalDamage := game.RollDice(diceCount, 6)
 	
 	// Get character info
 	var charName string
@@ -26240,7 +26118,7 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	conMod := modifier(con)
+	conMod := game.Modifier(con)
 	
 	// Check for existing suffocating condition
 	condList := strings.Split(conditions, ",")
@@ -26570,7 +26448,7 @@ func calculateDivineSmiteDamage(slotLevel int, isUndeadOrFiend bool, isCrit bool
 	// Roll the damage
 	total := 0
 	for i := 0; i < numDice; i++ {
-		total += rollDie(8)
+		total += game.RollDie(8)
 	}
 	
 	diceStr := fmt.Sprintf("%dd8", numDice)
@@ -27175,8 +27053,8 @@ func handleGMMoraleCheck(w http.ResponseWriter, r *http.Request) {
 	wisMod := (wisScore - 10) / 2
 	
 	// Roll WIS saving throw
-	roll1 := rollDie(20)
-	roll2 := rollDie(20)
+	roll1 := game.RollDie(20)
+	roll2 := game.RollDie(20)
 	usedRoll := roll1
 	
 	if hasDisadvantage {
@@ -27364,7 +27242,7 @@ func handleGMTurnUndead(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate spell save DC (8 + proficiency + WIS mod)
-	wisMod := modifier(wisScore)
+	wisMod := game.Modifier(wisScore)
 	saveDC := spellSaveDC(casterLevel, wisMod)
 	
 	// Determine Destroy Undead CR threshold based on level
@@ -27471,8 +27349,8 @@ func handleGMTurnUndead(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Roll WIS saving throw
-		wisModTarget := modifier(monsterWIS)
-		roll := rollDie(20)
+		wisModTarget := game.Modifier(monsterWIS)
+		roll := game.RollDie(20)
 		total := roll + wisModTarget
 		passed := total >= saveDC
 		
@@ -27726,7 +27604,7 @@ func handleGMTurnUnholy(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate spell save DC (8 + proficiency + CHA mod) - Paladin uses CHA
-	chaMod := modifier(chaScore)
+	chaMod := game.Modifier(chaScore)
 	saveDC := spellSaveDC(casterLevel, chaMod)
 	
 	// Process each target
@@ -27799,8 +27677,8 @@ func handleGMTurnUnholy(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Roll WIS saving throw
-		wisModTarget := modifier(monsterWIS)
-		roll := rollDie(20)
+		wisModTarget := game.Modifier(monsterWIS)
+		roll := game.RollDie(20)
 		total := roll + wisModTarget
 		passed := total >= saveDC
 		
@@ -28297,7 +28175,7 @@ func handleGMSacredWeapon(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate bonus: CHA modifier, minimum +1
-	chaBonus := modifier(chaScore)
+	chaBonus := game.Modifier(chaScore)
 	if chaBonus < 1 {
 		chaBonus = 1
 	}
@@ -28510,11 +28388,11 @@ func handleGMCounterspell(w http.ResponseWriter, r *http.Request) {
 	if c, ok := srdClasses[classKey]; ok {
 		switch c.Spellcasting {
 		case "INT":
-			spellMod = modifier(intl)
+			spellMod = game.Modifier(intl)
 		case "WIS":
-			spellMod = modifier(wis)
+			spellMod = game.Modifier(wis)
 		case "CHA":
-			spellMod = modifier(cha)
+			spellMod = game.Modifier(cha)
 		}
 	}
 	
@@ -28534,7 +28412,7 @@ func handleGMCounterspell(w http.ResponseWriter, r *http.Request) {
 		success = true
 	} else {
 		// Roll d20 + spellcasting modifier vs DC
-		roll = rollDie(20)
+		roll = game.RollDie(20)
 		totalCheck = roll + spellMod
 		success = totalCheck >= dc
 	}
@@ -28783,11 +28661,11 @@ func handleGMDispelMagic(w http.ResponseWriter, r *http.Request) {
 	if c, ok := srdClasses[classKey]; ok {
 		switch c.Spellcasting {
 		case "INT":
-			spellMod = modifier(intl)
+			spellMod = game.Modifier(intl)
 		case "WIS":
-			spellMod = modifier(wis)
+			spellMod = game.Modifier(wis)
 		case "CHA":
-			spellMod = modifier(cha)
+			spellMod = game.Modifier(cha)
 		}
 	}
 	
@@ -28807,7 +28685,7 @@ func handleGMDispelMagic(w http.ResponseWriter, r *http.Request) {
 		success = true
 	} else {
 		// Roll d20 + spellcasting modifier vs DC
-		roll = rollDie(20)
+		roll = game.RollDie(20)
 		totalCheck = roll + spellMod
 		success = totalCheck >= dc
 	}
@@ -29027,7 +28905,7 @@ func handleGMCuttingWords(w http.ResponseWriter, r *http.Request) {
 	
 	// Roll the Bardic Inspiration die
 	dieSize := getBardicInspirationDie(level)
-	subtraction := rollDie(dieSize)
+	subtraction := game.RollDie(dieSize)
 	
 	// Calculate the reduced roll
 	reducedRoll := req.EnemyRoll - subtraction
@@ -29215,7 +29093,7 @@ func handleGMDarkOnesLuck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the d10 bonus
-	bonus := rollDie(10)
+	bonus := game.RollDie(10)
 	
 	// Calculate the boosted roll
 	boostedRoll := req.OriginalRoll + bonus
@@ -30069,13 +29947,13 @@ func handleGMIntimidatingPresence(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Calculate save DC
-		chaMod := modifier(chaScore)
+		chaMod := game.Modifier(chaScore)
 		profBonus := proficiencyBonus(barbarianLevel)
 		saveDC := 8 + profBonus + chaMod
 		
 		// Target makes WIS save
-		wisMod := modifier(targetWis)
-		_, roll := rollDice(1, 20)
+		wisMod := game.Modifier(targetWis)
+		_, roll := game.RollDice(1, 20)
 		total := roll + wisMod
 		saved := total >= saveDC
 		
@@ -30250,20 +30128,20 @@ func handleGMIntimidatingPresence(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate save DC (8 + proficiency + CHA modifier)
-	chaMod := modifier(chaScore)
+	chaMod := game.Modifier(chaScore)
 	profBonus := proficiencyBonus(barbarianLevel)
 	saveDC := 8 + profBonus + chaMod
 	
 	// Target makes WIS save
-	wisMod := modifier(targetWis)
-	_, roll := rollDice(1, 20)
+	wisMod := game.Modifier(targetWis)
+	_, roll := game.RollDice(1, 20)
 	total := roll + wisMod
 	
 	// Check for save disadvantage (frightened already)
 	hasDisadvantage := false
 	if strings.Contains(targetConditions, "frightened") {
 		hasDisadvantage = true
-		_, roll2 := rollDice(1, 20)
+		_, roll2 := game.RollDice(1, 20)
 		if roll2 < roll {
 			roll = roll2
 		}
@@ -30709,13 +30587,13 @@ func handleGMQuiveringPalm(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate save DC (8 + proficiency + WIS modifier)
-	wisMod := modifier(wisScore)
+	wisMod := game.Modifier(wisScore)
 	profBonus := proficiencyBonus(monkLevel)
 	saveDC := 8 + profBonus + wisMod
 	
 	// Target makes CON save
-	conMod := modifier(targetCon)
-	_, roll := rollDice(1, 20)
+	conMod := game.Modifier(targetCon)
+	_, roll := game.RollDice(1, 20)
 	total := roll + conMod
 	saved := total >= saveDC
 	
@@ -30724,7 +30602,7 @@ func handleGMQuiveringPalm(w http.ResponseWriter, r *http.Request) {
 	
 	if saved {
 		// Target takes 10d10 necrotic damage
-		_, totalDamage := rollDice(10, 10)
+		_, totalDamage := game.RollDice(10, 10)
 		
 		// Apply damage
 		if isMonster {
@@ -32909,7 +32787,7 @@ func applyOpenHandEffect(charID int, effect string, level int) string {
 	// Calculate Ki save DC: 8 + proficiency + WIS modifier
 	var wis int
 	db.QueryRow("SELECT wis FROM characters WHERE id = $1", charID).Scan(&wis)
-	kiSaveDC := 8 + proficiencyBonus(level) + modifier(wis)
+	kiSaveDC := 8 + proficiencyBonus(level) + game.Modifier(wis)
 	
 	switch effect {
 	case "prone":
@@ -32943,7 +32821,7 @@ func applyKillEffects(killerCharID int) map[string]interface{} {
 	if strings.ToLower(class) == "warlock" && strings.ToLower(subclass) == "fiend" {
 		if _, hasDarkOnesBlessing := getSubclassMechanic("fiend", level, "dark_ones_blessing"); hasDarkOnesBlessing {
 			// Calculate temp HP: CHA mod + warlock level (min 1)
-			chaMod := modifier(cha)
+			chaMod := game.Modifier(cha)
 			tempHP := chaMod + level
 			if tempHP < 1 {
 				tempHP = 1
@@ -32987,11 +32865,11 @@ func isKnownCaster(class string) bool {
 func getSpellcastingAbilityMod(class string, intl, wis, cha int) int {
 	switch strings.ToLower(class) {
 	case "wizard":
-		return modifier(intl)
+		return game.Modifier(intl)
 	case "cleric", "druid", "ranger":
-		return modifier(wis)
+		return game.Modifier(wis)
 	case "bard", "paladin", "sorcerer", "warlock":
-		return modifier(cha)
+		return game.Modifier(cha)
 	default:
 		return 0
 	}
@@ -33333,7 +33211,7 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	conMod := modifier(con)
+	conMod := game.Modifier(con)
 	
 	// v0.8.87: Check for Land Druid's Nature's Ward (level 10+) — immune to poison and disease
 	if subclass.Valid && subclass.String == "land" && level >= 10 {
@@ -33373,7 +33251,7 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Roll the CON save
-	saveRoll := rollDie(20)
+	saveRoll := game.RollDie(20)
 	saveTotal := saveRoll + conMod
 	
 	// Check for advantage/disadvantage on saves (some conditions affect this)
@@ -33391,13 +33269,13 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 	
 	// Re-roll if advantage/disadvantage
 	if saveAdvantage && !saveDisadvantage {
-		roll2 := rollDie(20)
+		roll2 := game.RollDie(20)
 		if roll2 > saveRoll {
 			saveRoll = roll2
 		}
 		saveTotal = saveRoll + conMod
 	} else if saveDisadvantage && !saveAdvantage {
-		roll2 := rollDie(20)
+		roll2 := game.RollDie(20)
 		if roll2 < saveRoll {
 			saveRoll = roll2
 		}
@@ -33417,7 +33295,7 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 			numDice, _ := strconv.Atoi(matches[1])
 			dieSize, _ := strconv.Atoi(matches[2])
 			for i := 0; i < numDice; i++ {
-				roll := rollDie(dieSize)
+				roll := game.RollDie(dieSize)
 				damageRolls = append(damageRolls, roll)
 				damageTaken += roll
 			}
@@ -33720,7 +33598,7 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conMod := modifier(con)
+	conMod := game.Modifier(con)
 
 	// v0.8.87: Check for Paladin's Divine Health (level 3+) — immune to disease
 	classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
@@ -33795,7 +33673,7 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 	saveTotal := 0
 	
 	if !req.SkipSave {
-		saveRoll = rollDie(20)
+		saveRoll = game.RollDie(20)
 		saveTotal = saveRoll + conMod
 
 		// Check for advantage/disadvantage on saves
@@ -33811,7 +33689,7 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if saveDisadvantage {
-			roll2 := rollDie(20)
+			roll2 := game.RollDie(20)
 			if roll2 < saveRoll {
 				saveRoll = roll2
 			}
@@ -34102,7 +33980,7 @@ func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
 
 	// Optional WIS save to resist
 	if req.AllowSave {
-		_, saveRoll := rollDice(1, 20)
+		_, saveRoll := game.RollDice(1, 20)
 		saveTotal := saveRoll + wisMod
 		saved := saveTotal >= req.SaveDC
 
@@ -34132,7 +34010,7 @@ func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
 	// Roll d100 (or use specified roll)
 	d100Roll := req.D100Roll
 	if d100Roll < 1 || d100Roll > 100 {
-		_, d100Roll = rollDice(1, 100)
+		_, d100Roll = game.RollDice(1, 100)
 	}
 
 	// Get madness effect
@@ -34143,10 +34021,10 @@ func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
 	var durationStr string
 	switch req.MadnessType {
 	case "short":
-		_, durationRoll = rollDice(1, 10)
+		_, durationRoll = game.RollDice(1, 10)
 		durationStr = fmt.Sprintf("%d minutes", durationRoll)
 	case "long":
-		_, durationRoll = rollDice(1, 10)
+		_, durationRoll = game.RollDice(1, 10)
 		durationRoll = durationRoll * 10
 		durationStr = fmt.Sprintf("%d hours", durationRoll)
 	case "indefinite":
@@ -34330,7 +34208,7 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	conMod := modifier(con)
+	conMod := game.Modifier(con)
 	
 	// Check for resistances/immunities based on hazard type
 	condList := strings.Split(conditionsStr, ",")
@@ -34472,8 +34350,8 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Roll the save (with advantage/disadvantage)
-		roll1 := rollDie(20)
-		roll2 := rollDie(20)
+		roll1 := game.RollDie(20)
+		roll2 := game.RollDie(20)
 		saveRoll := roll1
 		
 		rollNote := ""
@@ -34861,10 +34739,10 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 	profBonus := proficiencyBonus(level)
 	
 	// Calculate ability modifiers
-	strMod := modifier(str)
-	dexMod := modifier(dex)
-	intMod := modifier(int_)
-	wisMod := modifier(wis)
+	strMod := game.Modifier(str)
+	dexMod := game.Modifier(dex)
+	intMod := game.Modifier(int_)
+	wisMod := game.Modifier(wis)
 	
 	// Handle the action
 	switch actionLower {
@@ -34889,7 +34767,7 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 			bonus += profBonus // Double proficiency for expertise
 		}
 		
-		roll := rollDie(20)
+		roll := game.RollDie(20)
 		total := roll + bonus
 		success := total >= trap.DetectDC
 		
@@ -34958,7 +34836,7 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 			bonus += profBonus
 		}
 		
-		roll := rollDie(20)
+		roll := game.RollDie(20)
 		total := roll + bonus
 		success := total >= trap.DisarmDC
 		
@@ -35021,7 +34899,7 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 		case "con":
 			var con int
 			db.QueryRow("SELECT con FROM characters WHERE id = $1", req.CharacterID).Scan(&con)
-			saveMod = modifier(con)
+			saveMod = game.Modifier(con)
 		case "int":
 			saveMod = intMod
 		case "wis":
@@ -35029,14 +34907,14 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 		case "cha":
 			var cha int
 			db.QueryRow("SELECT cha FROM characters WHERE id = $1", req.CharacterID).Scan(&cha)
-			saveMod = modifier(cha)
+			saveMod = game.Modifier(cha)
 		default:
 			saveMod = dexMod
 			saveAbility = "dex"
 		}
 		
 		// Roll saving throw
-		saveRoll := rollDie(20)
+		saveRoll := game.RollDie(20)
 		saveTotal := saveRoll + saveMod
 		saved := saveTotal >= trap.SaveDC
 		
@@ -35044,7 +34922,7 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 		var damageTaken int
 		var damageRoll string
 		if trap.Damage != "" {
-			fullDamage := rollDamage(trap.Damage, false)
+			fullDamage := game.RollDamage(trap.Damage, false)
 			damageTaken = fullDamage
 			damageRoll = fmt.Sprintf("%s = %d", trap.Damage, damageTaken)
 			
@@ -35690,14 +35568,14 @@ func handleRoll(w http.ResponseWriter, r *http.Request) {
 		var result, roll1, roll2 int
 		rollType := "normal"
 		if advantage && !disadvantage {
-			result, roll1, roll2 = rollWithAdvantage()
+			result, roll1, roll2 = game.RollWithAdvantage()
 			rollType = "advantage"
 		} else if disadvantage && !advantage {
-			result, roll1, roll2 = rollWithDisadvantage()
+			result, roll1, roll2 = game.RollWithDisadvantage()
 			rollType = "disadvantage"
 		} else {
 			// Both cancel out
-			result = rollDie(20)
+			result = game.RollDie(20)
 			roll1, roll2 = result, result
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -35706,7 +35584,7 @@ func handleRoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	rolls, total := rollDice(count, sides)
+	rolls, total := game.RollDice(count, sides)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"dice": dice, "rolls": rolls, "total": total,
 	})
@@ -35779,13 +35657,13 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 		rows.Scan(&id, &name, &dex, &initBonus, &class, &level, &cha, &subclass)
 		
 		classLower := strings.ToLower(class)
-		dexMod := modifier(dex)
+		dexMod := game.Modifier(dex)
 		
 		// v0.9.44: Feral Instinct (Barbarian 7+) - advantage on initiative rolls
 		var init int
 		if hasClassFeature(class, level, "feral_instinct") {
-			roll1 := rollDie(20)
-			roll2 := rollDie(20)
+			roll1 := game.RollDie(20)
+			roll2 := game.RollDie(20)
 			higherRoll := roll1
 			if roll2 > roll1 {
 				higherRoll = roll2
@@ -36599,7 +36477,7 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 			if err == nil {
 				// Roll initiative based on monster DEX if not provided
 				if c.Initiative == 0 {
-					entry.Initiative = rollInitiative(modifier(dex), 0)
+					entry.Initiative = rollInitiative(game.Modifier(dex), 0)
 				} else {
 					entry.Initiative = c.Initiative
 				}
@@ -36629,7 +36507,7 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 			} else {
 				// Monster not found, use provided or defaults
 				if c.Initiative == 0 {
-					entry.Initiative = rollDie(20)
+					entry.Initiative = game.RollDie(20)
 				} else {
 					entry.Initiative = c.Initiative
 				}
@@ -36647,7 +36525,7 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 		} else {
 			// No monster key, use provided values or defaults
 			if c.Initiative == 0 {
-				entry.Initiative = rollDie(20)
+				entry.Initiative = game.RollDie(20)
 			} else {
 				entry.Initiative = c.Initiative
 			}
@@ -37507,12 +37385,12 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	// Roll hit dice and heal
 	hitDieSize := getHitDie(class)
-	conMod := modifier(con)
+	conMod := game.Modifier(con)
 	totalHealing := 0
 	rolls := []int{}
 	
 	for i := 0; i < req.HitDice; i++ {
-		roll := rollDie(hitDieSize)
+		roll := game.RollDie(hitDieSize)
 		healing := roll + conMod
 		if healing < 1 {
 			healing = 1 // Minimum 1 HP per die
@@ -37834,7 +37712,7 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 	slots := getSpellSlots(class, level)
 	
 	// Get class resources info (v0.8.69)
-	chaMod := modifier(cha)
+	chaMod := game.Modifier(cha)
 	maxResources := getAllMaxClassResources(class, level, chaMod)
 	
 	response := map[string]interface{}{
@@ -38063,8 +37941,8 @@ func handleCharacterASI(w http.ResponseWriter, r *http.Request, charID int) {
 	if column == "con" {
 		var level, maxHP int
 		db.QueryRow(`SELECT level, max_hp FROM characters WHERE id = $1`, charID).Scan(&level, &maxHP)
-		oldMod := modifier(currentVal)
-		newMod := modifier(newVal)
+		oldMod := game.Modifier(currentVal)
+		newMod := game.Modifier(newVal)
 		if newMod > oldMod {
 			hpIncrease := level * (newMod - oldMod)
 			db.Exec(`UPDATE characters SET max_hp = max_hp + $1, hp = hp + $1 WHERE id = $2`, hpIncrease, charID)
@@ -43814,7 +43692,7 @@ func handleCharacterMulticlass(w http.ResponseWriter, r *http.Request) {
 	// Calculate HP gain (hit die roll average + CON mod, not max like level 1)
 	targetClassInfo := srdClasses[targetClass]
 	hitDie := targetClassInfo.HitDie
-	hpGain := (hitDie / 2) + 1 + modifier(con) // Average roll + 1 (D&D standard) + CON mod
+	hpGain := (hitDie / 2) + 1 + game.Modifier(con) // Average roll + 1 (D&D standard) + CON mod
 	if hpGain < 1 {
 		hpGain = 1 // Minimum 1 HP per level
 	}
@@ -44543,7 +44421,7 @@ func handleCharacterBreathWeapon(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate DC: 8 + CON mod + proficiency bonus
-	conMod := modifier(con)
+	conMod := game.Modifier(con)
 	profBonus := proficiencyBonus(level)
 	dc := 8 + conMod + profBonus
 	
@@ -44562,7 +44440,7 @@ func handleCharacterBreathWeapon(w http.ResponseWriter, r *http.Request) {
 	totalDamage := 0
 	diceRolls := []int{}
 	for i := 0; i < numDice; i++ {
-		roll := rollDie(dieSize)
+		roll := game.RollDie(dieSize)
 		diceRolls = append(diceRolls, roll)
 		totalDamage += roll
 	}
@@ -44604,11 +44482,11 @@ func handleCharacterBreathWeapon(w http.ResponseWriter, r *http.Request) {
 			if savingThrowAbility == "DEX" {
 				var dex int
 				db.QueryRow("SELECT dex FROM characters WHERE id = $1", targetID).Scan(&dex)
-				saveMod = modifier(dex)
+				saveMod = game.Modifier(dex)
 			} else {
-				saveMod = modifier(targetCon)
+				saveMod = game.Modifier(targetCon)
 			}
-			saveRoll := rollDie(20)
+			saveRoll := game.RollDie(20)
 			result.SaveRoll = saveRoll
 			result.SaveTotal = saveRoll + saveMod + proficiencyBonus(targetLevel)
 			result.SaveSuccess = result.SaveTotal >= dc
@@ -44885,7 +44763,7 @@ func handleCharacterInfernalLegacy(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Calculate spell save DC: 8 + prof + CHA mod
-		chaMod := modifier(cha)
+		chaMod := game.Modifier(cha)
 		profBonus := proficiencyBonus(level)
 		spellDC := 8 + profBonus + chaMod
 		
@@ -44893,7 +44771,7 @@ func handleCharacterInfernalLegacy(w http.ResponseWriter, r *http.Request) {
 		damage := 0
 		diceRolls := []int{}
 		for i := 0; i < 3; i++ {
-			roll := rollDie(10)
+			roll := game.RollDie(10)
 			diceRolls = append(diceRolls, roll)
 			damage += roll
 		}
@@ -44943,8 +44821,8 @@ func handleCharacterInfernalLegacy(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// DEX save
-		dexMod := modifier(targetDex)
-		saveRoll := rollDie(20)
+		dexMod := game.Modifier(targetDex)
+		saveRoll := game.RollDie(20)
 		saveTotal := saveRoll + dexMod
 		saveSuccess := saveTotal >= spellDC
 		
