@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.60"
+const version = "0.9.61"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2420,6 +2420,60 @@ func clearMultiattackDefenseHits(characterID int) {
 // Called at turn transitions
 func clearAllMultiattackDefenseHits(campaignID int) {
 	db.Exec(`UPDATE characters SET multiattack_defense_hits = '[]' WHERE lobby_id = $1`, campaignID)
+}
+
+// v0.9.61: Hunter Ranger Level 11 Multiattack features (PHB p93)
+// Choose one: Volley (ranged AoE) or Whirlwind Attack (melee AoE)
+
+// getMultiattackChoice returns the Hunter Ranger's multiattack choice from subclass_choices (v0.9.61)
+// Returns "volley" or "whirlwind_attack" or empty string if not chosen
+func getMultiattackChoice(characterID int) string {
+	var subclassChoicesJSON []byte
+	err := db.QueryRow("SELECT COALESCE(subclass_choices, '{}') FROM characters WHERE id = $1", characterID).Scan(&subclassChoicesJSON)
+	if err != nil {
+		return ""
+	}
+	var choices map[string]string
+	if err := json.Unmarshal(subclassChoicesJSON, &choices); err != nil {
+		return ""
+	}
+	return choices["multiattack"]
+}
+
+// hasVolley returns true if character has chosen Volley for Multiattack (v0.9.61 PHB p93)
+// Volley: Use action to make ranged attack against any number of creatures within 10ft of a point
+func hasVolley(characterID int) bool {
+	var class, subclass string
+	var level int
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), COALESCE(subclass, ''), level 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &subclass, &level)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(class) != "ranger" || strings.ToLower(subclass) != "hunter" || level < 11 {
+		return false
+	}
+	return getMultiattackChoice(characterID) == "volley"
+}
+
+// hasWhirlwindAttack returns true if character has chosen Whirlwind Attack for Multiattack (v0.9.61 PHB p93)
+// Whirlwind Attack: Use action to make melee attack against any number of creatures within 5ft
+func hasWhirlwindAttack(characterID int) bool {
+	var class, subclass string
+	var level int
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), COALESCE(subclass, ''), level 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &subclass, &level)
+	if err != nil {
+		return false
+	}
+	if strings.ToLower(class) != "ranger" || strings.ToLower(subclass) != "hunter" || level < 11 {
+		return false
+	}
+	return getMultiattackChoice(characterID) == "whirlwind_attack"
 }
 
 // getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
@@ -23778,6 +23832,313 @@ func resolveAction(action, description string, charID int) string {
 		return fmt.Sprintf("🏹 Horde Breaker with %s%s: %d to hit%s. Damage: %d (attacking second target within 5ft of original)",
 			hbWeapon.Name, hbProfInfo, hbTotalAttack, hbRollInfo, hbDmg)
 
+	case "volley":
+		// v0.9.61: Hunter Ranger's Volley (PHB p93)
+		// You can use your action to make a ranged attack against any number of creatures within 10 feet
+		// of a point you can see within your weapon's normal range.
+		// You must have ammunition for each target, and you make a separate attack roll for each target.
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "ranger" {
+			return "Only Rangers can use Volley!"
+		}
+		if !subclass.Valid || subclass.String != "hunter" {
+			return "Only Hunter Rangers can use Volley!"
+		}
+		if level < 11 {
+			return "Volley requires level 11+!"
+		}
+		
+		// Check subclass choice
+		if !hasVolley(charID) {
+			choice := getMultiattackChoice(charID)
+			if choice == "" {
+				return "You haven't chosen your Multiattack option yet! Use POST /api/characters/subclass-choice with feature='multiattack' and choice='volley' or 'whirlwind_attack'."
+			}
+			return fmt.Sprintf("You chose %s for your Multiattack feature, not Volley!", choice)
+		}
+		
+		// Mark action as used
+		db.Exec(`UPDATE characters SET action_used = true WHERE id = $1`, charID)
+		
+		// Parse weapon and target count from description
+		// Format: "volley with longbow against 3 targets" or "volley with shortbow at 5 creatures"
+		volleyWeaponKey := parseWeaponFromDescription(description)
+		volleyWeapon, volleyHasWeapon := srdWeapons[volleyWeaponKey]
+		
+		if !volleyHasWeapon {
+			return "Volley requires specifying a ranged weapon (e.g., 'volley with longbow against 3 targets')."
+		}
+		
+		// Validate it's a ranged weapon
+		if volleyWeapon.Type != "ranged" {
+			return fmt.Sprintf("Volley requires a ranged weapon! %s is a %s weapon.", volleyWeapon.Name, volleyWeapon.Type)
+		}
+		
+		// Parse target count from description
+		volleyTargetCount := 1
+		descWords := strings.Fields(strings.ToLower(description))
+		for i, word := range descWords {
+			if word == "against" || word == "at" || word == "targets" || word == "creatures" {
+				if i > 0 {
+					if num, err := strconv.Atoi(descWords[i-1]); err == nil && num > 0 {
+						volleyTargetCount = num
+						break
+					}
+				}
+				if i+1 < len(descWords) {
+					if num, err := strconv.Atoi(descWords[i+1]); err == nil && num > 0 {
+						volleyTargetCount = num
+						break
+					}
+				}
+			}
+		}
+		
+		// Check ammunition if weapon requires it (decrement for each target)
+		if containsProperty(volleyWeapon.Properties, "ammunition") {
+			volleyAmmoType := getAmmoTypeForWeapon(volleyWeaponKey)
+			// Check ammo availability for each target by calling checkAndUseAmmo
+			// First pass: verify we have enough ammo before attacking
+			for i := 0; i < volleyTargetCount; i++ {
+				hasAmmo, ammoErr := checkAndUseAmmo(charID, volleyAmmoType)
+				if !hasAmmo {
+					if i == 0 {
+						return ammoErr
+					}
+					return fmt.Sprintf("Not enough ammunition! Only had enough %s for %d of %d targets.", volleyAmmoType, i, volleyTargetCount)
+				}
+			}
+		}
+		
+		// Determine attack modifier
+		volleyAttackMod := modifier(dex) // Ranged weapons use DEX
+		volleyDamageMod := modifier(dex)
+		
+		// Add proficiency bonus if proficient
+		volleyProficient := isWeaponProficient(weaponProfsStr, volleyWeaponKey)
+		if volleyProficient {
+			volleyAttackMod += proficiencyBonus(level)
+		}
+		
+		// Get condition-based advantage/disadvantage
+		var volleyConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&volleyConds)
+		var volleyConditions []string
+		json.Unmarshal(volleyConds, &volleyConditions)
+		volleyAdvantage, volleyDisadvantage := getAttackModifiers(charID, volleyConditions, true)
+		
+		if requestedAdvantage {
+			volleyAdvantage = true
+		}
+		if requestedDisadvantage {
+			volleyDisadvantage = true
+		}
+		
+		volleyProfInfo := ""
+		if !volleyProficient {
+			volleyProfInfo = " (not proficient)"
+		}
+		
+		// Make separate attack roll for each target
+		var volleyResults []string
+		volleyHits := 0
+		volleyCrits := 0
+		volleyTotalDamage := 0
+		
+		for i := 1; i <= volleyTargetCount; i++ {
+			var vRoll, vRoll1, vRoll2 int
+			vRollType := "normal"
+			if volleyAdvantage && !volleyDisadvantage {
+				vRoll, vRoll1, vRoll2 = rollWithAdvantage()
+				vRollType = "advantage"
+			} else if volleyDisadvantage && !volleyAdvantage {
+				vRoll, vRoll1, vRoll2 = rollWithDisadvantage()
+				vRollType = "disadvantage"
+			} else {
+				vRoll = rollDie(20)
+				vRoll1, vRoll2 = vRoll, 0
+			}
+			
+			vTotal := vRoll + volleyAttackMod
+			vRollInfo := ""
+			if vRollType != "normal" {
+				vRollInfo = fmt.Sprintf(" [%s: %d,%d→%d]", vRollType, vRoll1, vRoll2, vRoll)
+			}
+			
+			if vRoll == 20 {
+				vDmg := rollDamage(volleyWeapon.Damage, true) + volleyDamageMod
+				volleyResults = append(volleyResults, fmt.Sprintf("Target %d: %d (CRIT!)%s → %d dmg", i, vTotal, vRollInfo, vDmg))
+				volleyHits++
+				volleyCrits++
+				volleyTotalDamage += vDmg
+			} else if vRoll == 1 {
+				volleyResults = append(volleyResults, fmt.Sprintf("Target %d: %d (miss)%s", i, vTotal, vRollInfo))
+			} else {
+				vDmg := rollDamage(volleyWeapon.Damage, false) + volleyDamageMod
+				volleyResults = append(volleyResults, fmt.Sprintf("Target %d: %d to hit%s → %d dmg", i, vTotal, vRollInfo, vDmg))
+				volleyHits++
+				volleyTotalDamage += vDmg
+			}
+		}
+		
+		return fmt.Sprintf("🏹 Volley with %s%s against %d targets!\n%s\nSummary: %d hits (%d crits), %d total damage",
+			volleyWeapon.Name, volleyProfInfo, volleyTargetCount, strings.Join(volleyResults, "\n"), volleyHits, volleyCrits, volleyTotalDamage)
+
+	case "whirlwind_attack":
+		// v0.9.61: Hunter Ranger's Whirlwind Attack (PHB p93)
+		// You can use your action to make a melee attack against any number of creatures within 5 feet of you,
+		// with a separate attack roll for each target.
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "ranger" {
+			return "Only Rangers can use Whirlwind Attack!"
+		}
+		if !subclass.Valid || subclass.String != "hunter" {
+			return "Only Hunter Rangers can use Whirlwind Attack!"
+		}
+		if level < 11 {
+			return "Whirlwind Attack requires level 11+!"
+		}
+		
+		// Check subclass choice
+		if !hasWhirlwindAttack(charID) {
+			choice := getMultiattackChoice(charID)
+			if choice == "" {
+				return "You haven't chosen your Multiattack option yet! Use POST /api/characters/subclass-choice with feature='multiattack' and choice='volley' or 'whirlwind_attack'."
+			}
+			return fmt.Sprintf("You chose %s for your Multiattack feature, not Whirlwind Attack!", choice)
+		}
+		
+		// Mark action as used
+		db.Exec(`UPDATE characters SET action_used = true WHERE id = $1`, charID)
+		
+		// Parse weapon and target count from description
+		// Format: "whirlwind_attack with longsword against 4 targets" or "whirlwind with greataxe at 3 enemies"
+		wwWeaponKey := parseWeaponFromDescription(description)
+		wwWeapon, wwHasWeapon := srdWeapons[wwWeaponKey]
+		
+		if !wwHasWeapon {
+			return "Whirlwind Attack requires specifying a melee weapon (e.g., 'whirlwind_attack with longsword against 4 targets')."
+		}
+		
+		// Validate it's a melee weapon
+		if wwWeapon.Type == "ranged" {
+			return fmt.Sprintf("Whirlwind Attack requires a melee weapon! %s is a ranged weapon.", wwWeapon.Name)
+		}
+		
+		// Parse target count from description
+		wwTargetCount := 1
+		wwDescWords := strings.Fields(strings.ToLower(description))
+		for i, word := range wwDescWords {
+			if word == "against" || word == "at" || word == "targets" || word == "creatures" || word == "enemies" {
+				if i > 0 {
+					if num, err := strconv.Atoi(wwDescWords[i-1]); err == nil && num > 0 {
+						wwTargetCount = num
+						break
+					}
+				}
+				if i+1 < len(wwDescWords) {
+					if num, err := strconv.Atoi(wwDescWords[i+1]); err == nil && num > 0 {
+						wwTargetCount = num
+						break
+					}
+				}
+			}
+		}
+		
+		// Determine attack modifier (STR by default for melee, or DEX for finesse)
+		wwAttackMod := modifier(str)
+		wwDamageMod := modifier(str)
+		if containsProperty(wwWeapon.Properties, "finesse") {
+			if modifier(dex) > modifier(str) {
+				wwAttackMod = modifier(dex)
+				wwDamageMod = modifier(dex)
+			}
+		}
+		
+		// Add proficiency bonus if proficient
+		wwProficient := isWeaponProficient(weaponProfsStr, wwWeaponKey)
+		if wwProficient {
+			wwAttackMod += proficiencyBonus(level)
+		}
+		
+		// Get condition-based advantage/disadvantage
+		var wwConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&wwConds)
+		var wwConditions []string
+		json.Unmarshal(wwConds, &wwConditions)
+		wwAdvantage, wwDisadvantage := getAttackModifiers(charID, wwConditions, false)
+		
+		if requestedAdvantage {
+			wwAdvantage = true
+		}
+		if requestedDisadvantage {
+			wwDisadvantage = true
+		}
+		
+		wwProfInfo := ""
+		if !wwProficient {
+			wwProfInfo = " (not proficient)"
+		}
+		
+		// Check for Rage bonus damage (barbarians only - whirlwind is ranger but check anyway)
+		wwRageBonus := 0
+		if hasCondition(charID, "raging") && strings.ToLower(class) == "barbarian" {
+			// Rage damage bonus: +2 at most levels, +3 at 9+, +4 at 16+
+			wwRageBonus = 2
+			if level >= 16 {
+				wwRageBonus = 4
+			} else if level >= 9 {
+				wwRageBonus = 3
+			}
+		}
+		
+		// Make separate attack roll for each target
+		var wwResults []string
+		wwHits := 0
+		wwCrits := 0
+		wwTotalDamage := 0
+		
+		for i := 1; i <= wwTargetCount; i++ {
+			var wRoll, wRoll1, wRoll2 int
+			wRollType := "normal"
+			if wwAdvantage && !wwDisadvantage {
+				wRoll, wRoll1, wRoll2 = rollWithAdvantage()
+				wRollType = "advantage"
+			} else if wwDisadvantage && !wwAdvantage {
+				wRoll, wRoll1, wRoll2 = rollWithDisadvantage()
+				wRollType = "disadvantage"
+			} else {
+				wRoll = rollDie(20)
+				wRoll1, wRoll2 = wRoll, 0
+			}
+			
+			wTotal := wRoll + wwAttackMod
+			wRollInfo := ""
+			if wRollType != "normal" {
+				wRollInfo = fmt.Sprintf(" [%s: %d,%d→%d]", wRollType, wRoll1, wRoll2, wRoll)
+			}
+			
+			if wRoll == 20 {
+				wDmg := rollDamage(wwWeapon.Damage, true) + wwDamageMod + wwRageBonus
+				wwResults = append(wwResults, fmt.Sprintf("Target %d: %d (CRIT!)%s → %d dmg", i, wTotal, wRollInfo, wDmg))
+				wwHits++
+				wwCrits++
+				wwTotalDamage += wDmg
+			} else if wRoll == 1 {
+				wwResults = append(wwResults, fmt.Sprintf("Target %d: %d (miss)%s", i, wTotal, wRollInfo))
+			} else {
+				wDmg := rollDamage(wwWeapon.Damage, false) + wwDamageMod + wwRageBonus
+				wwResults = append(wwResults, fmt.Sprintf("Target %d: %d to hit%s → %d dmg", i, wTotal, wRollInfo, wDmg))
+				wwHits++
+				wwTotalDamage += wDmg
+			}
+		}
+		
+		return fmt.Sprintf("⚔️ Whirlwind Attack with %s%s against %d targets!\n%s\nSummary: %d hits (%d crits), %d total damage",
+			wwWeapon.Name, wwProfInfo, wwTargetCount, strings.Join(wwResults, "\n"), wwHits, wwCrits, wwTotalDamage)
+
 	case "flurry_of_blows":
 		// v0.9.2: Monk's Flurry of Blows
 		// Spend 1 ki point immediately after Attack action to make two unarmed strikes as bonus action
@@ -31423,16 +31784,38 @@ func getClassFeatureMechanic(class string, level int, mechanic string) (string, 
 	return "", false
 }
 
-// hasEvasion checks if a character has the Evasion feature (Monk 7+, Rogue 7+)
+// hasEvasion checks if a character has the Evasion feature (Monk 7+, Rogue 7+, or Hunter Ranger 15+ with evasion choice)
 // v0.9.6: Evasion - on DEX save for half damage: success = no damage, fail = half damage
+// v0.9.61: Also check Hunter Ranger's Superior Hunter's Defense choice
 func hasEvasion(characterID int) bool {
-	var class string
+	var class, subclass string
 	var level int
-	err := db.QueryRow(`SELECT class, level FROM characters WHERE id = $1`, characterID).Scan(&class, &level)
+	var choicesJSON []byte
+	err := db.QueryRow(`
+		SELECT class, level, COALESCE(subclass, ''), COALESCE(subclass_choices, '{}') 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &level, &subclass, &choicesJSON)
 	if err != nil {
 		return false
 	}
-	return hasClassFeature(class, level, "evasion")
+	
+	// Check base class feature (Monk 7+, Rogue 7+)
+	if hasClassFeature(class, level, "evasion") {
+		return true
+	}
+	
+	// Hunter Ranger can choose Evasion at level 15 (Superior Hunter's Defense)
+	classLower := strings.ToLower(class)
+	if classLower == "ranger" && strings.ToLower(subclass) == "hunter" && level >= 15 {
+		var choices map[string]string
+		if err := json.Unmarshal(choicesJSON, &choices); err == nil {
+			if choices["superior_defense"] == "evasion" {
+				return true
+			}
+		}
+	}
+	
+	return false
 }
 
 // hasUncannyDodge checks if a character has the Uncanny Dodge feature

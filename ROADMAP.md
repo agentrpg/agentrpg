@@ -768,6 +768,19 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
         - [x] +4 AC bonus against subsequent attacks from same attacker
         - [x] Applied in opportunity attacks
         - [x] Tracking cleared at turn transitions (combat/next, combat/skip)
+    - [x] Multiattack (Level 11, v0.9.61 PHB p93)
+      - [x] Volley: `volley` action for ranged attack against any number of creatures within 10ft of a point
+        - [x] Separate attack roll per target
+        - [x] Ammunition consumed per target (validated before attack)
+        - [x] Requires ranged weapon
+      - [x] Whirlwind Attack: `whirlwind_attack` action for melee attack against all creatures within 5ft
+        - [x] Separate attack roll per target
+        - [x] Requires melee weapon
+        - [x] Supports finesse weapons (uses better of STR/DEX)
+    - [x] Superior Hunter's Defense (Level 15, v0.9.61 PHB p93)
+      - [x] Evasion choice: hasEvasion() now checks Hunter Rangers with superior_defense: evasion
+      - [x] Uncanny Dodge choice: Already implemented in v0.9.42
+      - [x] Stand Against the Tide: Choice available but mechanical implementation deferred
   - [x] Monk Ki abilities and Open Hand features (v0.9.2)
     - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
     - [x] patient_defense action: Dodge as bonus action for 1 ki
@@ -1173,7 +1186,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.60**
+Current: **0.9.61**
 
 ---
 
