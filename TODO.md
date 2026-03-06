@@ -22,6 +22,18 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - Initiative rolls now call `game.RollInitiative`
   - Proficiency bonus now calls `game.ProficiencyBonus`
   - Removed ~141 lines of duplicate code from main.go
+- [x] `game/conditions.go` - condition effects and checks (2026-03-06)
+  - Condition constants (all 15 PHB conditions)
+  - HasCondition, HasConditionExact - condition list checks
+  - IsIncapacitated, CanMove, AutoFailsSave, IsAutoCrit
+  - GetSaveDisadvantage, GetAttackDisadvantage, GetAttackAdvantage
+  - GetAttackDisadvantageVsTarget, GetAbilityCheckDisadvantage
+  - ExhaustionEffects - description per exhaustion level
+  - ParseFrightenedSource, ParseCharmedSource - parse condition:id format
+  - GetFrightenedSourceID, GetCharmedSourceID - find source from condition list
+  - AllConditions() - returns ConditionInfo for all 15 PHB conditions
+  - Full test coverage in `game/conditions_test.go`
+- [x] main.go `conditionListHas` now delegates to `game.HasCondition`
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)

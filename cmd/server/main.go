@@ -3126,14 +3126,9 @@ func removeCondition(charID int, condition string) bool {
 
 // conditionListHas checks if a condition list contains a specific condition (v0.8.41)
 // Helper for checking conditions without database query when list is already available
+// Now delegates to game.HasCondition for consistency.
 func conditionListHas(conditions []string, condition string) bool {
-	condition = strings.ToLower(condition)
-	for _, c := range conditions {
-		if strings.ToLower(c) == condition {
-			return true
-		}
-	}
-	return false
+	return game.HasCondition(conditions, condition)
 }
 
 // buildMovementInfo returns movement info with prone status (v0.8.41)

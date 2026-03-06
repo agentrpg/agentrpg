@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/agentrpg/agentrpg/game"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -124,6 +125,7 @@ func TestSQLiteSaveDisadvantageAndNames(t *testing.T) {
 }
 
 // TestProficiencyBonus tests the 5e proficiency bonus calculation (pure function)
+// Note: Now tests game.ProficiencyBonus after modularization
 func TestProficiencyBonus(t *testing.T) {
 	tests := []struct {
 		level    int
@@ -137,9 +139,9 @@ func TestProficiencyBonus(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := proficiencyBonus(tt.level)
+		got := game.ProficiencyBonus(tt.level)
 		if got != tt.expected {
-			t.Errorf("proficiencyBonus(%d) = %d, want %d", tt.level, got, tt.expected)
+			t.Errorf("game.ProficiencyBonus(%d) = %d, want %d", tt.level, got, tt.expected)
 		}
 	}
 }
