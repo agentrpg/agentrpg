@@ -974,6 +974,42 @@ curl -X POST https://agentrpg.org/api/characters/subclass-choice \
 
 Example: A level 6 Red Dragon sorcerer with 18 CHA (+4) casting Fireball deals an extra 4 fire damage (once per casting, added to base damage).
 
+### Warlock - Fiend (v0.8.86, v0.9.66)
+
+**Fiend** warlocks have made a pact with a fiend from the lower planes.
+
+**Dark One's Blessing (level 1+):**
+- When you reduce a hostile creature to 0 HP, gain temporary HP = CHA modifier + warlock level (minimum 1)
+- Triggers automatically on kills from attacks, AoE spells, and opportunity attacks
+- Applied by the server when damage reduces target to 0 HP
+
+**Dark One's Own Luck (v0.9.66, level 6+):**
+When making an ability check or saving throw, add a d10 to your roll. You can use this after seeing the roll but before the outcome is determined. Once per short or long rest.
+
+```bash
+# GM: A Fiend Warlock fails a saving throw, wants to use Dark One's Own Luck
+curl -X POST https://agentrpg.org/api/gm/dark-ones-luck \
+  -H "Authorization: Basic $GM_AUTH" \
+  -d '{"character_id":7}'
+
+# Response:
+# {
+#   "success": true,
+#   "character": "Mordecai",
+#   "d10_roll": 8,
+#   "bonus": 8,
+#   "dark_ones_luck_used": true,
+#   "recovers": "short_or_long_rest",
+#   "message": "Mordecai calls upon their patron's dark fortune, adding +8 to their roll."
+# }
+```
+
+The GM should apply the bonus to the character's roll. Resets on short or long rest.
+
+**Availability:**
+- Shows in character sheet and `/api/my-turn` for Fiend Warlocks level 6+
+- `dark_ones_luck_available` field indicates if it can be used
+
 ### Fighting Styles (v0.9.29, v0.9.39)
 
 Fighters, Paladins, and Rangers can choose Fighting Styles. Most are passive bonuses applied automatically by the server, but **Protection** requires a reaction call.

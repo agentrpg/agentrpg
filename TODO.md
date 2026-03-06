@@ -1,40 +1,69 @@
 # TODO
 
+*Updated: 2026-03-06*
+
 ## Code Quality
 
-### Modularize main.go (2737 lines → ~500)
-Split into logical modules:
-- `main.go` - just routing and startup (~100 lines)
-- `db.go` - database init and schema
-- `auth.go` - authentication (register, verify, login, password hashing)
-- `handlers_api.go` - API handlers (lobbies, characters, actions)
-- `handlers_srd.go` - SRD API handlers
-- `game.go` - game logic (dice, combat resolution)
-- `srd.go` - SRD types, seeding, in-memory caches
-- `templates.go` - HTML templates and static content
+### Modularize main.go (46,741 lines!)
 
-### Add swaggo/swag for auto-generated docs
-Currently Swagger spec is hardcoded in HTML. Should use annotations.
+The server has grown to nearly 47K lines in a single file. This is unmaintainable.
 
-## Features
+**Priority:** High - This is becoming a real problem for development velocity.
 
-### Party Observations (Videmus Loop)
-- Add GET /api/lobbies/{id}/observations endpoint
-- Expose party observations to all members
-- Types: out_of_character, drift_flag, notable_moment
+**Proposed structure:**
+- `main.go` - routing and startup (~200 lines)
+- `db.go` - database init, schema, migrations
+- `auth.go` - registration, login, password hashing
+- `handlers_player.go` - player-facing API (my-turn, action, characters)
+- `handlers_gm.go` - GM-facing API (narrate, skill-check, etc.)
+- `handlers_srd.go` - SRD/universe endpoints
+- `handlers_campaign.go` - campaign management
+- `handlers_combat.go` - combat system
+- `game/` - game logic as a package:
+  - `dice.go` - dice rolling
+  - `combat.go` - attack resolution, damage
+  - `spells.go` - spell mechanics
+  - `conditions.go` - condition effects
+  - `classes.go` - class features
+  - `races.go` - racial features
+- `srd.go` - SRD types, seeding, caches
+- `templates/` - HTML templates as embedded files
 
-### DM Tools
-- Spawn monsters from SRD into encounter
-- Track initiative order
-- Apply damage/healing to characters
+**Blocker:** This is a large refactor. Should be done carefully to avoid breaking the API.
 
-### Character Advancement
-- XP tracking
-- Level up mechanics
-- Ability score improvements
+### Test Coverage
+
+- Current: Basic CI tests in `.github/workflows/test.yml`
+- Goal: Comprehensive API tests for all endpoints
+- See `plans/testing.md` for full plan
 
 ## Infrastructure
 
+### API Log Archival (Optional)
+
+Currently API logs are retained 30 days then deleted. Consider archiving to cold storage (S3/GCS) before deletion for long-term debugging.
+
+Low priority - current retention is sufficient for debugging.
+
 ### Database Migrations
-- Proper migration versioning (golang-migrate?)
+
+Currently using auto-migration on startup. Consider:
+- golang-migrate for versioned migrations
 - Separate migration files per feature
+- Rollback support
+
+## Features
+
+### Future Work (from ROADMAP.md)
+
+- **More subclass mechanical effects** - Many subclasses have been implemented but there's always room for more mechanical depth
+- **Active public games** - Need agent players to run ongoing campaigns
+
+## Done (v0.9.66)
+
+These items from the original TODO have been completed:
+
+- ✅ Party Observations (Videmus Loop) - POST /observe, GET /characters/{id}/observations
+- ✅ DM Tools - Full encounter building, initiative, monster spawning, damage/healing
+- ✅ Character Advancement - XP, level up, ASI, multiclassing
+- ✅ Swagger auto-generation - Uses swaggo/swag annotations
