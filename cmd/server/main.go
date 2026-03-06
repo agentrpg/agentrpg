@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.63"
+const version = "0.9.64"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -35243,8 +35243,9 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	// Roll initiative for all characters in the campaign
 	// v0.9.44: Include class info for Feral Instinct, Superior Inspiration, Perfect Self
+	// v0.9.64: Include subclass for Thief's Reflexes
 	rows, err := db.Query(`
-		SELECT c.id, c.name, c.dex, COALESCE(c.initiative_bonus, 0), c.class, c.level, c.cha
+		SELECT c.id, c.name, c.dex, COALESCE(c.initiative_bonus, 0), c.class, c.level, c.cha, c.subclass
 		FROM characters c WHERE c.lobby_id = $1
 	`, campaignID)
 	if err != nil {
@@ -35254,19 +35255,27 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	defer rows.Close()
 	
 	type InitEntry struct {
-		ID         int    `json:"id"`
-		Name       string `json:"name"`
-		Initiative int    `json:"initiative"`
-		DexScore   int    `json:"dex_score"`
+		ID                   int    `json:"id"`
+		Name                 string `json:"name"`
+		Initiative           int    `json:"initiative"`
+		DexScore             int    `json:"dex_score"`
+		IsThiefsReflexesTurn bool   `json:"is_thiefs_reflexes_turn,omitempty"` // v0.9.64: Thief's Reflexes extra turn
 	}
 	
 	entries := []InitEntry{}
 	capstoneNotes := []string{}
+	thiefsReflexesCandidates := []struct {
+		ID         int
+		Name       string
+		Initiative int
+		DexScore   int
+	}{}
 	
 	for rows.Next() {
 		var id, dex, initBonus, level, cha int
 		var name, class string
-		rows.Scan(&id, &name, &dex, &initBonus, &class, &level, &cha)
+		var subclass sql.NullString
+		rows.Scan(&id, &name, &dex, &initBonus, &class, &level, &cha, &subclass)
 		
 		classLower := strings.ToLower(class)
 		dexMod := modifier(dex)
@@ -35329,6 +35338,30 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 		}
 		
 		entries = append(entries, InitEntry{ID: id, Name: name, Initiative: init, DexScore: dex})
+		
+		// v0.9.64: Track Thief Rogues level 17+ for Thief's Reflexes (second turn in first round)
+		if classLower == "rogue" && level >= 17 && subclass.Valid && strings.ToLower(subclass.String) == "thief" {
+			thiefsReflexesCandidates = append(thiefsReflexesCandidates, struct {
+				ID         int
+				Name       string
+				Initiative int
+				DexScore   int
+			}{ID: id, Name: name, Initiative: init, DexScore: dex})
+		}
+	}
+	
+	// v0.9.64: Thief's Reflexes (PHB p97) - Thief Rogues level 17+ get a second turn
+	// at their initiative minus 10 during the first round of combat
+	for _, thief := range thiefsReflexesCandidates {
+		extraInit := thief.Initiative - 10
+		entries = append(entries, InitEntry{
+			ID:                   thief.ID,
+			Name:                 thief.Name + " (2nd turn)",
+			Initiative:           extraInit,
+			DexScore:             thief.DexScore,
+			IsThiefsReflexesTurn: true,
+		})
+		capstoneNotes = append(capstoneNotes, fmt.Sprintf("🗡️ %s: Thief's Reflexes grants a second turn at initiative %d (normal: %d)", thief.Name, extraInit, thief.Initiative))
 	}
 	
 	// Sort by initiative (highest first), then by DEX (highest first)
@@ -35462,6 +35495,7 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 		LegendaryResUsed        int    `json:"legendary_resistances_used"`
 		LegendaryActionsTotal   int    `json:"legendary_actions_total"`
 		LegendaryActionsUsed    int    `json:"legendary_actions_used"`
+		IsThiefsReflexesTurn    bool   `json:"is_thiefs_reflexes_turn,omitempty"` // v0.9.64
 	}
 	var entries []InitEntry
 	json.Unmarshal(turnOrderJSON, &entries)
@@ -35493,10 +35527,29 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	if turnIndex >= len(entries) {
 		turnIndex = 0
 		round++
+		
+		// v0.9.64: Remove Thief's Reflexes extra turns when advancing to round 2
+		// PHB p97: "You can take two turns during the first round of any combat"
+		if round == 2 {
+			originalLen := len(entries)
+			filteredEntries := []InitEntry{}
+			for _, e := range entries {
+				if !e.IsThiefsReflexesTurn {
+					filteredEntries = append(filteredEntries, e)
+				}
+			}
+			if len(filteredEntries) < originalLen {
+				entries = filteredEntries
+				// turnIndex is already 0, which is correct for round 2
+			}
+		}
 	}
 	
 	// Reset legendary actions if the new turn is a monster with legendary actions (v0.8.30)
-	needsUpdate := false
+	// v0.9.64: Also track if turn order changed due to Thief's Reflexes removal
+	var originalEntries []InitEntry
+	json.Unmarshal(turnOrderJSON, &originalEntries)
+	needsUpdate := len(entries) != len(originalEntries) // True if Thief's Reflexes entries were removed
 	newEntry := &entries[turnIndex]
 	if newEntry.IsMonster && newEntry.LegendaryActionsTotal > 0 {
 		newEntry.LegendaryActionsUsed = 0

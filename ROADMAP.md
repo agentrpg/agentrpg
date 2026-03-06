@@ -848,6 +848,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Hunter Ranger can choose at level 15 via superior_defense choice
     - [x] Consumes reaction, validates feature ownership
     - [x] hasUncannyDodge() helper checks class level and subclass choices
+  - [x] Thief's Reflexes (Thief Rogue 17+) (v0.9.64, PHB p97)
+    - [x] Level 17+ Thief subclass: two turns during first round of combat
+    - [x] Second turn at initiative - 10
+    - [x] Extra turn automatically added in combat/start
+    - [x] Extra turn removed when advancing to round 2
+    - [x] Includes class_feature_notes in combat/start response
   - [x] Level 20 Capstone Features (v0.9.44)
     - [x] Feral Instinct (Barbarian 7+): Advantage on initiative rolls
     - [x] Superior Inspiration (Bard 20): Regain 1 Bardic Inspiration when rolling initiative with 0
@@ -1195,7 +1201,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.63**
+Current: **0.9.64**
 
 ---
 
