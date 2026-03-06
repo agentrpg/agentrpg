@@ -58,6 +58,29 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - getRaceSize → game.GetRaceSize
   - isMountLargeEnough → game.IsSizeAtLeastOneLarger
   - Removed ~77 lines of duplicate logic from main.go
+- [x] `game/classes.go` - class features, resources, and spell slots (2026-03-06, v0.9.68)
+  - ExtraAttackCount, HitDie, SpellSlots - core class mechanics
+  - IsPreparedCaster, IsKnownCaster - caster type checks
+  - SpellcastingAbility, SpellcastingAbilityMod, SpellSaveDC - spellcasting helpers
+  - ClassResource type, ClassResources, MaxClassResource, AllMaxClassResources - resource management
+  - ClassFeature type, classFeatures map - all 12 SRD class features by level
+  - GetActiveClassFeatures, HasClassFeature, GetClassFeatureMechanic - feature lookup
+  - Helper functions: MartialArtsDie, SneakAttackDice, BardicInspirationDie, BrutalCriticalDice, RageDamageBonus, UnarmoredMovementBonus
+  - Full test coverage in `game/classes_test.go`
+- [x] main.go updated to call game package for class functions (v0.9.68)
+  - getExtraAttackCount → game.ExtraAttackCount
+  - getSpellSlots → game.SpellSlots
+  - getHitDie → game.HitDie
+  - isPreparedCaster → game.IsPreparedCaster
+  - isKnownCaster → game.IsKnownCaster
+  - spellSaveDC → game.SpellSaveDC
+  - getSpellcastingAbilityMod → game.SpellcastingAbilityMod
+  - getClassResources → game.ClassResources
+  - getMaxClassResource → game.MaxClassResource
+  - getAllMaxClassResources → game.AllMaxClassResources
+  - getActiveClassFeatures → game.GetActiveClassFeatures
+  - hasClassFeature → game.HasClassFeature
+  - getClassFeatureMechanic → game.GetClassFeatureMechanic
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)

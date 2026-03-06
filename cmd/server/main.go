@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.67"
+const version = "0.9.68"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2605,8 +2605,8 @@ func getMaxClassResource(class string, level int, resourceKey string, chaMod int
 func getAllMaxClassResources(class string, level int, chaMod int) map[string]int {
 	resources := make(map[string]int)
 	
-	for _, res := range getClassResources(class) {
-		max := getMaxClassResource(class, level, res.Key, chaMod)
+	for _, res := range game.ClassResources(class) {
+		max := game.MaxClassResource(class, level, res.Key, chaMod)
 		if max > 0 {
 			resources[res.Key] = max
 		}
@@ -2633,7 +2633,7 @@ func getCurrentClassResources(charID int) map[string]int {
 	json.Unmarshal(usedJSON, &used)
 	
 	chaMod := game.Modifier(cha)
-	maxResources := getAllMaxClassResources(class, level, chaMod)
+	maxResources := game.AllMaxClassResources(class, level, chaMod)
 	
 	current := make(map[string]int)
 	for key, max := range maxResources {
@@ -2664,7 +2664,7 @@ func useClassResource(charID int, resourceKey string, amount int) (bool, string,
 	json.Unmarshal(usedJSON, &used)
 	
 	chaMod := game.Modifier(cha)
-	max := getMaxClassResource(class, level, resourceKey, chaMod)
+	max := game.MaxClassResource(class, level, resourceKey, chaMod)
 	
 	if max == 0 {
 		return false, fmt.Sprintf("Class %s does not have resource '%s'", class, resourceKey), 0
@@ -2701,7 +2701,7 @@ func recoverClassResources(charID int, isLongRest bool) map[string]int {
 	json.Unmarshal(usedJSON, &used)
 	
 	recovered := make(map[string]int)
-	resources := getClassResources(class)
+	resources := game.ClassResources(class)
 	
 	for _, res := range resources {
 		// Check if this resource recovers on this type of rest
@@ -3119,7 +3119,7 @@ func buildActionEconomy(class string, level int, actionUsed, bonusActionUsed, re
 	}
 	
 	// Extra Attack info (v0.8.68)
-	totalAttacks := getExtraAttackCount(class, level)
+	totalAttacks := game.ExtraAttackCount(class, level)
 	if totalAttacks > 1 {
 		result["extra_attack"] = true
 		result["total_attacks_per_action"] = totalAttacks
@@ -8158,7 +8158,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get total spell slots for class/level
-	totalSlots := getSpellSlots(class, level)
+	totalSlots := game.SpellSlots(class, level)
 	
 	// Calculate remaining slots
 	remainingSlots := map[string]int{}
@@ -8214,7 +8214,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	
 	// Build class features info (v0.8.70)
 	classFeaturesList := []map[string]interface{}{}
-	activeClassFeats := getActiveClassFeatures(class, level)
+	activeClassFeats := game.GetActiveClassFeatures(class, level)
 	for _, f := range activeClassFeats {
 		classFeaturesList = append(classFeaturesList, map[string]interface{}{
 			"name":        f.Name,
@@ -8315,7 +8315,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		"inventory":           inventory,
 		"pending_asi":         pendingASI,
 		"hit_dice": map[string]interface{}{
-			"die_type":   fmt.Sprintf("d%d", getHitDie(class)),
+			"die_type":   fmt.Sprintf("d%d", game.HitDie(class)),
 			"total":      level,
 			"available":  level - hitDiceSpent,
 			"spent":      hitDiceSpent,
@@ -8516,7 +8516,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			"total":     totalSlots,
 			"remaining": remainingSlots,
 		}
-		response["spell_save_dc"] = spellSaveDC(level, spellMod)
+		response["spell_save_dc"] = game.SpellSaveDC(level, spellMod)
 		response["spell_attack_bonus"] = spellMod + game.ProficiencyBonus(level)
 		response["spellcasting_ability"] = spellAbility
 	}
@@ -8524,7 +8524,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	// v0.9.20: Pact Magic slots for multiclass Warlocks
 	// Pact slots are tracked separately and recover on short rest
 	if isMulticlass && warlockLevel > 0 {
-		pactSlots := getSpellSlots("warlock", warlockLevel)
+		pactSlots := game.SpellSlots("warlock", warlockLevel)
 		pactRemainingSlots := map[string]int{}
 		for lvl, total := range pactSlots {
 			key := fmt.Sprintf("%d", lvl)
@@ -8586,7 +8586,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Prepared Spells (v0.8.73) - for prepared casters (Cleric, Druid, Paladin, Wizard)
-	if isPreparedCaster(class) {
+	if game.IsPreparedCaster(class) {
 		var preparedSpells []string
 		json.Unmarshal(preparedSpellsJSON, &preparedSpells)
 		
@@ -8614,7 +8614,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["slots_remaining"] = maxPrepared - len(preparedSpells)
 		response["caster_type"] = "prepared"
 		response["prepared_spells_tip"] = fmt.Sprintf("Use POST /api/characters/%d/prepare to change prepared spells after a long rest.", charID)
-	} else if isKnownCaster(class) {
+	} else if game.IsKnownCaster(class) {
 		response["caster_type"] = "known"
 	}
 	
@@ -8665,13 +8665,13 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	
 	// Class Resources (v0.8.69 - Ki, Rage, Sorcery Points, etc.)
 	chaMod := game.Modifier(cha)
-	maxResources := getAllMaxClassResources(class, level, chaMod)
+	maxResources := game.AllMaxClassResources(class, level, chaMod)
 	if len(maxResources) > 0 {
 		// Get current resource usage
 		currentResources := getCurrentClassResources(charID)
 		
 		resourceList := []map[string]interface{}{}
-		for _, res := range getClassResources(class) {
+		for _, res := range game.ClassResources(class) {
 			if max, ok := maxResources[res.Key]; ok && max > 0 {
 				current := currentResources[res.Key]
 				resourceList = append(resourceList, map[string]interface{}{
@@ -9120,7 +9120,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		case "CHA":
 			spellMod = game.Modifier(cha)
 		}
-		saveDC := spellSaveDC(level, spellMod)
+		saveDC := game.SpellSaveDC(level, spellMod)
 		rulesReminder["spellcasting"] = fmt.Sprintf("Your spellcasting ability is %s. Spell save DC: %d. Spell attack bonus: +%d.", c.Spellcasting, saveDC, spellMod+game.ProficiencyBonus(level))
 	}
 	
@@ -9131,7 +9131,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	// Parse spell slots
 	var slotsUsed map[string]int
 	json.Unmarshal(slotsUsedJSON, &slotsUsed)
-	totalSlots := getSpellSlots(class, level)
+	totalSlots := game.SpellSlots(class, level)
 	
 	// Check combat state for initiative-based turn tracking
 	isMyTurn := true
@@ -9223,7 +9223,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	
 	// Build class features for my-turn (v0.8.70)
 	myTurnClassFeatures := []map[string]interface{}{}
-	for _, f := range getActiveClassFeatures(class, level) {
+	for _, f := range game.GetActiveClassFeatures(class, level) {
 		myTurnClassFeatures = append(myTurnClassFeatures, map[string]interface{}{
 			"name":        f.Name,
 			"description": f.Description,
@@ -9281,11 +9281,11 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	
 	// Add class resources (v0.8.69 - Ki, Rage, Sorcery Points, etc.)
 	myTurnChaMod := game.Modifier(cha)
-	maxResources := getAllMaxClassResources(class, level, myTurnChaMod)
+	maxResources := game.AllMaxClassResources(class, level, myTurnChaMod)
 	if len(maxResources) > 0 {
 		currentResources := getCurrentClassResources(charID)
 		resourceList := []map[string]interface{}{}
-		for _, res := range getClassResources(class) {
+		for _, res := range game.ClassResources(class) {
 			if max, ok := maxResources[res.Key]; ok && max > 0 {
 				current := currentResources[res.Key]
 				resourceList = append(resourceList, map[string]interface{}{
@@ -9498,7 +9498,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Add prepared spells for prepared casters (v0.8.73)
-	if isPreparedCaster(class) {
+	if game.IsPreparedCaster(class) {
 		var preparedSpellsJSON []byte
 		var myTurnIntl, myTurnWis, myTurnCha int
 		db.QueryRow("SELECT COALESCE(prepared_spells, '[]'), intl, wis, cha FROM characters WHERE id = $1", charID).Scan(&preparedSpellsJSON, &myTurnIntl, &myTurnWis, &myTurnCha)
@@ -9524,7 +9524,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		characterInfo["max_prepared"] = maxPrepared
 		characterInfo["caster_type"] = "prepared"
 		characterInfo["prepared_tip"] = "Use POST /api/characters/{id}/prepare to change prepared spells after a long rest."
-	} else if isKnownCaster(class) {
+	} else if game.IsKnownCaster(class) {
 		characterInfo["caster_type"] = "known"
 	}
 	
@@ -12211,7 +12211,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	// Add half proficiency bonus (rounded down) to ability checks not already using proficiency
 	// Does not stack with Remarkable Athlete - RA is better for physical checks (rounds up)
 	jackOfAllTradesBonus := 0
-	if !isProficient && remarkableAthleteBonus == 0 && hasClassFeature(class, level, "jack_of_all_trades") {
+	if !isProficient && remarkableAthleteBonus == 0 && game.HasClassFeature(class, level, "jack_of_all_trades") {
 		// Half proficiency bonus, rounded down
 		jackOfAllTradesBonus = game.ProficiencyBonus(level) / 2
 		totalMod += jackOfAllTradesBonus
@@ -12323,7 +12323,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	// Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
 	reliableTalentApplied := false
 	originalRoll := finalRoll
-	if isProficient && hasClassFeature(class, level, "reliable_talent") && finalRoll <= 9 {
+	if isProficient && game.HasClassFeature(class, level, "reliable_talent") && finalRoll <= 9 {
 		finalRoll = 10
 		reliableTalentApplied = true
 	}
@@ -12714,7 +12714,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	// Add half proficiency bonus (rounded down) to ability checks not already using proficiency
 	// Does not stack with Remarkable Athlete - RA is better for physical checks (rounds up)
 	toolJackOfAllTradesBonus := 0
-	if !isProficient && toolRemarkableAthleteBonus == 0 && hasClassFeature(toolClass, level, "jack_of_all_trades") {
+	if !isProficient && toolRemarkableAthleteBonus == 0 && game.HasClassFeature(toolClass, level, "jack_of_all_trades") {
 		// Half proficiency bonus, rounded down
 		toolJackOfAllTradesBonus = game.ProficiencyBonus(level) / 2
 		totalMod += toolJackOfAllTradesBonus
@@ -12811,7 +12811,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	// Treat d20 rolls of 9 or lower as 10 on ability checks with proficiency
 	toolReliableTalentApplied := false
 	toolOriginalRoll := finalRoll
-	if isProficient && hasClassFeature(toolClass, level, "reliable_talent") && finalRoll <= 9 {
+	if isProficient && game.HasClassFeature(toolClass, level, "reliable_talent") && finalRoll <= 9 {
 		finalRoll = 10
 		toolReliableTalentApplied = true
 	}
@@ -17353,7 +17353,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		db.QueryRow(`SELECT name, class, level FROM characters WHERE id = $1`, req.CasterID).Scan(&casterName, &class, &level)
 		
 		// Use spell slot if not ritual
-		slots := getSpellSlots(class, level)
+		slots := game.SpellSlots(class, level)
 		slotLevel := spellLevel
 		if req.SlotLevel > spellLevel {
 			slotLevel = req.SlotLevel // Upcasting
@@ -17401,7 +17401,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 					spellMod = game.Modifier(cha)
 				}
 			}
-			dc = spellSaveDC(level, spellMod)
+			dc = game.SpellSaveDC(level, spellMod)
 		}
 	}
 	
@@ -21619,7 +21619,7 @@ func consumeAttackAction(charID int) {
 	
 	if !attacksRemaining.Valid {
 		// Starting a new Attack action - initialize attacks based on Extra Attack
-		totalAttacks := getExtraAttackCount(class, level)
+		totalAttacks := game.ExtraAttackCount(class, level)
 		if totalAttacks <= 1 {
 			// No Extra Attack, just mark action as used
 			db.Exec("UPDATE characters SET action_used = true, attacks_remaining = 0 WHERE id = $1", charID)
@@ -21879,7 +21879,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Extra Attack info (v0.8.68)
-		totalAttacks := getExtraAttackCount(charClass, charLevel)
+		totalAttacks := game.ExtraAttackCount(charClass, charLevel)
 		if totalAttacks > 1 {
 			resources["extra_attack"] = true
 			resources["total_attacks_per_action"] = totalAttacks
@@ -22770,7 +22770,7 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Calculate spell save DC
-		saveDC := spellSaveDC(level, spellMod)
+		saveDC := game.SpellSaveDC(level, spellMod)
 		
 		if hasSpell {
 			// Check spell components (V, S, M) - v0.8.17, v0.9.13: added somatic enforcement
@@ -22934,7 +22934,7 @@ func resolveAction(action, description string, charID int) string {
 				
 				// For multiclass Warlocks, handle pact slots separately
 				if isMulticlass && warlockLvl > 0 && usePactSlot {
-					pactSlots := getSpellSlots("warlock", warlockLvl)
+					pactSlots := game.SpellSlots("warlock", warlockLvl)
 					// Warlock slots are all at same level - find the level
 					pactSlotLevel := 0
 					pactSlotCount := 0
@@ -22966,7 +22966,7 @@ func resolveAction(action, description string, charID int) string {
 					slotLevel = pactSlotLevel // Pact slots are always at their level
 				} else {
 					// Use regular spell slots
-					slots := getSpellSlots(class, level)
+					slots := game.SpellSlots(class, level)
 					totalSlots, hasSlot := slots[slotLevel]
 					if !hasSlot || totalSlots == 0 {
 						return fmt.Sprintf("Cannot cast %s - you don't have level %d spell slots!", spell.Name, slotLevel)
@@ -24797,7 +24797,7 @@ func resolveAction(action, description string, charID int) string {
 		var resourcesUsed map[string]int
 		json.Unmarshal(resourcesUsedJSON, &resourcesUsed)
 		
-		maxUses := getMaxClassResource(class, level, "second_wind", 0)
+		maxUses := game.MaxClassResource(class, level, "second_wind", 0)
 		currentUsed := resourcesUsed["second_wind"]
 		
 		if currentUsed >= maxUses {
@@ -24849,7 +24849,7 @@ func resolveAction(action, description string, charID int) string {
 		var resourcesUsed map[string]int
 		json.Unmarshal(resourcesUsedJSON, &resourcesUsed)
 		
-		maxUses := getMaxClassResource(class, level, "action_surge", 0)
+		maxUses := game.MaxClassResource(class, level, "action_surge", 0)
 		currentUsed := resourcesUsed["action_surge"]
 		
 		if currentUsed >= maxUses {
@@ -24892,7 +24892,7 @@ func resolveAction(action, description string, charID int) string {
 		var resourcesUsed map[string]int
 		json.Unmarshal(resourcesUsedJSON, &resourcesUsed)
 		
-		maxPool := getMaxClassResource(class, level, "lay_on_hands", 0)
+		maxPool := game.MaxClassResource(class, level, "lay_on_hands", 0)
 		currentUsed := resourcesUsed["lay_on_hands"]
 		remainingPool := maxPool - currentUsed
 		
@@ -26394,7 +26394,7 @@ func canUseDivineSmite(charID int, slotLevel int) (bool, string) {
 	}
 	
 	// Check available spell slots
-	slots := getSpellSlots(class, level)
+	slots := game.SpellSlots(class, level)
 	maxSlots := slots[slotLevel]
 	if maxSlots == 0 {
 		return false, fmt.Sprintf("No %s level spell slots available for Divine Smite", ordinal(slotLevel))
@@ -27166,7 +27166,7 @@ func handleGMTurnUndead(w http.ResponseWriter, r *http.Request) {
 	
 	// Calculate spell save DC (8 + proficiency + WIS mod)
 	wisMod := game.Modifier(wisScore)
-	saveDC := spellSaveDC(casterLevel, wisMod)
+	saveDC := game.SpellSaveDC(casterLevel, wisMod)
 	
 	// Determine Destroy Undead CR threshold based on level
 	destroyUndeadCR := 0.0
@@ -27528,7 +27528,7 @@ func handleGMTurnUnholy(w http.ResponseWriter, r *http.Request) {
 	
 	// Calculate spell save DC (8 + proficiency + CHA mod) - Paladin uses CHA
 	chaMod := game.Modifier(chaScore)
-	saveDC := spellSaveDC(casterLevel, chaMod)
+	saveDC := game.SpellSaveDC(casterLevel, chaMod)
 	
 	// Process each target
 	results := []map[string]interface{}{}
@@ -28277,7 +28277,7 @@ func handleGMCounterspell(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Check if character has the spell slot
-	slots := getSpellSlots(class, level)
+	slots := game.SpellSlots(class, level)
 	totalSlots, hasSlot := slots[req.SlotLevel]
 	if !hasSlot || totalSlots == 0 {
 		w.WriteHeader(http.StatusBadRequest)
@@ -28550,7 +28550,7 @@ func handleGMDispelMagic(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Check if caster has the spell slot
-	slots := getSpellSlots(class, level)
+	slots := game.SpellSlots(class, level)
 	totalSlots, hasSlot := slots[req.SlotLevel]
 	if !hasSlot || totalSlots == 0 {
 		w.WriteHeader(http.StatusBadRequest)
@@ -32371,7 +32371,7 @@ func getActiveClassFeatures(class string, level int) []ClassFeature {
 
 // hasClassFeature checks if a character has a specific class mechanic
 func hasClassFeature(class string, level int, mechanic string) bool {
-	features := getActiveClassFeatures(class, level)
+	features := game.GetActiveClassFeatures(class, level)
 	for _, f := range features {
 		if _, ok := f.Mechanics[mechanic]; ok {
 			return true
@@ -32382,7 +32382,7 @@ func hasClassFeature(class string, level int, mechanic string) bool {
 
 // getClassFeatureMechanic returns the value of a specific class mechanic if present
 func getClassFeatureMechanic(class string, level int, mechanic string) (string, bool) {
-	features := getActiveClassFeatures(class, level)
+	features := game.GetActiveClassFeatures(class, level)
 	for i := len(features) - 1; i >= 0; i-- { // Iterate backwards to get highest level version
 		if val, ok := features[i].Mechanics[mechanic]; ok {
 			return val, true
@@ -32407,7 +32407,7 @@ func hasEvasion(characterID int) bool {
 	}
 	
 	// Check base class feature (Monk 7+, Rogue 7+)
-	if hasClassFeature(class, level, "evasion") {
+	if game.HasClassFeature(class, level, "evasion") {
 		return true
 	}
 	
@@ -32802,11 +32802,11 @@ func getSpellcastingAbilityMod(class string, intl, wis, cha int) int {
 // Formula: level + spellcasting modifier (minimum 1)
 // Paladins and Rangers use half level (rounded down, minimum 1) + modifier
 func getMaxPreparedSpells(class string, level, intl, wis, cha int) int {
-	if !isPreparedCaster(class) {
+	if !game.IsPreparedCaster(class) {
 		return 0
 	}
 	
-	mod := getSpellcastingAbilityMod(class, intl, wis, cha)
+	mod := game.SpellcastingAbilityMod(class, intl, wis, cha)
 	classLower := strings.ToLower(class)
 	
 	var preparedCount int
@@ -35584,7 +35584,7 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 		
 		// v0.9.44: Feral Instinct (Barbarian 7+) - advantage on initiative rolls
 		var init int
-		if hasClassFeature(class, level, "feral_instinct") {
+		if game.HasClassFeature(class, level, "feral_instinct") {
 			roll1 := game.RollDie(20)
 			roll2 := game.RollDie(20)
 			higherRoll := roll1
@@ -37288,7 +37288,7 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 			"success":             true,
 			"hit_dice_available":  hitDiceAvailable,
 			"hit_dice_total":      level,
-			"hit_die_type":        fmt.Sprintf("d%d", getHitDie(class)),
+			"hit_die_type":        fmt.Sprintf("d%d", game.HitDie(class)),
 			"hp":                  hp,
 			"max_hp":              maxHP,
 			"message":             "Short rest - no hit dice spent. Specify hit_dice to heal.",
@@ -37307,7 +37307,7 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	}
 	
 	// Roll hit dice and heal
-	hitDieSize := getHitDie(class)
+	hitDieSize := game.HitDie(class)
 	conMod := game.Modifier(con)
 	totalHealing := 0
 	rolls := []int{}
@@ -37425,7 +37425,7 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		used := make(map[string]int)
 		json.Unmarshal(usedJSON, &used)
 		
-		totalSlots := getSpellSlots(class, level)
+		totalSlots := game.SpellSlots(class, level)
 		
 		// Count how many slots of each level we're recovering
 		slotsToRecover := make(map[int]int)
@@ -37632,11 +37632,11 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 	var hp, maxHP, cha int
 	db.QueryRow("SELECT hp, max_hp, cha FROM characters WHERE id = $1", charID).Scan(&hp, &maxHP, &cha)
 	
-	slots := getSpellSlots(class, level)
+	slots := game.SpellSlots(class, level)
 	
 	// Get class resources info (v0.8.69)
 	chaMod := game.Modifier(cha)
-	maxResources := getAllMaxClassResources(class, level, chaMod)
+	maxResources := game.AllMaxClassResources(class, level, chaMod)
 	
 	response := map[string]interface{}{
 		"success":              true,
@@ -37646,7 +37646,7 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 		"hit_dice_recovered":   actualRecovered,
 		"hit_dice_available":   level - newHitDiceSpent,
 		"hit_dice_total":       level,
-		"hit_die_type":         fmt.Sprintf("d%d", getHitDie(class)),
+		"hit_die_type":         fmt.Sprintf("d%d", game.HitDie(class)),
 		"message":              "Long rest complete. HP and spell slots restored.",
 	}
 	
@@ -38490,9 +38490,9 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	}
 	
 	// Check if this class is a prepared caster
-	if !isPreparedCaster(className) {
+	if !game.IsPreparedCaster(className) {
 		// Known casters (Bard, Ranger, Sorcerer, Warlock) use /api/characters/{id}/spells instead
-		if isKnownCaster(className) {
+		if game.IsKnownCaster(className) {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"error": "not_prepared_caster",
 				"message": fmt.Sprintf("%ss are known-spell casters. Use PUT /api/characters/%d/spells to update your known spells.", className, charID),
@@ -38630,7 +38630,7 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 			
 			// Check spell level isn't too high for this character's slots
 			spell := srdSpellsMemory[validSlug]
-			slots := getSpellSlots(className, level)
+			slots := game.SpellSlots(className, level)
 			if spell.Level > 0 {
 				if _, hasSlot := slots[spell.Level]; !hasSlot {
 					json.NewEncoder(w).Encode(map[string]interface{}{
@@ -38798,7 +38798,7 @@ func handleUseResource(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	// Find display name for the resource
 	resourceName := req.Resource
-	for _, res := range getClassResources(class) {
+	for _, res := range game.ClassResources(class) {
 		if res.Key == req.Resource {
 			resourceName = res.Name
 			break
@@ -43272,7 +43272,7 @@ func handleFlexibleCasting(w http.ResponseWriter, r *http.Request) {
 	maxPoints := level // Sorcery points = sorcerer level
 	
 	// Get spell slots for this level
-	spellSlots := getSpellSlots(class, level)
+	spellSlots := game.SpellSlots(class, level)
 	slotKey := fmt.Sprintf("%d", req.SlotLevel)
 	totalSlots := spellSlots[req.SlotLevel]
 	usedSlots := slotsUsed[slotKey]
@@ -43797,7 +43797,7 @@ func getMulticlassSpellSlots(classLevels map[string]int) map[int]int {
 	// Single class - use standard calculation
 	if len(classLevels) == 1 {
 		for class, level := range classLevels {
-			return getSpellSlots(class, level)
+			return game.SpellSlots(class, level)
 		}
 	}
 	
@@ -43835,12 +43835,12 @@ func getMulticlassSpellSlots(classLevels map[string]int) map[int]int {
 	// Use the full caster table for combined level
 	result := map[int]int{}
 	if combinedLevel > 0 {
-		result = getSpellSlots("wizard", combinedLevel) // Use wizard table for combined slots
+		result = game.SpellSlots("wizard", combinedLevel) // Use wizard table for combined slots
 	}
 	
 	// Warlock pact magic is separate - add those slots
 	if warlockLevel > 0 {
-		warlockSlots := getSpellSlots("warlock", warlockLevel)
+		warlockSlots := game.SpellSlots("warlock", warlockLevel)
 		for slotLevel, count := range warlockSlots {
 			result[slotLevel] += count
 		}
