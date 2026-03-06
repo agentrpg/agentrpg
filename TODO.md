@@ -19,7 +19,9 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
 - [x] main.go migrated to use `game` package (2026-03-06)
   - All dice functions now call `game.RollDie`, `game.RollDice`, etc.
   - All modifier calculations now call `game.Modifier`
-  - Removed ~120 lines of duplicate code from main.go
+  - Initiative rolls now call `game.RollInitiative`
+  - Proficiency bonus now calls `game.ProficiencyBonus`
+  - Removed ~141 lines of duplicate code from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
