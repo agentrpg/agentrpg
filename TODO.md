@@ -34,6 +34,30 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - AllConditions() - returns ConditionInfo for all 15 PHB conditions
   - Full test coverage in `game/conditions_test.go`
 - [x] main.go `conditionListHas` now delegates to `game.HasCondition`
+- [x] `game/races.go` - racial traits and features (2026-03-06, v0.9.67)
+  - Race type checks: IsHuman, IsElf, IsDwarf, IsHalfling, IsGnome, IsHalfOrc, IsTiefling, IsDragonborn
+  - Trait checks: HasFeyAncestry, HasGnomeCunning, HasDwarvenResilience, HasHalflingLucky, HasHalflingBrave, etc.
+  - Save advantage helpers: CheckHalflingBrave, CheckFeyAncestryCharm, CheckDwarvenResiliencePoison, CheckGnomeCunningMagic
+  - Size and speed: GetRaceSize, GetDefaultSpeed, SizeOrder, IsSizeAtLeastOneLarger
+  - Keyword checks: CheckFrightenKeywords, CheckCharmKeywords, CheckPoisonKeywords
+  - Halfling Lucky: ApplyHalflingLucky
+  - Dragonborn: BreathWeaponDamage, DragonAncestries map, GetDragonAncestry
+  - Full test coverage in `game/races_test.go`
+- [x] main.go race functions now delegate to `game` package (v0.9.67)
+  - isHalfling → game.IsHalfling
+  - isHalfOrc → game.IsHalfOrc
+  - isGnome → game.IsGnome
+  - isElf → game.IsElf
+  - isDwarf → game.IsDwarf
+  - isTiefling → game.IsTiefling
+  - checkHalflingBrave → game.CheckHalflingBrave
+  - checkFeyAncestryCharm → game.CheckFeyAncestryCharm
+  - checkDwarvenResilience → game.CheckDwarvenResiliencePoison
+  - checkGnomeCunning → game.CheckGnomeCunningMagic
+  - applyHalflingLucky → game.ApplyHalflingLucky
+  - getRaceSize → game.GetRaceSize
+  - isMountLargeEnough → game.IsSizeAtLeastOneLarger
+  - Removed ~77 lines of duplicate logic from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)

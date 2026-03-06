@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.66
+// @version 0.9.67
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.66"
+const version = "0.9.67"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2003,8 +2003,7 @@ func isHalfling(characterID int) bool {
 	if err != nil {
 		return false
 	}
-	raceLower := strings.ToLower(race)
-	return strings.Contains(raceLower, "halfling")
+	return game.IsHalfling(race)
 }
 
 // applyHalflingLucky implements the Halfling Lucky racial trait (PHB p28):
@@ -2012,28 +2011,18 @@ func isHalfling(characterID int) bool {
 // you can reroll the die and must use the new roll.
 // Returns: (finalRoll, wasRerolled, originalRoll)
 func applyHalflingLucky(roll int, characterID int) (int, bool, int) {
-	if roll == 1 && isHalfling(characterID) {
-		newRoll := game.RollDie(20)
-		return newRoll, true, roll
-	}
-	return roll, false, roll
+	return game.ApplyHalflingLucky(roll, isHalfling(characterID))
 }
 
 // checkHalflingBrave returns true if Halfling Brave grants advantage on this save (v0.9.53 PHB p28)
 // Brave: You have advantage on saving throws against being frightened.
 func checkHalflingBrave(characterID int, description string) bool {
-	if !isHalfling(characterID) {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
 		return false
 	}
-	// Check if the save is against frightened effects
-	descLower := strings.ToLower(description)
-	frightenedKeywords := []string{"frighten", "frightened", "frightening", "fear", "feared", "fearful", "terrify", "terrified", "terror", "scare", "scared", "dread", "panic"}
-	for _, keyword := range frightenedKeywords {
-		if strings.Contains(descLower, keyword) {
-			return true
-		}
-	}
-	return false
+	return game.CheckHalflingBrave(race, description)
 }
 
 // isHalfOrc checks if a character is a half-orc (v0.9.48 - Relentless Endurance)
@@ -2043,8 +2032,7 @@ func isHalfOrc(characterID int) bool {
 	if err != nil {
 		return false
 	}
-	raceLower := strings.ToLower(race)
-	return strings.Contains(raceLower, "half-orc") || strings.Contains(raceLower, "halforc") || strings.Contains(raceLower, "half_orc")
+	return game.IsHalfOrc(race)
 }
 
 // hasSavageAttacks returns true if the character has the Half-Orc Savage Attacks racial trait (v0.9.52 PHB p41)
@@ -2061,26 +2049,18 @@ func isGnome(characterID int) bool {
 	if err != nil {
 		return false
 	}
-	raceLower := strings.ToLower(race)
-	return strings.Contains(raceLower, "gnome")
+	return game.IsGnome(race)
 }
 
 // checkGnomeCunning returns true if Gnome Cunning grants advantage on this save (v0.9.49 PHB p37)
 // Gnome Cunning: Advantage on INT, WIS, and CHA saving throws against magic.
 func checkGnomeCunning(characterID int, abilityShort string, fromMagic bool) bool {
-	if !fromMagic {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
 		return false
 	}
-	if !isGnome(characterID) {
-		return false
-	}
-	// Only applies to INT, WIS, CHA saves
-	switch abilityShort {
-	case "int", "wis", "cha":
-		return true
-	default:
-		return false
-	}
+	return game.CheckGnomeCunningMagic(race, abilityShort, fromMagic)
 }
 
 // isElf checks if a character is an elf or half-elf (v0.9.50 - Fey Ancestry)
@@ -2090,9 +2070,7 @@ func isElf(characterID int) bool {
 	if err != nil {
 		return false
 	}
-	raceLower := strings.ToLower(race)
-	// Match: elf, high_elf, high-elf, wood_elf, drow, dark_elf, half_elf, half-elf
-	return strings.Contains(raceLower, "elf")
+	return game.IsElf(race)
 }
 
 // hasFeyAncestry checks if a character has the Fey Ancestry trait (v0.9.50)
@@ -2104,18 +2082,12 @@ func hasFeyAncestry(characterID int) bool {
 // checkFeyAncestryCharm returns true if Fey Ancestry grants advantage on this charm save (v0.9.50 PHB p23)
 // Fey Ancestry: Advantage on saving throws against being charmed. Magic can't put you to sleep.
 func checkFeyAncestryCharm(characterID int, description string) bool {
-	if !hasFeyAncestry(characterID) {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
 		return false
 	}
-	// Check if the save is against charm effects
-	descLower := strings.ToLower(description)
-	charmKeywords := []string{"charm", "charmed", "charming", "dominate", "suggestion", "command", "compulsion", "enthrall"}
-	for _, keyword := range charmKeywords {
-		if strings.Contains(descLower, keyword) {
-			return true
-		}
-	}
-	return false
+	return game.CheckFeyAncestryCharm(race, description)
 }
 
 // isImmuneToMagicalSleep returns true if character has Fey Ancestry (immune to magical sleep, v0.9.50 PHB p23)
@@ -2165,26 +2137,18 @@ func isDwarf(characterID int) bool {
 	if err != nil {
 		return false
 	}
-	raceLower := strings.ToLower(race)
-	// Match: dwarf, hill_dwarf, hill-dwarf, mountain_dwarf, mountain-dwarf
-	return strings.Contains(raceLower, "dwarf")
+	return game.IsDwarf(race)
 }
 
 // checkDwarvenResilience returns true if Dwarven Resilience grants advantage on this save (v0.9.51 PHB p20)
 // Dwarven Resilience: Advantage on saving throws against poison, and resistance against poison damage.
 func checkDwarvenResilience(characterID int, description string) bool {
-	if !isDwarf(characterID) {
+	var race string
+	err := db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", characterID).Scan(&race)
+	if err != nil {
 		return false
 	}
-	// Check if the save is against poison effects
-	descLower := strings.ToLower(description)
-	poisonKeywords := []string{"poison", "poisoned", "poisoning", "toxic", "venom", "venomous"}
-	for _, keyword := range poisonKeywords {
-		if strings.Contains(descLower, keyword) {
-			return true
-		}
-	}
-	return false
+	return game.CheckDwarvenResiliencePoison(race, description)
 }
 
 // hasDwarvenPoisonResistance returns true if character has Dwarven Resilience (poison damage resistance, v0.9.51 PHB p20)
@@ -2199,7 +2163,7 @@ func isTiefling(characterID int) bool {
 	if err != nil {
 		return false
 	}
-	return strings.ToLower(race) == "tiefling"
+	return game.IsTiefling(race)
 }
 
 // hasTieflingHellishResistance returns true if character has Hellish Resistance (fire damage resistance, v0.9.54 PHB p43)
@@ -21003,29 +20967,12 @@ func handleCharacterDismount(w http.ResponseWriter, r *http.Request) {
 
 // getRaceSize returns the size category for a race
 func getRaceSize(race string) string {
-	race = strings.ToLower(race)
-	switch {
-	case strings.Contains(race, "halfling"), strings.Contains(race, "gnome"):
-		return "Small"
-	case strings.Contains(race, "goliath"):
-		return "Medium" // Goliaths are Medium (but count as Large for carrying)
-	default:
-		return "Medium"
-	}
+	return game.GetRaceSize(race)
 }
 
 // isMountLargeEnough checks if the mount is at least one size larger than the rider
 func isMountLargeEnough(mountSize, riderSize string) bool {
-	sizeOrder := map[string]int{
-		"Tiny": 1, "Small": 2, "Medium": 3, "Large": 4, "Huge": 5, "Gargantuan": 6,
-	}
-	mountOrder, ok1 := sizeOrder[mountSize]
-	riderOrder, ok2 := sizeOrder[riderSize]
-	if !ok1 || !ok2 {
-		// Default to allowing it if size is unknown
-		return true
-	}
-	return mountOrder > riderOrder
+	return game.IsSizeAtLeastOneLarger(mountSize, riderSize)
 }
 
 // handleCampaignMessages godoc
