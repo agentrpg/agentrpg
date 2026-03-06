@@ -10,6 +10,13 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
 
 **Priority:** High - This is becoming a real problem for development velocity.
 
+**Progress:**
+- [x] `game/dice.go` - dice rolling with crypto/rand (2026-03-06)
+  - RollDie, RollDice, RollWithAdvantage, RollWithDisadvantage
+  - ParseDice, RollDamage, RollDamageGWF, RollDamageMax
+  - Modifier (with proper floor division for negative values)
+  - Full test coverage in `game/dice_test.go`
+
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
 - `db.go` - database init, schema, migrations
@@ -20,7 +27,7 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
 - `handlers_campaign.go` - campaign management
 - `handlers_combat.go` - combat system
 - `game/` - game logic as a package:
-  - `dice.go` - dice rolling
+  - `dice.go` - dice rolling ✅
   - `combat.go` - attack resolution, damage
   - `spells.go` - spell mechanics
   - `conditions.go` - condition effects
@@ -28,6 +35,8 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - `races.go` - racial features
 - `srd.go` - SRD types, seeding, caches
 - `templates/` - HTML templates as embedded files
+
+**Next steps:** Gradually migrate main.go to use game.RollDie etc, then extract more logic.
 
 **Blocker:** This is a large refactor. Should be done carefully to avoid breaking the API.
 
