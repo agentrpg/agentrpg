@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.65
+// @version 0.9.66
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.65"
+const version = "0.9.66"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -454,6 +454,7 @@ func main() {
 	http.HandleFunc("/api/gm/sacred-weapon", handleGMSacredWeapon)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
+	http.HandleFunc("/api/gm/dark-ones-luck", handleGMDarkOnesLuck)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
 	http.HandleFunc("/api/gm/facing", handleGMFacing)
@@ -1039,6 +1040,10 @@ func initDB() {
 		-- When an attacker hits, they're added to this list; subsequent attacks from them face +4 AC
 		-- Reset at the start of each combat turn
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS multiattack_defense_hits JSONB DEFAULT '[]';
+		
+		-- Fiend Warlock: Dark One's Own Luck (v0.9.66)
+		-- Add d10 to ability check or saving throw once per short/long rest (PHB p109)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS dark_ones_luck_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -8963,6 +8968,25 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["hellish_resistance_tip"] = "🔥 Your Tiefling heritage grants fire resistance (half damage) and Infernal Legacy spells!"
 	}
 	
+	// v0.9.66: Fiend Warlock - Dark One's Own Luck (level 6+)
+	if strings.ToLower(class) == "warlock" && level >= 6 {
+		if subclassRaw.Valid && strings.ToLower(subclassRaw.String) == "fiend" {
+			var darkOnesLuckUsed bool
+			db.QueryRow("SELECT COALESCE(dark_ones_luck_used, false) FROM characters WHERE id = $1", charID).Scan(&darkOnesLuckUsed)
+			
+			response["dark_ones_luck"] = map[string]interface{}{
+				"available":        !darkOnesLuckUsed,
+				"used_since_rest":  darkOnesLuckUsed,
+				"recovery":         "short or long rest",
+				"trigger":          "When you make an ability check or saving throw",
+				"effect":           "Add d10 to the roll (after rolling, before determining success)",
+				"how_to_use":       "Ask GM to call POST /api/gm/dark-ones-luck after you see a roll result",
+				"phb_reference":    "PHB p109 - Fiend Patron",
+				"tip":              "🔥 Your patron's dark luck can boost your ability checks and saving throws - call upon it when you need it most!",
+			}
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -10135,6 +10159,30 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				
 				response["stand_against_the_tide"] = standAgainstInfo
 			}
+		}
+	}
+	
+	// v0.9.66: Fiend Warlock - Dark One's Own Luck (level 6+)
+	if strings.ToLower(class) == "warlock" && level >= 6 {
+		if charSubclass.Valid && strings.ToLower(charSubclass.String) == "fiend" {
+			var darkOnesLuckUsed bool
+			db.QueryRow("SELECT COALESCE(dark_ones_luck_used, false) FROM characters WHERE id = $1", charID).Scan(&darkOnesLuckUsed)
+			
+			darkOnesLuckInfo := map[string]interface{}{
+				"available":        !darkOnesLuckUsed,
+				"used_since_rest":  darkOnesLuckUsed,
+				"recovery":         "short or long rest",
+				"trigger":          "When you make an ability check or saving throw",
+				"effect":           "Add d10 to the roll (after rolling, before determining success)",
+				"how_to_use":       "Ask GM to call POST /api/gm/dark-ones-luck after you see a roll result",
+				"phb_reference":    "PHB p109 - Fiend Patron",
+			}
+			
+			if !darkOnesLuckUsed {
+				darkOnesLuckInfo["tip"] = "🔥 Dark One's Own Luck ready! When you fail an ability check or saving throw, you can add d10 to the roll!"
+			}
+			
+			response["dark_ones_luck"] = darkOnesLuckInfo
 		}
 	}
 	
@@ -29024,6 +29072,192 @@ func handleGMCuttingWords(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGMDarkOnesLuck godoc
+// @Summary Fiend Warlock uses Dark One's Own Luck to boost a roll (v0.9.66)
+// @Description Dark One's Own Luck (Fiend Patron, level 6+, PHB p109): When a Fiend Warlock makes an ability check or saving throw, they can add a d10 to the roll. The GM calls this after seeing the roll but before the outcome is determined. Can be used once per short or long rest.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,original_roll=integer,roll_type=string} true "Dark One's Own Luck: character_id (Fiend Warlock using the feature), original_roll (the roll to boost), roll_type (ability/saving)"
+// @Success 200 {object} map[string]interface{} "Dark One's Own Luck result with boosted roll"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not Fiend Warlock level 6+"
+// @Failure 400 {object} map[string]interface{} "Invalid request or feature already used"
+// @Router /gm/dark-ones-luck [post]
+func handleGMDarkOnesLuck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID  int    `json:"character_id"`
+		OriginalRoll int    `json:"original_roll"`
+		RollType     string `json:"roll_type"` // "ability" or "saving"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	validRollTypes := map[string]bool{"ability": true, "saving": true}
+	if req.RollType == "" {
+		req.RollType = "ability" // Default
+	}
+	if !validRollTypes[req.RollType] {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "roll_type must be 'ability' or 'saving'",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var level int
+	var subclass sql.NullString
+	var featureUsed bool
+	err = db.QueryRow(`
+		SELECT name, class, level, subclass, COALESCE(dark_ones_luck_used, false)
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &class, &level, &subclass, &featureUsed)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify character is a Warlock with Fiend patron
+	if strings.ToLower(class) != "warlock" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_warlock",
+			"message": fmt.Sprintf("%s is a %s, not a Warlock. Only Warlocks can use Dark One's Own Luck.", charName, class),
+		})
+		return
+	}
+	
+	if !subclass.Valid || strings.ToLower(subclass.String) != "fiend" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_fiend_warlock",
+			"message": fmt.Sprintf("%s is not a Fiend patron warlock. Dark One's Own Luck is a Fiend-specific feature.", charName),
+		})
+		return
+	}
+	
+	// Check that character has the dark_ones_luck feature (level 6+)
+	if level < 6 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "feature_not_available",
+			"message": fmt.Sprintf("%s hasn't unlocked Dark One's Own Luck yet (requires Fiend Warlock level 6+, currently level %d)", charName, level),
+		})
+		return
+	}
+	
+	// Check if feature has already been used
+	if featureUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "feature_already_used",
+			"message": fmt.Sprintf("%s has already used Dark One's Own Luck since their last short or long rest", charName),
+			"note":    "This feature refreshes on a short or long rest",
+		})
+		return
+	}
+	
+	// Roll the d10 bonus
+	bonus := rollDie(10)
+	
+	// Calculate the boosted roll
+	boostedRoll := req.OriginalRoll + bonus
+	
+	// Mark the feature as used
+	db.Exec("UPDATE characters SET dark_ones_luck_used = true WHERE id = $1", req.CharacterID)
+	
+	// Build descriptive message based on roll type
+	var rollTypeDesc string
+	switch req.RollType {
+	case "ability":
+		rollTypeDesc = "ability check"
+	case "saving":
+		rollTypeDesc = "saving throw"
+	}
+	
+	response := map[string]interface{}{
+		"success":       true,
+		"character":     charName,
+		"character_id":  req.CharacterID,
+		"feature":       "Dark One's Own Luck",
+		"roll_type":     req.RollType,
+		"original_roll": req.OriginalRoll,
+		"bonus_die":     "d10",
+		"bonus":         bonus,
+		"boosted_roll":  boostedRoll,
+		"message": fmt.Sprintf("🔥 %s calls upon Dark One's Own Luck! Rolling d10... +%d! The %s is boosted from %d to %d.",
+			charName, bonus, rollTypeDesc, req.OriginalRoll, boostedRoll),
+		"note": "This feature is now expended until a short or long rest",
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("%s uses Dark One's Own Luck to boost %s", charName, rollTypeDesc)
+	actionResult := fmt.Sprintf("d10 = +%d. Roll boosted from %d to %d", bonus, req.OriginalRoll, boostedRoll)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "dark_ones_luck", actionDesc, actionResult)
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleGMFlanking godoc
 // @Summary Grant flanking advantage (optional rule)
 // @Description Flanking (optional rule from DMG): When you and an ally are on opposite sides of an enemy, you both have advantage on melee attacks against that enemy. The GM calls this when positioning allows flanking. Adds a "flanking:TARGET_ID" condition to the character that grants advantage on melee attacks against that specific target. Condition clears at end of the character's next turn.
@@ -37452,6 +37686,18 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		breathWeaponReset = false
 	}
 	
+	// v0.9.66: Reset Fiend Warlock's Dark One's Own Luck on short rest
+	var darkOnesLuckReset bool
+	var charClass, charSubclass string
+	var charLevel int
+	db.QueryRow("SELECT class, COALESCE(subclass, ''), level, COALESCE(dark_ones_luck_used, false) FROM characters WHERE id = $1", charID).Scan(&charClass, &charSubclass, &charLevel, &darkOnesLuckReset)
+	if strings.ToLower(charClass) == "warlock" && charSubclass == "fiend" && charLevel >= 6 && darkOnesLuckReset {
+		db.Exec("UPDATE characters SET dark_ones_luck_used = false WHERE id = $1", charID)
+		darkOnesLuckReset = true
+	} else {
+		darkOnesLuckReset = false
+	}
+	
 	response := map[string]interface{}{
 		"success":             true,
 		"hit_dice_spent":      req.HitDice,
@@ -37483,6 +37729,11 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	// v0.9.46: Show breath weapon recovery
 	if breathWeaponReset {
 		response["breath_weapon_recovered"] = true
+	}
+	
+	// v0.9.66: Show Dark One's Own Luck recovery
+	if darkOnesLuckReset {
+		response["dark_ones_luck_recovered"] = true
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -37571,7 +37822,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			relentless_endurance_used = false,
 			hellish_rebuke_used = false,
 			darkness_racial_used = false,
-			wholeness_of_body_used = false
+			wholeness_of_body_used = false,
+			dark_ones_luck_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
