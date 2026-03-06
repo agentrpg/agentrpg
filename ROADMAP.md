@@ -763,7 +763,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Defensive Tactics (Level 7, v0.9.58 PHB p93)
       - [x] Escape the Horde: Opportunity attacks against you are made with disadvantage
       - [x] Steel Will: Advantage on saving throws against being frightened
-      - [x] Multiattack Defense: Helper function ready (full combat tracking not yet implemented)
+      - [x] Multiattack Defense (v0.9.60): Full implementation with combat tracking
+        - [x] Tracks which attackers have hit defender this turn (multiattack_defense_hits column)
+        - [x] +4 AC bonus against subsequent attacks from same attacker
+        - [x] Applied in opportunity attacks
+        - [x] Tracking cleared at turn transitions (combat/next, combat/skip)
   - [x] Monk Ki abilities and Open Hand features (v0.9.2)
     - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
     - [x] patient_defense action: Dodge as bonus action for 1 ki
@@ -1169,7 +1173,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.59**
+Current: **0.9.60**
 
 ---
 

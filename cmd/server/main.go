@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.59"
+const version = "0.9.60"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1031,6 +1031,12 @@ func initDB() {
 		-- Way of the Open Hand Monk: Wholeness of Body (v0.9.59)
 		-- Use action to heal for 3 × monk level HP, once per long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wholeness_of_body_used BOOLEAN DEFAULT FALSE;
+		
+		-- Hunter Ranger: Multiattack Defense (v0.9.60)
+		-- Tracks which attackers have hit this character this turn
+		-- When an attacker hits, they're added to this list; subsequent attacks from them face +4 AC
+		-- Reset at the start of each combat turn
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS multiattack_defense_hits JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2337,7 +2343,6 @@ func checkSteelWill(characterID int, description string) bool {
 
 // hasMultiattackDefense returns true if character has Multiattack Defense (v0.9.58 PHB p93)
 // Multiattack Defense: When a creature hits you with an attack, you gain +4 AC vs subsequent attacks from that creature for the rest of the turn.
-// NOTE: Full implementation requires combat state tracking; this helper just checks eligibility.
 func hasMultiattackDefense(characterID int) bool {
 	var class, subclass string
 	var level int
@@ -2352,6 +2357,69 @@ func hasMultiattackDefense(characterID int) bool {
 		return false
 	}
 	return getDefensiveTacticsChoice(characterID) == "multiattack_defense"
+}
+
+// getMultiattackDefenseHits returns the list of attacker IDs that have hit this character this turn (v0.9.60)
+func getMultiattackDefenseHits(characterID int) []int {
+	var hitsJSON []byte
+	err := db.QueryRow(`SELECT COALESCE(multiattack_defense_hits, '[]') FROM characters WHERE id = $1`, characterID).Scan(&hitsJSON)
+	if err != nil {
+		return []int{}
+	}
+	var hits []int
+	json.Unmarshal(hitsJSON, &hits)
+	return hits
+}
+
+// recordMultiattackDefenseHit adds an attacker to the defender's hit list (v0.9.60)
+// Only records if defender has Multiattack Defense chosen
+func recordMultiattackDefenseHit(defenderID, attackerID int) {
+	if !hasMultiattackDefense(defenderID) {
+		return
+	}
+	
+	hits := getMultiattackDefenseHits(defenderID)
+	
+	// Check if already recorded
+	for _, id := range hits {
+		if id == attackerID {
+			return
+		}
+	}
+	
+	// Add attacker to list
+	hits = append(hits, attackerID)
+	hitsJSON, _ := json.Marshal(hits)
+	db.Exec(`UPDATE characters SET multiattack_defense_hits = $1 WHERE id = $2`, hitsJSON, defenderID)
+}
+
+// getMultiattackDefenseACBonus returns +4 AC if attacker has already hit this defender this turn (v0.9.60)
+// Per PHB p93: "When a creature hits you with an attack, you gain a +4 bonus to AC against 
+// all subsequent attacks made by that creature for the rest of the turn."
+func getMultiattackDefenseACBonus(defenderID, attackerID int) int {
+	if !hasMultiattackDefense(defenderID) {
+		return 0
+	}
+	
+	hits := getMultiattackDefenseHits(defenderID)
+	for _, id := range hits {
+		if id == attackerID {
+			return 4
+		}
+	}
+	return 0
+}
+
+// clearMultiattackDefenseHits resets the hit tracking for a character (v0.9.60)
+// Called at the start of each combat turn
+func clearMultiattackDefenseHits(characterID int) {
+	db.Exec(`UPDATE characters SET multiattack_defense_hits = '[]' WHERE id = $1`, characterID)
+}
+
+// clearAllMultiattackDefenseHits resets hit tracking for all characters in a campaign (v0.9.60)
+// Called at turn transitions
+func clearAllMultiattackDefenseHits(campaignID int) {
+	db.Exec(`UPDATE characters SET multiattack_defense_hits = '[]' WHERE lobby_id = $1`, campaignID)
 }
 
 // getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
@@ -15668,6 +15736,18 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// v0.9.60: Multiattack Defense AC bonus (PHB p93)
+	// If target has Multiattack Defense and attacker has already hit them this turn, +4 AC
+	multiattackDefenseBonus := 0
+	multiattackDefenseNote := ""
+	if !req.AttackerIsMonster && req.AttackerID > 0 {
+		multiattackDefenseBonus = getMultiattackDefenseACBonus(req.TargetID, req.AttackerID)
+		if multiattackDefenseBonus > 0 {
+			targetAC += multiattackDefenseBonus
+			multiattackDefenseNote = fmt.Sprintf(" 🛡️[Multiattack Defense +%d AC]", multiattackDefenseBonus)
+		}
+	}
+	
 	var attackerName string
 	var attackMod, damageMod int
 	var damageDice string
@@ -15869,8 +15949,8 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	
 	if attackRoll == 1 && !oaHalflingLuckyUsed {
 		// Critical miss (only if not saved by Halfling Lucky)
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d (nat 1 - Critical Miss!)", 
-			attackerName, targetName, escapeNote, luckyNote, totalAttack)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s%s Attack roll: %d (nat 1 - Critical Miss!)", 
+			attackerName, targetName, escapeNote, luckyNote, multiattackDefenseNote, totalAttack)
 		hit = false
 	} else if attackRoll == 20 {
 		// Critical hit - double damage dice
@@ -15891,22 +15971,32 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s with %s", 
-			attackerName, targetName, escapeNote, luckyNote, totalAttack, damage, savageAttacksNote, weaponName)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s%s Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d%s with %s", 
+			attackerName, targetName, escapeNote, luckyNote, multiattackDefenseNote, totalAttack, damage, savageAttacksNote, weaponName)
 		hit = true
+		
+		// v0.9.60: Record hit for Multiattack Defense tracking
+		if !req.AttackerIsMonster && req.AttackerID > 0 {
+			recordMultiattackDefenseHit(req.TargetID, req.AttackerID)
+		}
 	} else if totalAttack >= targetAC {
 		// Normal hit
 		damage = rollDamage(damageDice, false) + damageMod
 		if damage < 1 {
 			damage = 1
 		}
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
-			attackerName, targetName, escapeNote, luckyNote, totalAttack, targetAC, damage, weaponName)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s%s Attack roll: %d vs AC %d - HIT! Damage: %d with %s", 
+			attackerName, targetName, escapeNote, luckyNote, multiattackDefenseNote, totalAttack, targetAC, damage, weaponName)
 		hit = true
+		
+		// v0.9.60: Record hit for Multiattack Defense tracking
+		if !req.AttackerIsMonster && req.AttackerID > 0 {
+			recordMultiattackDefenseHit(req.TargetID, req.AttackerID)
+		}
 	} else {
 		// Miss
-		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s Attack roll: %d vs AC %d - MISS!", 
-			attackerName, targetName, escapeNote, luckyNote, totalAttack, targetAC)
+		resultText = fmt.Sprintf("⚔️ OPPORTUNITY ATTACK: %s attacks %s as they flee!%s%s%s Attack roll: %d vs AC %d - MISS!", 
+			attackerName, targetName, escapeNote, luckyNote, multiattackDefenseNote, totalAttack, targetAC)
 		hit = false
 	}
 	
@@ -15975,6 +16065,14 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	if hit {
 		response["damage"] = damage
 		response["weapon"] = weaponName
+	}
+	
+	// v0.9.60: Include Multiattack Defense info if it was active
+	if multiattackDefenseBonus > 0 {
+		response["multiattack_defense"] = map[string]interface{}{
+			"active":   true,
+			"ac_bonus": multiattackDefenseBonus,
+		}
 	}
 	
 	if !req.AttackerIsMonster {
@@ -34739,6 +34837,10 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 		`, speed, newActiveID)
 	}
 	
+	// v0.9.60: Clear Multiattack Defense tracking for all characters when turn advances
+	// PHB p93: "...for the rest of the turn" - resets when the attacker's turn ends
+	clearAllMultiattackDefenseHits(campaignID)
+	
 	response := map[string]interface{}{
 		"success":            true,
 		"round":              round,
@@ -34886,6 +34988,9 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 		    movement_remaining = $1, reaction_used = false
 		WHERE id = $2
 	`, speed, newActiveID)
+	
+	// v0.9.60: Clear Multiattack Defense tracking when turn is skipped
+	clearAllMultiattackDefenseHits(campaignID)
 	
 	response := map[string]interface{}{
 		"success":            true,
