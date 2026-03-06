@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.62
+// @version 0.9.63
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.62"
+const version = "0.9.63"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -418,6 +418,7 @@ func main() {
 	http.HandleFunc("/api/gm/opportunity-attack", handleGMOpportunityAttack)
 	http.HandleFunc("/api/gm/giant-killer", handleGMGiantKiller)
 	http.HandleFunc("/api/gm/retaliation", handleGMRetaliation)
+	http.HandleFunc("/api/gm/stand-against-the-tide", handleGMStandAgainstTheTide)
 	http.HandleFunc("/api/gm/protection", handleGMProtection)
 	http.HandleFunc("/api/gm/uncanny-dodge", handleGMUncannyDodge)
 	http.HandleFunc("/api/gm/intimidating-presence", handleGMIntimidatingPresence)
@@ -10114,6 +10115,28 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.63: Hunter Ranger Stand Against the Tide (level 15+)
+	if strings.ToLower(class) == "ranger" && level >= 15 {
+		if charSubclass.Valid && strings.ToLower(charSubclass.String) == "hunter" {
+			if subclassChoices["superior_defense"] == "stand_against_the_tide" {
+				standAgainstInfo := map[string]interface{}{
+					"available":      !reactionUsed,
+					"requires":       "reaction",
+					"trigger":        "When a creature misses you with a melee attack",
+					"effect":         "Force the attacker to repeat the same attack against another creature (not itself) of your choice",
+					"how_to_use":     "GM calls POST /api/gm/stand-against-the-tide when a melee attack misses you",
+					"phb_reference":  "PHB p93 - Superior Hunter's Defense",
+				}
+				
+				if !reactionUsed {
+					standAgainstInfo["tip"] = "🌊 Stand Against the Tide ready! When an enemy misses you with a melee attack, redirect it to another creature!"
+				}
+				
+				response["stand_against_the_tide"] = standAgainstInfo
+			}
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -16686,6 +16709,266 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 		response["weapon"] = weaponName
 		if isRaging {
 			response["rage_bonus"] = rageBonus
+		}
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMStandAgainstTheTide godoc
+// @Summary Use Stand Against the Tide reaction
+// @Description When a creature misses a Hunter Ranger (level 15+) with a melee attack, the Ranger can use their reaction to force the attacker to repeat the same attack against another creature of the Ranger's choice. The attacker cannot be forced to attack itself.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,attacker_name=string,attacker_attack_bonus=integer,new_target_id=integer,new_target_name=string,damage_dice=string,damage_bonus=integer,damage_type=string} true "Stand Against the Tide details"
+// @Success 200 {object} map[string]interface{} "Redirected attack result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or requirements not met"
+// @Router /gm/stand-against-the-tide [post]
+func handleGMStandAgainstTheTide(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID        int    `json:"character_id"`         // The Hunter Ranger using the reaction
+		AttackerName       string `json:"attacker_name"`        // Name of creature that missed
+		AttackerAttackBonus int   `json:"attacker_attack_bonus"` // Monster's attack bonus
+		NewTargetID        int    `json:"new_target_id"`        // ID of character to redirect attack to (optional if new_target_name provided)
+		NewTargetName      string `json:"new_target_name"`      // Name of new target (for monsters or if no character ID)
+		NewTargetAC        int    `json:"new_target_ac"`        // AC of new target (required if no new_target_id)
+		DamageDice         string `json:"damage_dice"`          // e.g., "2d6" - damage dice if it hits
+		DamageBonus        int    `json:"damage_bonus"`         // Damage modifier
+		DamageType         string `json:"damage_type"`          // e.g., "slashing", "bludgeoning"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required (the Hunter Ranger using their reaction)",
+		})
+		return
+	}
+	
+	if req.AttackerName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "attacker_name required (the creature that missed the melee attack)",
+		})
+		return
+	}
+	
+	if req.NewTargetID == 0 && req.NewTargetName == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "new_target_id or new_target_name required (the creature to redirect the attack to)",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class, subclass string
+	var charLobbyID, level int
+	var reactionUsed bool
+	var subclassChoicesJSON []byte
+	err = db.QueryRow(`
+		SELECT name, lobby_id, class, level, 
+		       COALESCE(reaction_used, false), COALESCE(subclass, ''), 
+		       COALESCE(subclass_choices, '{}')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &charLobbyID, &class, &level, 
+		&reactionUsed, &subclass, &subclassChoicesJSON)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Check if character has Stand Against the Tide
+	if strings.ToLower(class) != "ranger" || subclass != "hunter" || level < 15 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_stand_against_the_tide",
+			"message": fmt.Sprintf("%s is not a Hunter Ranger level 15+ with Stand Against the Tide", charName),
+		})
+		return
+	}
+	
+	var choices map[string]string
+	json.Unmarshal(subclassChoicesJSON, &choices)
+	if choices["superior_defense"] != "stand_against_the_tide" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_stand_against_the_tide",
+			"message": fmt.Sprintf("%s has not chosen Stand Against the Tide for Superior Hunter's Defense", charName),
+		})
+		return
+	}
+	
+	// Check if reaction is available
+	if reactionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_reaction",
+			"message": fmt.Sprintf("%s has already used their reaction this round", charName),
+		})
+		return
+	}
+	
+	// Determine new target name and AC
+	newTargetName := req.NewTargetName
+	newTargetAC := req.NewTargetAC
+	newTargetIsCharacter := false
+	
+	if req.NewTargetID != 0 {
+		// Get character AC
+		var ntName string
+		var ntAC int
+		err = db.QueryRow(`
+			SELECT name, ac FROM characters WHERE id = $1 AND lobby_id = $2
+		`, req.NewTargetID, campaignID).Scan(&ntName, &ntAC)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "target_not_found",
+				"message": "new_target_id character not found in this campaign",
+			})
+			return
+		}
+		newTargetName = ntName
+		newTargetAC = ntAC
+		newTargetIsCharacter = true
+	} else if newTargetAC == 0 {
+		// Default AC if not provided for monster target
+		newTargetAC = 13
+	}
+	
+	// Mark reaction as used
+	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
+	
+	// Roll the redirected attack
+	attackRoll := rollDie(20)
+	totalAttack := attackRoll + req.AttackerAttackBonus
+	
+	var resultText string
+	var hit bool
+	var damage int
+	
+	damageDice := req.DamageDice
+	if damageDice == "" {
+		damageDice = "1d6" // default
+	}
+	damageType := req.DamageType
+	if damageType == "" {
+		damageType = "bludgeoning"
+	}
+	
+	if attackRoll == 1 {
+		// Critical miss
+		resultText = fmt.Sprintf("🌊 STAND AGAINST THE TIDE: %s redirects the %s's attack to %s! Attack roll: %d (nat 1 - Critical Miss!)", 
+			charName, req.AttackerName, newTargetName, totalAttack)
+		hit = false
+	} else if attackRoll == 20 {
+		// Critical hit - double damage dice
+		damage = rollDamage(damageDice, true) + req.DamageBonus
+		if damage < 1 {
+			damage = 1
+		}
+		resultText = fmt.Sprintf("🌊 STAND AGAINST THE TIDE: %s redirects the %s's attack to %s! Attack roll: %d (nat 20 - CRITICAL HIT!) Damage: %d %s", 
+			charName, req.AttackerName, newTargetName, totalAttack, damage, damageType)
+		hit = true
+	} else if totalAttack >= newTargetAC {
+		// Normal hit
+		damage = rollDamage(damageDice, false) + req.DamageBonus
+		if damage < 1 {
+			damage = 1
+		}
+		resultText = fmt.Sprintf("🌊 STAND AGAINST THE TIDE: %s redirects the %s's attack to %s! Attack roll: %d vs AC %d - HIT! Damage: %d %s", 
+			charName, req.AttackerName, newTargetName, totalAttack, newTargetAC, damage, damageType)
+		hit = true
+	} else {
+		// Miss
+		resultText = fmt.Sprintf("🌊 STAND AGAINST THE TIDE: %s redirects the %s's attack to %s! Attack roll: %d vs AC %d - MISS!", 
+			charName, req.AttackerName, newTargetName, totalAttack, newTargetAC)
+		hit = false
+	}
+	
+	// Apply damage to character target if hit
+	if hit && newTargetIsCharacter && req.NewTargetID != 0 {
+		db.Exec(`UPDATE characters SET hp = GREATEST(0, hp - $1) WHERE id = $2`, damage, req.NewTargetID)
+		resultText += fmt.Sprintf(" %s takes %d damage.", newTargetName, damage)
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Stand Against the Tide: %s redirects %s's missed attack to %s", charName, req.AttackerName, newTargetName)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'stand_against_the_tide', $2, $3)
+	`, campaignID, actionDesc, resultText)
+	
+	response := map[string]interface{}{
+		"success":        true,
+		"ranger":         charName,
+		"attacker":       req.AttackerName,
+		"new_target":     newTargetName,
+		"new_target_ac":  newTargetAC,
+		"attack_roll":    attackRoll,
+		"attack_bonus":   req.AttackerAttackBonus,
+		"total":          totalAttack,
+		"hit":            hit,
+		"result":         resultText,
+		"reaction_used":  true,
+		"note":           fmt.Sprintf("%s's reaction is now expended for this round", charName),
+		"phb_reference":  "PHB p93 - Superior Hunter's Defense: Stand Against the Tide",
+	}
+	
+	if hit {
+		response["damage"] = damage
+		response["damage_type"] = damageType
+		if newTargetIsCharacter {
+			response["damage_applied_to_character"] = true
 		}
 	}
 	

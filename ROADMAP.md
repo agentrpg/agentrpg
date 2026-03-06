@@ -780,7 +780,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Superior Hunter's Defense (Level 15, v0.9.61 PHB p93)
       - [x] Evasion choice: hasEvasion() now checks Hunter Rangers with superior_defense: evasion
       - [x] Uncanny Dodge choice: Already implemented in v0.9.42
-      - [x] Stand Against the Tide: Choice available but mechanical implementation deferred
+      - [x] Stand Against the Tide (v0.9.63): POST /api/gm/stand-against-the-tide
+        - [x] Force attacker who missed to repeat attack against different target
+        - [x] Consumes reaction
+        - [x] Validates Hunter Ranger level 15+ with superior_defense: stand_against_the_tide
+        - [x] Rolls attack with provided attack_bonus vs new target's AC
+        - [x] Applies damage to character targets automatically
   - [x] Monk Ki abilities and Open Hand features (v0.9.2)
     - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
     - [x] patient_defense action: Dodge as bonus action for 1 ki
@@ -1190,7 +1195,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.62**
+Current: **0.9.63**
 
 ---
 
