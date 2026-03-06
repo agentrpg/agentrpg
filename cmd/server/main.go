@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.54
+// @version 0.9.62
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.61"
+const version = "0.9.62"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -21720,14 +21720,18 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 	for _, cond := range conditions {
 		condLower := strings.ToLower(cond)
 		switch condLower {
-		case "invisible":
+		case "invisible", "hidden":
 			// v0.9.17: Invisible attacker gets advantage unless defender has blindsight/truesight
+			// v0.9.62: Hidden attacker also gets advantage (PHB p194-195)
+			// v0.9.62: Alert feat negates advantage from unseen attackers (PHB p165)
 			if len(targetID) > 0 && targetID[0] > 0 {
 				_, defenderBlindsight, defenderTruesight := getCharacterVision(targetID[0])
-				if defenderBlindsight == 0 && defenderTruesight == 0 {
+				// Check if defender has Alert feat - negates advantage from unseen attackers
+				defenderHasAlert := hasSpecificFeat(targetID[0], "alert")
+				if defenderBlindsight == 0 && defenderTruesight == 0 && !defenderHasAlert {
 					hasAdvantage = true
 				}
-				// If defender has special senses, no advantage (they can see the invisible attacker)
+				// If defender has special senses OR Alert feat, no advantage
 			} else {
 				// No specific target, grant advantage by default
 				hasAdvantage = true
@@ -24957,6 +24961,24 @@ func hasFeatFeature(feats []string, feature string) bool {
 			if _, hasFeature := feat.Features[feature]; hasFeature {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// hasSpecificFeat checks if a character has a specific feat by querying the database
+// v0.9.62: Used for feat mechanic checks like Alert's hidden attacker immunity
+func hasSpecificFeat(charID int, featSlug string) bool {
+	var featsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(feats, '[]') FROM characters WHERE id = $1", charID).Scan(&featsJSON)
+	if err != nil {
+		return false
+	}
+	var feats []string
+	json.Unmarshal(featsJSON, &feats)
+	for _, f := range feats {
+		if f == featSlug {
+			return true
 		}
 	}
 	return false
@@ -37452,6 +37474,13 @@ func handleCharacterFeat(w http.ResponseWriter, r *http.Request, charID int) {
 		argIndex++
 	}
 	
+	// v0.9.62: Apply Alert feat initiative bonus (+5 to initiative, PHB p165)
+	if featSlug == "alert" {
+		updates = append(updates, fmt.Sprintf("initiative_bonus = $%d", argIndex))
+		args = append(args, 5)
+		argIndex++
+	}
+	
 	// Add character ID as final arg
 	args = append(args, charID)
 	query := fmt.Sprintf("UPDATE characters SET %s WHERE id = $%d", strings.Join(updates, ", "), argIndex)
@@ -37480,6 +37509,12 @@ func handleCharacterFeat(w http.ResponseWriter, r *http.Request, charID int) {
 	if featSlug == "tough" {
 		response["hp_bonus"] = level * 2
 		response["message"] = fmt.Sprintf("You gained the %s feat! Max HP increased by %d.", feat.Name, level*2)
+	}
+	
+	// v0.9.62: Alert feat message
+	if featSlug == "alert" {
+		response["initiative_bonus"] = 5
+		response["message"] = fmt.Sprintf("You gained the %s feat! +5 to initiative, can't be surprised, hidden creatures don't gain advantage on attacks against you.", feat.Name)
 	}
 	
 	json.NewEncoder(w).Encode(response)

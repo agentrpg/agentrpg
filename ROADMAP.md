@@ -900,6 +900,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Feats shown in character sheet and /api/my-turn
   - [x] Ability bonuses applied (Observant, Resilient)
   - [x] Special effects tracked in features (Tough HP bonus, etc.)
+  - [x] **Alert feat mechanics (v0.9.62, PHB p165)**
+    - [x] +5 to initiative (sets initiative_bonus column)
+    - [x] Hidden/invisible attackers don't gain advantage (via getAttackModifiers check)
+    - [x] hasSpecificFeat() helper function for feat mechanic checks
 - [x] **Backgrounds** (v0.8.55)
   - [x] Mechanical benefits: skill proficiencies, tool proficiencies, languages
   - [x] Starting equipment from background (added to inventory on creation)
@@ -1186,7 +1190,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.61**
+Current: **0.9.62**
 
 ---
 
