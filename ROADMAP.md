@@ -770,6 +770,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] step_of_the_wind action: Dash/Disengage + doubled jump for 1 ki
     - [x] stunning_strike action: CON save (DC 8+prof+WIS) or stunned for 1 ki
     - [x] Open Hand Technique: impose effects on Flurry hits (prone/push/no reactions)
+    - [x] Wholeness of Body (level 6): POST /api/characters/wholeness-of-body (v0.9.59)
+      - [x] Use action to heal 3 × monk level HP
+      - [x] Once per long rest (wholeness_of_body_used tracking)
+      - [x] Shows in character sheet and /api/my-turn for Open Hand monks level 6+
     - [x] Quivering Palm (level 17): POST /api/gm/quivering-palm (v0.9.36)
       - [x] Setup: after unarmed strike hit, spend 3 ki to set vibrations
       - [x] Trigger: use action - CON save or drop to 0 HP (success: 10d10 necrotic)
@@ -1165,7 +1169,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.58**
+Current: **0.9.59**
 
 ---
 

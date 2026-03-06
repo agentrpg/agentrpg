@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.58"
+const version = "0.9.59"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -502,6 +502,7 @@ func main() {
 	http.HandleFunc("/api/characters/fighting-style", handleCharacterFightingStyle)
 	http.HandleFunc("/api/characters/breath-weapon", handleCharacterBreathWeapon)
 	http.HandleFunc("/api/characters/infernal-legacy", handleCharacterInfernalLegacy)
+	http.HandleFunc("/api/characters/wholeness-of-body", handleCharacterWholenessOfBody)
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
@@ -1026,6 +1027,10 @@ func initDB() {
 		-- Resets on long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS hellish_rebuke_used BOOLEAN DEFAULT FALSE;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS darkness_racial_used BOOLEAN DEFAULT FALSE;
+		
+		-- Way of the Open Hand Monk: Wholeness of Body (v0.9.59)
+		-- Use action to heal for 3 × monk level HP, once per long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS wholeness_of_body_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -9943,6 +9948,45 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			if opts, ok := response["your_options"].(map[string]interface{}); ok {
 				if reactions, ok := opts["reactions"].([]string); ok {
 					opts["reactions"] = append(reactions, "hellish_rebuke (Infernal Legacy - 3d10 fire damage when you take damage, once per long rest)")
+				}
+			}
+		}
+	}
+	
+	// v0.9.59: Way of the Open Hand Monk - Wholeness of Body (level 6+)
+	if strings.ToLower(class) == "monk" && level >= 6 {
+		var wholenessUsed bool
+		var subclassForCheck sql.NullString
+		db.QueryRow("SELECT subclass, COALESCE(wholeness_of_body_used, false) FROM characters WHERE id = $1", charID).Scan(&subclassForCheck, &wholenessUsed)
+		
+		if subclassForCheck.Valid {
+			subLower := strings.ToLower(subclassForCheck.String)
+			if subLower == "open hand" || subLower == "open_hand" || subLower == "openhand" {
+				healingAmount := 3 * level
+				
+				wholenessInfo := map[string]interface{}{
+					"available":        !wholenessUsed,
+					"used_since_rest":  wholenessUsed,
+					"recovery":         "long rest",
+					"action_cost":      "1 action",
+					"healing_amount":   healingAmount,
+					"calculation":      fmt.Sprintf("3 × %d (monk level) = %d HP", level, healingAmount),
+					"how_to_use":       "POST /api/characters/wholeness-of-body with character_id",
+				}
+				
+				if !wholenessUsed {
+					wholenessInfo["tip"] = fmt.Sprintf("🧘 Wholeness of Body ready! Use your action to heal %d HP (3 × monk level). Once per long rest.", healingAmount)
+				}
+				
+				response["wholeness_of_body"] = wholenessInfo
+				
+				// Add to available actions if not used and action not spent
+				if !wholenessUsed && !actionUsed {
+					if opts, ok := response["your_options"].(map[string]interface{}); ok {
+						if actions, ok := opts["actions"].([]string); ok {
+							opts["actions"] = append(actions, fmt.Sprintf("wholeness_of_body (heal %d HP, Way of the Open Hand, once per long rest)", healingAmount))
+						}
+					}
 				}
 			}
 		}
@@ -36410,7 +36454,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			breath_weapon_used = false,
 			relentless_endurance_used = false,
 			hellish_rebuke_used = false,
-			darkness_racial_used = false
+			darkness_racial_used = false,
+			wholeness_of_body_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -43650,6 +43695,234 @@ func handleCharacterInfernalLegacy(w http.ResponseWriter, r *http.Request) {
 			"note":        "Thaumaturgy is a cantrip - cast it using the regular cast action",
 		})
 	}
+}
+
+// handleCharacterWholenessOfBody handles the Way of the Open Hand Monk's Wholeness of Body feature
+// @Summary Use Wholeness of Body (Open Hand Monk level 6+)
+// @Description Way of the Open Hand Monk feature: use your action to regain hit points equal to 3 × your monk level. Usable once per long rest.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param body body object{character_id=int} true "Wholeness of Body request"
+// @Success 200 {object} object{success=bool,healing=int,hp=int,max_hp=int}
+// @Failure 400 {object} object{error=string,message=string}
+// @Router /characters/wholeness-of-body [post]
+func handleCharacterWholenessOfBody(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check Wholeness of Body status",
+				"usage":   "GET /api/characters/wholeness-of-body?character_id=X",
+			})
+			return
+		}
+		
+		var class, subclass string
+		var level int
+		var wholenessUsed bool
+		var subclassNull sql.NullString
+		err = db.QueryRow(`
+			SELECT class, level, subclass, COALESCE(wholeness_of_body_used, false)
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &subclassNull, &wholenessUsed)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if subclassNull.Valid {
+			subclass = subclassNull.String
+		}
+		
+		if strings.ToLower(class) != "monk" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_monk",
+				"message": fmt.Sprintf("Only Monks have class features like Wholeness of Body (character is %s)", class),
+			})
+			return
+		}
+		
+		if strings.ToLower(subclass) != "open hand" && strings.ToLower(subclass) != "open_hand" && strings.ToLower(subclass) != "openhand" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "wrong_subclass",
+				"message": fmt.Sprintf("Wholeness of Body is a Way of the Open Hand feature (character's subclass: %s)", subclass),
+			})
+			return
+		}
+		
+		if level < 6 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "level_requirement",
+				"message": fmt.Sprintf("Wholeness of Body requires Way of the Open Hand Monk level 6+ (currently level %d)", level),
+			})
+			return
+		}
+		
+		healingAmount := 3 * level
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":    charID,
+			"class":           class,
+			"subclass":        subclass,
+			"level":           level,
+			"feature":         "Wholeness of Body",
+			"healing_amount":  healingAmount,
+			"calculation":     fmt.Sprintf("3 × %d (monk level) = %d HP", level, healingAmount),
+			"available":       !wholenessUsed,
+			"used_since_rest": wholenessUsed,
+			"action_cost":     "1 action",
+			"recovery":        "long rest",
+			"how_to_use":      "POST /api/characters/wholeness-of-body with character_id",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Description string `json:"description"` // Optional flavor text
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Verify ownership and get character info
+	var ownerID int
+	var class, charName string
+	var level, hp, maxHP int
+	var wholenessUsed bool
+	var subclassNull sql.NullString
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, hp, max_hp, subclass, COALESCE(wholeness_of_body_used, false), campaign_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &hp, &maxHP, &subclassNull, &wholenessUsed, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only use Wholeness of Body for your own characters",
+		})
+		return
+	}
+	
+	subclass := ""
+	if subclassNull.Valid {
+		subclass = subclassNull.String
+	}
+	
+	// Validate class and subclass
+	if strings.ToLower(class) != "monk" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_monk",
+			"message": fmt.Sprintf("%s is a %s, not a Monk. Wholeness of Body is a Way of the Open Hand Monk feature.", charName, class),
+		})
+		return
+	}
+	
+	subclassLower := strings.ToLower(subclass)
+	if subclassLower != "open hand" && subclassLower != "open_hand" && subclassLower != "openhand" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "wrong_subclass",
+			"message": fmt.Sprintf("%s is not a Way of the Open Hand Monk. Wholeness of Body requires the Way of the Open Hand subclass.", charName),
+		})
+		return
+	}
+	
+	if level < 6 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "level_requirement",
+			"message": fmt.Sprintf("%s is level %d. Wholeness of Body requires Way of the Open Hand Monk level 6+.", charName, level),
+		})
+		return
+	}
+	
+	if wholenessUsed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":    "feature_exhausted",
+			"message":  fmt.Sprintf("%s has already used Wholeness of Body since the last long rest", charName),
+			"recovery": "Take a long rest to regain this feature",
+		})
+		return
+	}
+	
+	// Calculate healing: 3 × monk level
+	healingAmount := 3 * level
+	
+	// Apply healing (can't exceed max HP)
+	newHP := hp + healingAmount
+	if newHP > maxHP {
+		newHP = maxHP
+	}
+	actualHealing := newHP - hp
+	
+	// Update character
+	db.Exec(`
+		UPDATE characters SET 
+			hp = $1, 
+			wholeness_of_body_used = true,
+			action_used = true
+		WHERE id = $2
+	`, newHP, req.CharacterID)
+	
+	// Log action if in campaign
+	if campaignID.Valid {
+		desc := req.Description
+		if desc == "" {
+			desc = fmt.Sprintf("%s uses Wholeness of Body, channeling ki to heal their wounds", charName)
+		}
+		actionLog := fmt.Sprintf("🧘 %s — healed %d HP (3 × level %d)", desc, actualHealing, level)
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'other', $3, NOW())`, campaignID.Int64, req.CharacterID, actionLog)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":        true,
+		"feature":        "Wholeness of Body",
+		"class":          "Monk",
+		"subclass":       "Way of the Open Hand",
+		"character":      charName,
+		"healing_amount": healingAmount,
+		"actual_healing": actualHealing,
+		"calculation":    fmt.Sprintf("3 × %d (monk level) = %d HP", level, healingAmount),
+		"hp_before":      hp,
+		"hp_after":       newHP,
+		"max_hp":         maxHP,
+		"action_cost":    "1 action",
+		"description":    fmt.Sprintf("%s channels their inner ki, healing %d hit points.", charName, actualHealing),
+		"recovery":       "Take a long rest to regain this feature",
+	})
 }
 
 // handleUniverseFightingStyles returns all available fighting styles
