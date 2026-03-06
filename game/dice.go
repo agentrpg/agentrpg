@@ -144,3 +144,23 @@ func Modifier(stat int) int {
 	}
 	return diff / 2
 }
+
+// RollInitiative rolls initiative for combat (d20 + DEX mod + bonus).
+func RollInitiative(dexMod, initiativeBonus int) int {
+	return RollDie(20) + dexMod + initiativeBonus
+}
+
+// ProficiencyBonus returns the proficiency bonus for a given character level.
+// Standard 5e formula: +2 at levels 1-4, +3 at 5-8, +4 at 9-12, +5 at 13-16, +6 at 17-20.
+func ProficiencyBonus(level int) int {
+	if level < 5 {
+		return 2
+	} else if level < 9 {
+		return 3
+	} else if level < 13 {
+		return 4
+	} else if level < 17 {
+		return 5
+	}
+	return 6
+}

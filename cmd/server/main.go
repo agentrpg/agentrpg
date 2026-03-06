@@ -1996,20 +1996,6 @@ func formatDuration(d time.Duration) string {
 	return "< 1m"
 }
 
-// Proficiency bonus by level (5e standard)
-func proficiencyBonus(level int) int {
-	if level < 5 {
-		return 2
-	} else if level < 9 {
-		return 3
-	} else if level < 13 {
-		return 4
-	} else if level < 17 {
-		return 5
-	}
-	return 6
-}
-
 // isHalfling checks if a character is a halfling (v0.9.47 - Halfling Lucky)
 func isHalfling(characterID int) bool {
 	var race string
@@ -2493,7 +2479,7 @@ func getExtraAttackCount(class string, level int) int {
 
 // Calculate spell save DC: 8 + proficiency bonus + spellcasting modifier
 func spellSaveDC(level int, spellcastingMod int) int {
-	return 8 + proficiencyBonus(level) + spellcastingMod
+	return 8 + game.ProficiencyBonus(level) + spellcastingMod
 }
 
 // ClassResource defines a class resource and its recovery behavior
@@ -3786,11 +3772,6 @@ func getHitDie(class string) int {
 	default:
 		return 8 // Default to d8
 	}
-}
-
-// Roll initiative for a character
-func rollInitiative(dexMod int, initiativeBonus int) int {
-	return game.RollDie(20) + dexMod + initiativeBonus
 }
 
 // Auth helpers
@@ -8299,7 +8280,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			"int": game.Modifier(intl), "wis": game.Modifier(wis), "cha": game.Modifier(cha),
 		},
 		"conditions":          conditions,
-		"proficiency_bonus":   proficiencyBonus(level),
+		"proficiency_bonus":   game.ProficiencyBonus(level),
 		"skill_proficiencies": func() []string {
 			if skillProfsRaw == "" {
 				return []string{}
@@ -8577,7 +8558,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			"remaining": remainingSlots,
 		}
 		response["spell_save_dc"] = spellSaveDC(level, spellMod)
-		response["spell_attack_bonus"] = spellMod + proficiencyBonus(level)
+		response["spell_attack_bonus"] = spellMod + game.ProficiencyBonus(level)
 		response["spellcasting_ability"] = spellAbility
 	}
 	
@@ -8797,7 +8778,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			area := dragonAncestryAreaShapes[ancestry]
 			savingThrow := dragonAncestryBreathSavingThrows[ancestry]
 			damageDice := getBreathWeaponDamageDice(level)
-			dc := 8 + game.Modifier(con) + proficiencyBonus(level)
+			dc := 8 + game.Modifier(con) + game.ProficiencyBonus(level)
 			
 			breathWeaponInfo["draconic_ancestry"] = ancestry
 			breathWeaponInfo["damage_type"] = damageType
@@ -8894,7 +8875,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		
 		if level >= 3 {
 			chaMod := game.Modifier(cha)
-			profBonus := proficiencyBonus(level)
+			profBonus := game.ProficiencyBonus(level)
 			spellDC := 8 + chaMod + profBonus
 			
 			infernalLegacy["hellish_rebuke"] = map[string]interface{}{
@@ -9181,7 +9162,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			spellMod = game.Modifier(cha)
 		}
 		saveDC := spellSaveDC(level, spellMod)
-		rulesReminder["spellcasting"] = fmt.Sprintf("Your spellcasting ability is %s. Spell save DC: %d. Spell attack bonus: +%d.", c.Spellcasting, saveDC, spellMod+proficiencyBonus(level))
+		rulesReminder["spellcasting"] = fmt.Sprintf("Your spellcasting ability is %s. Spell save DC: %d. Spell attack bonus: +%d.", c.Spellcasting, saveDC, spellMod+game.ProficiencyBonus(level))
 	}
 	
 	// Parse conditions from JSON
@@ -9304,7 +9285,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		"ac":                ac,
 		"status":            charStatus,
 		"conditions":        conditions,
-		"proficiency_bonus": proficiencyBonus(level),
+		"proficiency_bonus": game.ProficiencyBonus(level),
 		"xp":                charXP,
 		"xp_to_next_level":  xpToNext,
 		"currency": map[string]interface{}{
@@ -9913,7 +9894,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			area := dragonAncestryAreaShapes[ancestry]
 			savingThrow := dragonAncestryBreathSavingThrows[ancestry]
 			damageDice := getBreathWeaponDamageDice(level)
-			dc := 8 + game.Modifier(con) + proficiencyBonus(level)
+			dc := 8 + game.Modifier(con) + game.ProficiencyBonus(level)
 			
 			breathWeaponInfo["draconic_ancestry"] = ancestry
 			breathWeaponInfo["damage_type"] = damageType
@@ -10015,7 +9996,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		
 		if level >= 3 {
 			chaMod := game.Modifier(cha)
-			profBonus := proficiencyBonus(level)
+			profBonus := game.ProficiencyBonus(level)
 			spellDC := 8 + chaMod + profBonus
 			
 			infernalLegacy["hellish_rebuke"] = map[string]interface{}{
@@ -12245,10 +12226,10 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	if skillUsed != "" && skillProfs[skillUsed] {
 		if expertiseSkills[skillUsed] {
 			// Expertise: double proficiency bonus
-			totalMod += proficiencyBonus(level) * 2
+			totalMod += game.ProficiencyBonus(level) * 2
 			hasExpertise = true
 		} else {
-			totalMod += proficiencyBonus(level)
+			totalMod += game.ProficiencyBonus(level)
 		}
 		isProficient = true
 	}
@@ -12262,7 +12243,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	if !isProficient && subclassRaw.Valid && subclassRaw.String != "" {
 		if isPhysicalCheck && hasSubclassFeature(subclassRaw.String, level, "remarkable_athlete") {
 			// Half proficiency bonus, rounded up
-			remarkableAthleteBonus = (proficiencyBonus(level) + 1) / 2
+			remarkableAthleteBonus = (game.ProficiencyBonus(level) + 1) / 2
 			totalMod += remarkableAthleteBonus
 		}
 	}
@@ -12273,7 +12254,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	jackOfAllTradesBonus := 0
 	if !isProficient && remarkableAthleteBonus == 0 && hasClassFeature(class, level, "jack_of_all_trades") {
 		// Half proficiency bonus, rounded down
-		jackOfAllTradesBonus = proficiencyBonus(level) / 2
+		jackOfAllTradesBonus = game.ProficiencyBonus(level) / 2
 		totalMod += jackOfAllTradesBonus
 	}
 	
@@ -12750,9 +12731,9 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	if isProficient {
 		if hasExpertise {
 			// Expertise: double proficiency bonus
-			totalMod += proficiencyBonus(level) * 2
+			totalMod += game.ProficiencyBonus(level) * 2
 		} else {
-			totalMod += proficiencyBonus(level)
+			totalMod += game.ProficiencyBonus(level)
 		}
 	}
 	
@@ -12765,7 +12746,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	if !isProficient && toolSubclassRaw.Valid && toolSubclassRaw.String != "" {
 		if toolIsPhysicalCheck && hasSubclassFeature(toolSubclassRaw.String, level, "remarkable_athlete") {
 			// Half proficiency bonus, rounded up
-			toolRemarkableAthleteBonus = (proficiencyBonus(level) + 1) / 2
+			toolRemarkableAthleteBonus = (game.ProficiencyBonus(level) + 1) / 2
 			totalMod += toolRemarkableAthleteBonus
 		}
 	}
@@ -12776,7 +12757,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	toolJackOfAllTradesBonus := 0
 	if !isProficient && toolRemarkableAthleteBonus == 0 && hasClassFeature(toolClass, level, "jack_of_all_trades") {
 		// Half proficiency bonus, rounded down
-		toolJackOfAllTradesBonus = proficiencyBonus(level) / 2
+		toolJackOfAllTradesBonus = game.ProficiencyBonus(level) / 2
 		totalMod += toolJackOfAllTradesBonus
 	}
 	
@@ -13207,7 +13188,7 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	// Calculate total modifier
 	totalMod := abilityMod
 	if proficient {
-		totalMod += proficiencyBonus(level)
+		totalMod += game.ProficiencyBonus(level)
 	}
 	
 	// CHECK: Auto-fail conditions (paralyzed, stunned, unconscious auto-fail STR/DEX saves)
@@ -13606,41 +13587,41 @@ func handleGMContestedCheck(w http.ResponseWriter, r *http.Request) {
 		// Skills map to abilities
 		switch skill {
 		case "athletics":
-			return game.Modifier(str) + proficiencyBonus(level), "Athletics"
+			return game.Modifier(str) + game.ProficiencyBonus(level), "Athletics"
 		case "acrobatics":
-			return game.Modifier(dex) + proficiencyBonus(level), "Acrobatics"
+			return game.Modifier(dex) + game.ProficiencyBonus(level), "Acrobatics"
 		case "sleight_of_hand", "sleightofhand":
-			return game.Modifier(dex) + proficiencyBonus(level), "Sleight of Hand"
+			return game.Modifier(dex) + game.ProficiencyBonus(level), "Sleight of Hand"
 		case "stealth":
-			return game.Modifier(dex) + proficiencyBonus(level), "Stealth"
+			return game.Modifier(dex) + game.ProficiencyBonus(level), "Stealth"
 		case "arcana":
-			return game.Modifier(intl) + proficiencyBonus(level), "Arcana"
+			return game.Modifier(intl) + game.ProficiencyBonus(level), "Arcana"
 		case "history":
-			return game.Modifier(intl) + proficiencyBonus(level), "History"
+			return game.Modifier(intl) + game.ProficiencyBonus(level), "History"
 		case "investigation":
-			return game.Modifier(intl) + proficiencyBonus(level), "Investigation"
+			return game.Modifier(intl) + game.ProficiencyBonus(level), "Investigation"
 		case "nature":
-			return game.Modifier(intl) + proficiencyBonus(level), "Nature"
+			return game.Modifier(intl) + game.ProficiencyBonus(level), "Nature"
 		case "religion":
-			return game.Modifier(intl) + proficiencyBonus(level), "Religion"
+			return game.Modifier(intl) + game.ProficiencyBonus(level), "Religion"
 		case "animal_handling", "animalhandling":
-			return game.Modifier(wis) + proficiencyBonus(level), "Animal Handling"
+			return game.Modifier(wis) + game.ProficiencyBonus(level), "Animal Handling"
 		case "insight":
-			return game.Modifier(wis) + proficiencyBonus(level), "Insight"
+			return game.Modifier(wis) + game.ProficiencyBonus(level), "Insight"
 		case "medicine":
-			return game.Modifier(wis) + proficiencyBonus(level), "Medicine"
+			return game.Modifier(wis) + game.ProficiencyBonus(level), "Medicine"
 		case "perception":
-			return game.Modifier(wis) + proficiencyBonus(level), "Perception"
+			return game.Modifier(wis) + game.ProficiencyBonus(level), "Perception"
 		case "survival":
-			return game.Modifier(wis) + proficiencyBonus(level), "Survival"
+			return game.Modifier(wis) + game.ProficiencyBonus(level), "Survival"
 		case "deception":
-			return game.Modifier(cha) + proficiencyBonus(level), "Deception"
+			return game.Modifier(cha) + game.ProficiencyBonus(level), "Deception"
 		case "intimidation":
-			return game.Modifier(cha) + proficiencyBonus(level), "Intimidation"
+			return game.Modifier(cha) + game.ProficiencyBonus(level), "Intimidation"
 		case "performance":
-			return game.Modifier(cha) + proficiencyBonus(level), "Performance"
+			return game.Modifier(cha) + game.ProficiencyBonus(level), "Performance"
 		case "persuasion":
-			return game.Modifier(cha) + proficiencyBonus(level), "Persuasion"
+			return game.Modifier(cha) + game.ProficiencyBonus(level), "Persuasion"
 		// Raw abilities (no proficiency)
 		case "str", "strength":
 			return game.Modifier(str), "Strength"
@@ -13873,11 +13854,11 @@ func handleGMShove(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate attacker's Athletics modifier
-	attackerMod := game.Modifier(attackerStr) + proficiencyBonus(attackerLevel)
+	attackerMod := game.Modifier(attackerStr) + game.ProficiencyBonus(attackerLevel)
 	
 	// Calculate target's choice of Athletics or Acrobatics (use higher)
-	targetAthMod := game.Modifier(targetStr) + proficiencyBonus(targetLevel)
-	targetAcrMod := game.Modifier(targetDex) + proficiencyBonus(targetLevel)
+	targetAthMod := game.Modifier(targetStr) + game.ProficiencyBonus(targetLevel)
+	targetAcrMod := game.Modifier(targetDex) + game.ProficiencyBonus(targetLevel)
 	targetMod := targetAthMod
 	targetSkill := "Athletics"
 	if targetAcrMod > targetAthMod {
@@ -14093,9 +14074,9 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 	attackerMod := game.Modifier(attackerStr)
 	if containsSkill(attackerSkills, "athletics") {
 		if containsSkill(attackerExpertise, "athletics") {
-			attackerMod += proficiencyBonus(attackerLevel) * 2 // expertise
+			attackerMod += game.ProficiencyBonus(attackerLevel) * 2 // expertise
 		} else {
-			attackerMod += proficiencyBonus(attackerLevel)
+			attackerMod += game.ProficiencyBonus(attackerLevel)
 		}
 	}
 	
@@ -14103,18 +14084,18 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 	targetAthMod := game.Modifier(targetStr)
 	if containsSkill(targetSkills, "athletics") {
 		if containsSkill(targetExpertise, "athletics") {
-			targetAthMod += proficiencyBonus(targetLevel) * 2
+			targetAthMod += game.ProficiencyBonus(targetLevel) * 2
 		} else {
-			targetAthMod += proficiencyBonus(targetLevel)
+			targetAthMod += game.ProficiencyBonus(targetLevel)
 		}
 	}
 	
 	targetAcrMod := game.Modifier(targetDex)
 	if containsSkill(targetSkills, "acrobatics") {
 		if containsSkill(targetExpertise, "acrobatics") {
-			targetAcrMod += proficiencyBonus(targetLevel) * 2
+			targetAcrMod += game.ProficiencyBonus(targetLevel) * 2
 		} else {
-			targetAcrMod += proficiencyBonus(targetLevel)
+			targetAcrMod += game.ProficiencyBonus(targetLevel)
 		}
 	}
 	
@@ -14329,9 +14310,9 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 		escaperSkill = "Acrobatics"
 		if containsSkill(charSkills, "acrobatics") {
 			if containsSkill(charExpertise, "acrobatics") {
-				escaperMod += proficiencyBonus(charLevel) * 2
+				escaperMod += game.ProficiencyBonus(charLevel) * 2
 			} else {
-				escaperMod += proficiencyBonus(charLevel)
+				escaperMod += game.ProficiencyBonus(charLevel)
 			}
 		}
 	} else {
@@ -14339,9 +14320,9 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 		escaperSkill = "Athletics"
 		if containsSkill(charSkills, "athletics") {
 			if containsSkill(charExpertise, "athletics") {
-				escaperMod += proficiencyBonus(charLevel) * 2
+				escaperMod += game.ProficiencyBonus(charLevel) * 2
 			} else {
-				escaperMod += proficiencyBonus(charLevel)
+				escaperMod += game.ProficiencyBonus(charLevel)
 			}
 		}
 	}
@@ -14350,9 +14331,9 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 	grapplerMod := game.Modifier(grapplerStr)
 	if containsSkill(grapplerSkills, "athletics") {
 		if containsSkill(grapplerExpertise, "athletics") {
-			grapplerMod += proficiencyBonus(grapplerLevel) * 2
+			grapplerMod += game.ProficiencyBonus(grapplerLevel) * 2
 		} else {
-			grapplerMod += proficiencyBonus(grapplerLevel)
+			grapplerMod += game.ProficiencyBonus(grapplerLevel)
 		}
 	}
 	
@@ -14726,7 +14707,7 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	if game.Modifier(attackerDex) > attackMod {
 		attackMod = game.Modifier(attackerDex)
 	}
-	attackMod += proficiencyBonus(attackerLevel) // Assume proficiency with attack
+	attackMod += game.ProficiencyBonus(attackerLevel) // Assume proficiency with attack
 	
 	// Calculate target's Athletics or Acrobatics (whichever is higher)
 	// Parse skill proficiencies
@@ -14743,9 +14724,9 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	targetAthMod := game.Modifier(targetStr)
 	if containsSkill(targetSkills, "athletics") {
 		if containsSkill(targetExpSkills, "athletics") {
-			targetAthMod += proficiencyBonus(targetLevel) * 2 // Expertise
+			targetAthMod += game.ProficiencyBonus(targetLevel) * 2 // Expertise
 		} else {
-			targetAthMod += proficiencyBonus(targetLevel)
+			targetAthMod += game.ProficiencyBonus(targetLevel)
 		}
 	}
 	
@@ -14753,9 +14734,9 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	targetAcrMod := game.Modifier(targetDex)
 	if containsSkill(targetSkills, "acrobatics") {
 		if containsSkill(targetExpSkills, "acrobatics") {
-			targetAcrMod += proficiencyBonus(targetLevel) * 2 // Expertise
+			targetAcrMod += game.ProficiencyBonus(targetLevel) * 2 // Expertise
 		} else {
-			targetAcrMod += proficiencyBonus(targetLevel)
+			targetAcrMod += game.ProficiencyBonus(targetLevel)
 		}
 	}
 	
@@ -15987,7 +15968,7 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		
 		// Add proficiency bonus only if proficient with the weapon (v0.8.11)
 		if weaponKey == "" || isWeaponProficient(weaponProfsStr, weaponKey) {
-			attackMod += proficiencyBonus(level)
+			attackMod += game.ProficiencyBonus(level)
 		}
 		
 		// v0.9.65: Sacred Weapon (Devotion Paladin Channel Divinity)
@@ -16348,7 +16329,7 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 	
 	// Add proficiency bonus only if proficient with the weapon
 	if weaponKey == "" || isWeaponProficient(weaponProfsStr, weaponKey) {
-		attackMod += proficiencyBonus(level)
+		attackMod += game.ProficiencyBonus(level)
 	}
 	
 	// Get target AC (monster AC or estimate)
@@ -16582,7 +16563,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 	
 	// Add proficiency bonus only if proficient with the weapon
 	if weaponKey == "" || isWeaponProficient(weaponProfsStr, weaponKey) {
-		attackMod += proficiencyBonus(level)
+		attackMod += game.ProficiencyBonus(level)
 	}
 	
 	// Check for Rage damage bonus (if currently raging)
@@ -20044,7 +20025,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Calculate total modifier
-		profBonus := proficiencyBonus(level)
+		profBonus := game.ProficiencyBonus(level)
 		totalMod := abilityMod
 		if isProficient {
 			if isExpert {
@@ -20585,7 +20566,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 		isProficient := containsSkill(skillProfs, "investigation")
 		isExpert := containsSkill(expSkills, "investigation")
 		
-		profBonus := proficiencyBonus(level)
+		profBonus := game.ProficiencyBonus(level)
 		totalMod := intMod
 		if isProficient {
 			if isExpert {
@@ -22135,7 +22116,7 @@ func resolveAction(action, description string, charID int) string {
 		// Add proficiency bonus only if proficient with the weapon (v0.8.11)
 		isProficient := isWeaponProficient(weaponProfsStr, weaponKey)
 		if isProficient {
-			attackMod += proficiencyBonus(level)
+			attackMod += game.ProficiencyBonus(level)
 		}
 		
 		// Determine if ranged attack (v0.8.23: for proper prone handling)
@@ -23280,7 +23261,7 @@ func resolveAction(action, description string, charID int) string {
 		conMod = game.Modifier(intl)
 		
 		roll := game.RollDie(20)
-		total := roll + conMod + proficiencyBonus(level) // Assume proficient in CON saves
+		total := roll + conMod + game.ProficiencyBonus(level) // Assume proficient in CON saves
 		
 		var concSpell string
 		db.QueryRow("SELECT COALESCE(concentrating_on, '') FROM characters WHERE id = $1", charID).Scan(&concSpell)
@@ -23776,7 +23757,7 @@ func resolveAction(action, description string, charID int) string {
 		// Add proficiency bonus only if proficient
 		isProficient := isWeaponProficient(weaponProfsStr, weaponKey)
 		if isProficient {
-			attackMod += proficiencyBonus(level)
+			attackMod += game.ProficiencyBonus(level)
 		}
 		
 		// Get condition-based advantage/disadvantage (offhand is always melee, so not ranged)
@@ -23912,7 +23893,7 @@ func resolveAction(action, description string, charID int) string {
 		// Add proficiency bonus if proficient
 		frenzyProficient := isWeaponProficient(weaponProfsStr, weaponKey)
 		if frenzyProficient {
-			frenzyAttackMod += proficiencyBonus(level)
+			frenzyAttackMod += game.ProficiencyBonus(level)
 		}
 
 		// Get condition-based advantage/disadvantage (frenzy is always melee)
@@ -24076,7 +24057,7 @@ func resolveAction(action, description string, charID int) string {
 		// Add proficiency bonus if proficient
 		hbProficient := isWeaponProficient(weaponProfsStr, hbWeaponKey)
 		if hbProficient {
-			hbAttackMod += proficiencyBonus(level)
+			hbAttackMod += game.ProficiencyBonus(level)
 		}
 		
 		// Get condition-based advantage/disadvantage
@@ -24227,7 +24208,7 @@ func resolveAction(action, description string, charID int) string {
 		// Add proficiency bonus if proficient
 		volleyProficient := isWeaponProficient(weaponProfsStr, volleyWeaponKey)
 		if volleyProficient {
-			volleyAttackMod += proficiencyBonus(level)
+			volleyAttackMod += game.ProficiencyBonus(level)
 		}
 		
 		// Get condition-based advantage/disadvantage
@@ -24369,7 +24350,7 @@ func resolveAction(action, description string, charID int) string {
 		// Add proficiency bonus if proficient
 		wwProficient := isWeaponProficient(weaponProfsStr, wwWeaponKey)
 		if wwProficient {
-			wwAttackMod += proficiencyBonus(level)
+			wwAttackMod += game.ProficiencyBonus(level)
 		}
 		
 		// Get condition-based advantage/disadvantage
@@ -24487,7 +24468,7 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Add proficiency bonus (monks are proficient with unarmed strikes)
-		flurryAttackMod += proficiencyBonus(level)
+		flurryAttackMod += game.ProficiencyBonus(level)
 		
 		// Check for conditions
 		var flurryConds []byte
@@ -24677,7 +24658,7 @@ func resolveAction(action, description string, charID int) string {
 		// Calculate ki save DC: 8 + proficiency + WIS modifier
 		var wis int
 		db.QueryRow("SELECT wis FROM characters WHERE id = $1", charID).Scan(&wis)
-		kiSaveDC := 8 + proficiencyBonus(level) + game.Modifier(wis)
+		kiSaveDC := 8 + game.ProficiencyBonus(level) + game.Modifier(wis)
 		
 		return fmt.Sprintf("⚡ Stunning Strike! (1 ki spent, %d remaining) Target must make CON save DC %d or be STUNNED until the end of your next turn.", ssRemaining, kiSaveDC)
 
@@ -24733,9 +24714,9 @@ func resolveAction(action, description string, charID int) string {
 				}
 				
 				if hasExpertise {
-					bonus += proficiencyBonus(level) * 2
+					bonus += game.ProficiencyBonus(level) * 2
 				} else if isProficient {
-					bonus += proficiencyBonus(level)
+					bonus += game.ProficiencyBonus(level)
 				}
 				
 				roll := game.RollDie(20)
@@ -24772,9 +24753,9 @@ func resolveAction(action, description string, charID int) string {
 				}
 				
 				if hasExpertise {
-					bonus += proficiencyBonus(level) * 2
+					bonus += game.ProficiencyBonus(level) * 2
 				} else if isProficient {
-					bonus += proficiencyBonus(level)
+					bonus += game.ProficiencyBonus(level)
 				}
 				
 				roll := game.RollDie(20)
@@ -24832,9 +24813,9 @@ func resolveAction(action, description string, charID int) string {
 			}
 			
 			if hasExpertise {
-				bonus += proficiencyBonus(level) * 2
+				bonus += game.ProficiencyBonus(level) * 2
 			} else if isProficient {
-				bonus += proficiencyBonus(level)
+				bonus += game.ProficiencyBonus(level)
 			}
 			
 			roll := game.RollDie(20)
@@ -25176,7 +25157,7 @@ func resolveAction(action, description string, charID int) string {
 		searchIsProficient := false
 		if strings.Contains(strings.ToLower(searchSkillProfs), searchSkill) {
 			searchIsProficient = true
-			searchProfBonus = proficiencyBonus(level)
+			searchProfBonus = game.ProficiencyBonus(level)
 		}
 		
 		// Check expertise (Rogues/Bards)
@@ -25185,13 +25166,13 @@ func resolveAction(action, description string, charID int) string {
 		searchHasExpertise := false
 		if searchIsProficient && strings.Contains(strings.ToLower(searchExpertiseStr), searchSkill) {
 			searchHasExpertise = true
-			searchProfBonus = proficiencyBonus(level) * 2
+			searchProfBonus = game.ProficiencyBonus(level) * 2
 		}
 		
 		// v0.9.21: Jack of All Trades (Bard level 2+) - add half proficiency to unproficient checks
 		searchJoATNote := ""
 		if !searchIsProficient && strings.ToLower(class) == "bard" && level >= 2 {
-			searchProfBonus = proficiencyBonus(level) / 2
+			searchProfBonus = game.ProficiencyBonus(level) / 2
 			searchJoATNote = " (Jack of All Trades)"
 		}
 		
@@ -29948,7 +29929,7 @@ func handleGMIntimidatingPresence(w http.ResponseWriter, r *http.Request) {
 		
 		// Calculate save DC
 		chaMod := game.Modifier(chaScore)
-		profBonus := proficiencyBonus(barbarianLevel)
+		profBonus := game.ProficiencyBonus(barbarianLevel)
 		saveDC := 8 + profBonus + chaMod
 		
 		// Target makes WIS save
@@ -30129,7 +30110,7 @@ func handleGMIntimidatingPresence(w http.ResponseWriter, r *http.Request) {
 	
 	// Calculate save DC (8 + proficiency + CHA modifier)
 	chaMod := game.Modifier(chaScore)
-	profBonus := proficiencyBonus(barbarianLevel)
+	profBonus := game.ProficiencyBonus(barbarianLevel)
 	saveDC := 8 + profBonus + chaMod
 	
 	// Target makes WIS save
@@ -30588,7 +30569,7 @@ func handleGMQuiveringPalm(w http.ResponseWriter, r *http.Request) {
 	
 	// Calculate save DC (8 + proficiency + WIS modifier)
 	wisMod := game.Modifier(wisScore)
-	profBonus := proficiencyBonus(monkLevel)
+	profBonus := game.ProficiencyBonus(monkLevel)
 	saveDC := 8 + profBonus + wisMod
 	
 	// Target makes CON save
@@ -32787,7 +32768,7 @@ func applyOpenHandEffect(charID int, effect string, level int) string {
 	// Calculate Ki save DC: 8 + proficiency + WIS modifier
 	var wis int
 	db.QueryRow("SELECT wis FROM characters WHERE id = $1", charID).Scan(&wis)
-	kiSaveDC := 8 + proficiencyBonus(level) + game.Modifier(wis)
+	kiSaveDC := 8 + game.ProficiencyBonus(level) + game.Modifier(wis)
 	
 	switch effect {
 	case "prone":
@@ -34736,7 +34717,7 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 	// Get character level for proficiency bonus
 	var level int
 	db.QueryRow("SELECT COALESCE(level, 1) FROM characters WHERE id = $1", req.CharacterID).Scan(&level)
-	profBonus := proficiencyBonus(level)
+	profBonus := game.ProficiencyBonus(level)
 	
 	// Calculate ability modifiers
 	strMod := game.Modifier(str)
@@ -35671,7 +35652,7 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 			init = higherRoll + dexMod + initBonus
 			capstoneNotes = append(capstoneNotes, fmt.Sprintf("🐺 %s: Feral Instinct grants advantage on initiative (rolled %d, %d, took %d)", name, roll1, roll2, higherRoll))
 		} else {
-			init = rollInitiative(dexMod, initBonus)
+			init = game.RollInitiative(dexMod, initBonus)
 		}
 		
 		db.Exec("UPDATE characters SET current_initiative = $1 WHERE id = $2", init, id)
@@ -36477,7 +36458,7 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 			if err == nil {
 				// Roll initiative based on monster DEX if not provided
 				if c.Initiative == 0 {
-					entry.Initiative = rollInitiative(game.Modifier(dex), 0)
+					entry.Initiative = game.RollInitiative(game.Modifier(dex), 0)
 				} else {
 					entry.Initiative = c.Initiative
 				}
@@ -44422,7 +44403,7 @@ func handleCharacterBreathWeapon(w http.ResponseWriter, r *http.Request) {
 	
 	// Calculate DC: 8 + CON mod + proficiency bonus
 	conMod := game.Modifier(con)
-	profBonus := proficiencyBonus(level)
+	profBonus := game.ProficiencyBonus(level)
 	dc := 8 + conMod + profBonus
 	
 	// Roll damage
@@ -44488,7 +44469,7 @@ func handleCharacterBreathWeapon(w http.ResponseWriter, r *http.Request) {
 			}
 			saveRoll := game.RollDie(20)
 			result.SaveRoll = saveRoll
-			result.SaveTotal = saveRoll + saveMod + proficiencyBonus(targetLevel)
+			result.SaveTotal = saveRoll + saveMod + game.ProficiencyBonus(targetLevel)
 			result.SaveSuccess = result.SaveTotal >= dc
 			
 			// Calculate damage
@@ -44764,7 +44745,7 @@ func handleCharacterInfernalLegacy(w http.ResponseWriter, r *http.Request) {
 		
 		// Calculate spell save DC: 8 + prof + CHA mod
 		chaMod := game.Modifier(cha)
-		profBonus := proficiencyBonus(level)
+		profBonus := game.ProficiencyBonus(level)
 		spellDC := 8 + profBonus + chaMod
 		
 		// Roll 3d10 fire damage (cast as 2nd level)

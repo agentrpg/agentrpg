@@ -182,3 +182,47 @@ func TestRollD20(t *testing.T) {
 		}
 	}
 }
+
+func TestRollInitiative(t *testing.T) {
+	// Initiative = d20 + dexMod + bonus
+	// With dexMod=3 and bonus=5, range is 1+3+5=9 to 20+3+5=28
+	for i := 0; i < 50; i++ {
+		result := RollInitiative(3, 5)
+		if result < 9 || result > 28 {
+			t.Errorf("RollInitiative(3, 5) = %d, want 9-28", result)
+		}
+	}
+
+	// With negative modifier
+	for i := 0; i < 50; i++ {
+		result := RollInitiative(-2, 0)
+		if result < -1 || result > 18 {
+			t.Errorf("RollInitiative(-2, 0) = %d, want -1 to 18", result)
+		}
+	}
+}
+
+func TestProficiencyBonus(t *testing.T) {
+	tests := []struct {
+		level int
+		bonus int
+	}{
+		{1, 2},
+		{4, 2},
+		{5, 3},
+		{8, 3},
+		{9, 4},
+		{12, 4},
+		{13, 5},
+		{16, 5},
+		{17, 6},
+		{20, 6},
+	}
+
+	for _, tt := range tests {
+		result := ProficiencyBonus(tt.level)
+		if result != tt.bonus {
+			t.Errorf("ProficiencyBonus(%d) = %d, want %d", tt.level, result, tt.bonus)
+		}
+	}
+}
