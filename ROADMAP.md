@@ -722,6 +722,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Targets both fiends AND undead (unlike Cleric's Turn Undead)
     - [x] WIS save (DC 8 + prof + CHA mod) or turned for 1 minute
     - [x] Consumes Channel Divinity use
+  - [x] Devotion Paladin's Sacred Weapon (v0.9.65, PHB p86)
+    - [x] POST /api/gm/sacred-weapon — Channel Divinity to imbue weapon with holy light
+    - [x] Add CHA modifier (minimum +1) to attack rolls for 1 minute (10 rounds)
+    - [x] Weapon emits bright light in 20ft radius, dim light 20ft beyond
+    - [x] Tracked via "sacred_weapon:BONUS:ROUNDS" condition
+    - [x] Applied to regular attacks and opportunity attacks
+    - [x] Duration decrements at end of turn, auto-expires when rounds reach 0
+    - [x] Consumes Channel Divinity use
   - [x] Paladin Divine Smite (v0.9.8)
     - [x] Include "smite" in attack description to expend spell slot for radiant damage
     - [x] 2d8 + (slot_level - 1)d8 damage, max 5d8

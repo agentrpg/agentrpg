@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.64
+// @version 0.9.65
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -40,7 +40,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.64"
+const version = "0.9.65"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -451,6 +451,7 @@ func main() {
 	http.HandleFunc("/api/gm/turn-undead", handleGMTurnUndead)
 	http.HandleFunc("/api/gm/turn-unholy", handleGMTurnUnholy)
 	http.HandleFunc("/api/gm/preserve-life", handleGMPreserveLife)
+	http.HandleFunc("/api/gm/sacred-weapon", handleGMSacredWeapon)
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
@@ -15980,6 +15981,12 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 		if weaponKey == "" || isWeaponProficient(weaponProfsStr, weaponKey) {
 			attackMod += proficiencyBonus(level)
 		}
+		
+		// v0.9.65: Sacred Weapon (Devotion Paladin Channel Divinity)
+		oaSacredBonus, _ := getSacredWeaponBonus(req.AttackerID)
+		if oaSacredBonus > 0 {
+			attackMod += oaSacredBonus
+		}
 	}
 	
 	// v0.9.58: Check for Escape the Horde (Hunter Ranger Defensive Tactics, PHB p93)
@@ -22135,6 +22142,13 @@ func resolveAction(action, description string, charID int) string {
 			archeryNote = " (Archery +2)"
 		}
 		
+		// v0.9.65: Sacred Weapon (Devotion Paladin Channel Divinity)
+		// Adds CHA modifier (min +1) to attack rolls for 1 minute
+		sacredWeaponBonus, _ := getSacredWeaponBonus(charID)
+		if sacredWeaponBonus > 0 {
+			attackMod += sacredWeaponBonus
+		}
+		
 		// Get condition-based advantage/disadvantage (pass isRanged for prone handling)
 		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{}, isRangedAttack)
 		
@@ -28114,6 +28128,189 @@ func handleGMPreserveLife(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGMSacredWeapon godoc
+// @Summary Oath of Devotion Channel Divinity: Sacred Weapon (v0.9.65)
+// @Description Devotion Paladins (level 3+) can use Channel Divinity to imbue a weapon with positive energy. For 1 minute (10 rounds), add CHA modifier (minimum +1) to attack rolls with that weapon. The weapon emits bright light in 20ft radius. (PHB p86)
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{paladin_id=integer} true "Sacred Weapon request"
+// @Success 200 {object} map[string]interface{} "Sacred Weapon activated"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not Devotion Paladin"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Router /gm/sacred-weapon [post]
+func handleGMSacredWeapon(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+	
+	var req struct {
+		PaladinID int `json:"paladin_id"` // Paladin character ID
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.PaladinID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "paladin_id required (the Paladin using Sacred Weapon)",
+		})
+		return
+	}
+	
+	// Verify character is a Devotion Paladin level 3+ in GM's campaign
+	var paladinName, className, subclassSlug string
+	var paladinLevel, chaScore int
+	var lobbyID int
+	var subclassRaw sql.NullString
+	err = db.QueryRow(`
+		SELECT c.name, c.class, c.level, c.cha, c.lobby_id, c.subclass
+		FROM characters c
+		WHERE c.id = $1
+	`, req.PaladinID).Scan(&paladinName, &className, &paladinLevel, &chaScore, &lobbyID, &subclassRaw)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Character not found",
+		})
+		return
+	}
+	
+	if subclassRaw.Valid {
+		subclassSlug = subclassRaw.String
+	}
+	
+	if strings.ToLower(className) != "paladin" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_paladin",
+			"message": fmt.Sprintf("%s is a %s, not a Paladin. Sacred Weapon is a Devotion Paladin feature.", paladinName, className),
+		})
+		return
+	}
+	
+	if paladinLevel < 3 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "insufficient_level",
+			"message": fmt.Sprintf("%s is level %d. Sacred Weapon requires Paladin level 3+ (when Oath is chosen).", paladinName, paladinLevel),
+		})
+		return
+	}
+	
+	if subclassSlug != "devotion" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "wrong_subclass",
+			"message": fmt.Sprintf("%s has the %s oath. Sacred Weapon requires Oath of Devotion.", paladinName, subclassSlug),
+			"note":    "Devotion Paladins choose their Oath at level 3.",
+		})
+		return
+	}
+	
+	// Verify agent is GM of this campaign
+	var dmID int
+	err = db.QueryRow(`SELECT dm_id FROM lobbies WHERE id = $1`, lobbyID).Scan(&dmID)
+	if err != nil || dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You must be the GM of this campaign to use Sacred Weapon",
+		})
+		return
+	}
+	
+	// Check if Channel Divinity is available
+	current := getCurrentClassResources(req.PaladinID)
+	if current["channel_divinity"] <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_channel_divinity",
+			"message": fmt.Sprintf("%s has no Channel Divinity uses remaining. Recovers on short or long rest.", paladinName),
+		})
+		return
+	}
+	
+	// Calculate bonus: CHA modifier, minimum +1
+	chaBonus := modifier(chaScore)
+	if chaBonus < 1 {
+		chaBonus = 1
+	}
+	
+	// Apply sacred_weapon condition with bonus and duration (10 rounds = 1 minute)
+	// Format: "sacred_weapon:BONUS:ROUNDS_REMAINING"
+	var existingConds []byte
+	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", req.PaladinID).Scan(&existingConds)
+	var currentConds []string
+	json.Unmarshal(existingConds, &currentConds)
+	
+	// Remove any existing sacred_weapon condition
+	newConds := []string{}
+	for _, c := range currentConds {
+		if !strings.HasPrefix(c, "sacred_weapon:") {
+			newConds = append(newConds, c)
+		}
+	}
+	
+	// Add new sacred_weapon condition
+	sacredWeaponCond := fmt.Sprintf("sacred_weapon:%d:10", chaBonus)
+	newConds = append(newConds, sacredWeaponCond)
+	
+	condsJSON, _ := json.Marshal(newConds)
+	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", condsJSON, req.PaladinID)
+	
+	// Consume Channel Divinity
+	useClassResource(req.PaladinID, "channel_divinity", 1)
+	remaining := getCurrentClassResources(req.PaladinID)["channel_divinity"]
+	
+	// Log the action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.PaladinID, "sacred_weapon",
+		fmt.Sprintf("%s uses Channel Divinity: Sacred Weapon!", paladinName),
+		fmt.Sprintf("Weapon imbued with holy light. +%d to attack rolls for 1 minute. Emits bright light in 20ft radius.", chaBonus))
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":                    true,
+		"paladin":                    paladinName,
+		"paladin_level":              paladinLevel,
+		"charisma":                   chaScore,
+		"attack_bonus":               chaBonus,
+		"duration":                   "1 minute (10 rounds)",
+		"rounds_remaining":           10,
+		"channel_divinity_remaining": remaining,
+		"effects": []string{
+			fmt.Sprintf("+%d to attack rolls with imbued weapon", chaBonus),
+			"Weapon emits bright light in 20-foot radius",
+			"Weapon emits dim light 20 feet beyond that",
+		},
+		"ends_early_if": []string{
+			"You drop the weapon",
+			"You fall unconscious",
+			"You dismiss this effect (no action required)",
+		},
+		"message": fmt.Sprintf("✨ %s channels divine energy into their weapon! For 1 minute, they gain +%d to attack rolls and the weapon glows with holy light.", paladinName, chaBonus),
+	})
+}
+
 // handleGMCounterspell godoc
 // @Summary Cast Counterspell to interrupt enemy spellcasting
 // @Description Counterspell (3rd level abjuration): Attempt to interrupt a spell being cast. Auto-succeeds if slot level >= target spell level, otherwise requires ability check (DC 10 + spell level).
@@ -31803,6 +32000,76 @@ func getFightingStyles(charID int) []string {
 }
 
 // hasFightingStyle checks if a character has a specific fighting style
+// getSacredWeaponBonus returns the Sacred Weapon attack bonus and a note if active (v0.9.65)
+// Sacred Weapon condition format: "sacred_weapon:BONUS:ROUNDS_REMAINING"
+func getSacredWeaponBonus(charID int) (int, string) {
+	var condsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&condsJSON)
+	if err != nil {
+		return 0, ""
+	}
+	
+	var conds []string
+	if err := json.Unmarshal(condsJSON, &conds); err != nil {
+		return 0, ""
+	}
+	
+	for _, c := range conds {
+		if strings.HasPrefix(c, "sacred_weapon:") {
+			parts := strings.Split(c, ":")
+			if len(parts) >= 2 {
+				bonus, err := strconv.Atoi(parts[1])
+				if err == nil && bonus > 0 {
+					return bonus, fmt.Sprintf(" (Sacred Weapon +%d)", bonus)
+				}
+			}
+		}
+	}
+	return 0, ""
+}
+
+// decrementSacredWeapon decrements the Sacred Weapon duration at end of turn (v0.9.65)
+// Returns true if the condition expired and was removed
+func decrementSacredWeapon(charID int) bool {
+	var condsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&condsJSON)
+	if err != nil {
+		return false
+	}
+	
+	var conds []string
+	if err := json.Unmarshal(condsJSON, &conds); err != nil {
+		return false
+	}
+	
+	newConds := []string{}
+	expired := false
+	for _, c := range conds {
+		if strings.HasPrefix(c, "sacred_weapon:") {
+			parts := strings.Split(c, ":")
+			if len(parts) >= 3 {
+				bonus, _ := strconv.Atoi(parts[1])
+				rounds, _ := strconv.Atoi(parts[2])
+				rounds--
+				if rounds > 0 {
+					newConds = append(newConds, fmt.Sprintf("sacred_weapon:%d:%d", bonus, rounds))
+				} else {
+					expired = true // Don't add back - it expired
+				}
+			}
+		} else {
+			newConds = append(newConds, c)
+		}
+	}
+	
+	if expired {
+		newCondsJSON, _ := json.Marshal(newConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", newCondsJSON, charID)
+	}
+	
+	return expired
+}
+
 func hasFightingStyle(charID int, slug string) bool {
 	styles := getFightingStyles(charID)
 	for _, s := range styles {
@@ -35521,6 +35788,9 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 	updatedConds, _ := json.Marshal(newConds)
 	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, currentID)
+	
+	// v0.9.65: Decrement Sacred Weapon duration at end of turn (if active)
+	decrementSacredWeapon(currentID)
 	
 	// Advance turn
 	turnIndex++

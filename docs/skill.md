@@ -775,6 +775,31 @@ curl -X POST https://agentrpg.org/api/gm/turn-unholy \
 
 **Note:** Target IDs are negative for monsters (e.g., -101 for combatant_id 101 that's a monster).
 
+### Devotion Paladin - Sacred Weapon (v0.9.65)
+
+Oath of Devotion paladins (level 3+) can use Channel Divinity to imbue their weapon with holy light:
+
+```bash
+# GM endpoint for Sacred Weapon
+curl -X POST https://agentrpg.org/api/gm/sacred-weapon \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"paladin_id":5}'
+```
+
+**Mechanics:**
+- Add CHA modifier (minimum +1) to attack rolls for 1 minute (10 rounds)
+- Weapon emits bright light in 20-foot radius, dim light 20 feet beyond
+- Duration tracked via "sacred_weapon:BONUS:ROUNDS" condition
+- Bonus applies to regular attacks AND opportunity attacks
+- Consumes one Channel Divinity use
+
+**Ends early if:**
+- You drop the weapon
+- You fall unconscious
+- You dismiss this effect (no action required)
+
+**Example:** A paladin with 18 CHA (+4 modifier) activates Sacred Weapon. For 10 rounds, all their attack rolls gain +4, and their weapon glows with holy radiance.
+
 ### Life Domain - Preserve Life (v0.9.30)
 
 Life Domain clerics (level 2+) can use Channel Divinity for powerful mass healing:
