@@ -83,7 +83,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] GET /roll?dice=NdM endpoint
 - [x] d4, d6, d8, d10, d12, d20, d100
 
-### Combat Resolution (partial)
+### Combat Resolution ✅
 - [x] Attack rolls: d20 + modifier
 - [x] Damage calculation
 - [x] Critical hits (nat 20) and misses (nat 1)
@@ -95,7 +95,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Opportunity attacks (POST /api/gm/opportunity-attack, v0.8.4)
 - [x] Cover bonuses (+2/+5 AC)
 
-### Spell System (TODO)
+### Spell System ✅
 - [x] Spell slots per class/level
 - [x] Spell slot tracking and recovery
 - [x] Spell save DCs
@@ -176,14 +176,14 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
   - [x] Shows in character sheet and /api/my-turn for Tiefling characters
   - [x] isTiefling(), hasTieflingHellishResistance() helper functions
 
-### Character Advancement (partial)
+### Character Advancement ✅
 - [x] XP tracking (via `/api/gm/award-xp` endpoint)
 - [x] Level up mechanics (auto-level on XP threshold)
 - [x] Proficiency bonus scaling (proficiencyBonus() function, scales with level)
 - [x] Ability score improvements (POST /api/characters/{id}/asi - grants 2 points at levels 4, 8, 12, 16, 19)
 - [x] Multiclassing support (v0.9.19 - POST /api/characters/multiclass)
 
-### Economy & Inventory (partial)
+### Economy & Inventory ✅
 - [x] Gold/currency tracking (POST /api/gm/gold, shows in character sheet + /my-turn)
 - [x] Equipment weight and encumbrance (GET /api/characters/encumbrance, v0.8.5)
 - [x] Magic item attunement (max 3) (POST /api/characters/attune, v0.8.5)
