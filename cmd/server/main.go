@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.81
+// @version 0.9.82
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.81"
+const version = "0.9.82"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -8466,13 +8466,13 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	}
 	if effectiveWarlockLevel >= 2 {
 		invocations := getCharacterInvocations(charID)
-		maxInvocations := getMaxInvocations(effectiveWarlockLevel)
+		maxInvocations := game.GetMaxInvocations(effectiveWarlockLevel)
 		invocationSpellsUsed := getInvocationSpellsUsed(charID)
 		
 		if len(invocations) > 0 {
 			invocationsInfo := []map[string]interface{}{}
 			for _, slug := range invocations {
-				if inv, ok := eldritchInvocations[slug]; ok {
+				if inv, ok := game.AvailableInvocations[slug]; ok {
 					invInfo := map[string]interface{}{
 						"slug":        slug,
 						"name":        inv.Name,
@@ -8507,7 +8507,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	// v0.9.78: Pact Boon for Warlocks level 3+
 	if effectiveWarlockLevel >= 3 {
 		if pactBoonRaw.Valid && pactBoonRaw.String != "" {
-			if boon, ok := pactBoons[pactBoonRaw.String]; ok {
+			if boon, ok := game.AvailablePactBoons[pactBoonRaw.String]; ok {
 				response["pact_boon"] = map[string]interface{}{
 					"slug":        boon.Slug,
 					"name":        boon.Name,
@@ -10070,13 +10070,13 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	// v0.9.77: Eldritch Invocations for Warlocks (level 2+)
 	if strings.ToLower(class) == "warlock" && level >= 2 {
 		invocations := getCharacterInvocations(charID)
-		maxInvocations := getMaxInvocations(level)
+		maxInvocations := game.GetMaxInvocations(level)
 		invocationSpellsUsed := getInvocationSpellsUsed(charID)
 		
 		if len(invocations) > 0 {
 			invocationsInfo := []map[string]interface{}{}
 			for _, slug := range invocations {
-				if inv, ok := eldritchInvocations[slug]; ok {
+				if inv, ok := game.AvailableInvocations[slug]; ok {
 					invInfo := map[string]interface{}{
 						"slug":        slug,
 						"name":        inv.Name,
@@ -10114,7 +10114,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	// v0.9.78: Pact Boon for Warlocks level 3+
 	if strings.ToLower(class) == "warlock" && level >= 3 {
 		if pactBoonMyTurn.Valid && pactBoonMyTurn.String != "" {
-			if boon, ok := pactBoons[pactBoonMyTurn.String]; ok {
+			if boon, ok := game.AvailablePactBoons[pactBoonMyTurn.String]; ok {
 				response["pact_boon"] = map[string]interface{}{
 					"slug":        boon.Slug,
 					"name":        boon.Name,
@@ -22953,10 +22953,10 @@ func resolveAction(action, description string, charID int) string {
 				if invSlug, hasInv := getOncePerRestInvocationForSpell(charID, spellKey); hasInv {
 					oncePerRestInvocation = invSlug
 					if hasUsedInvocationSpell(charID, invSlug) {
-						invName := eldritchInvocations[invSlug].Name
+						invName := game.AvailableInvocations[invSlug].Name
 						return fmt.Sprintf("Cannot cast %s via %s - you've already used this invocation. Requires a long rest to use again.", spell.Name, invName)
 					}
-					invName := eldritchInvocations[invSlug].Name
+					invName := game.AvailableInvocations[invSlug].Name
 					invocationUsedNote = fmt.Sprintf(" [%s: uses warlock slot, once per long rest]", invName)
 				}
 			}
@@ -31274,318 +31274,6 @@ var availableFeats = map[string]Feat{
 // Use game.SubclassFeature, game.Subclass, game.AvailableSubclasses
 
 
-// EldritchInvocation represents a Warlock Eldritch Invocation (v0.9.77)
-type EldritchInvocation struct {
-	Slug         string   `json:"slug"`
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	Prerequisites struct {
-		Level            int      `json:"level,omitempty"`            // Minimum warlock level
-		Pact             string   `json:"pact,omitempty"`             // Required pact boon (blade, chain, tome)
-		RequiresSpell    string   `json:"requires_spell,omitempty"`   // Must know a specific spell
-		RequiresPatron   string   `json:"requires_patron,omitempty"`  // Must have specific patron
-	} `json:"prerequisites,omitempty"`
-	Mechanics    map[string]string `json:"mechanics,omitempty"`       // Mechanical effects
-}
-
-// All SRD Eldritch Invocations (PHB pp110-111)
-var eldritchInvocations = map[string]EldritchInvocation{
-	"agonizing-blast": {
-		Slug:        "agonizing-blast",
-		Name:        "Agonizing Blast",
-		Description: "When you cast eldritch blast, add your Charisma modifier to the damage it deals on a hit.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{RequiresSpell: "eldritch-blast"},
-		Mechanics: map[string]string{"agonizing_blast": "true"},
-	},
-	"armor-of-shadows": {
-		Slug:        "armor-of-shadows",
-		Name:        "Armor of Shadows",
-		Description: "You can cast mage armor on yourself at will, without expending a spell slot or material components.",
-		Mechanics: map[string]string{"at_will_spell": "mage-armor"},
-	},
-	"beast-speech": {
-		Slug:        "beast-speech",
-		Name:        "Beast Speech",
-		Description: "You can cast speak with animals at will, without expending a spell slot.",
-		Mechanics: map[string]string{"at_will_spell": "speak-with-animals"},
-	},
-	"beguiling-influence": {
-		Slug:        "beguiling-influence",
-		Name:        "Beguiling Influence",
-		Description: "You gain proficiency in the Deception and Persuasion skills.",
-		Mechanics: map[string]string{"grant_proficiency": "deception,persuasion"},
-	},
-	"devils-sight": {
-		Slug:        "devils-sight",
-		Name:        "Devil's Sight",
-		Description: "You can see normally in darkness, both magical and nonmagical, to a distance of 120 feet.",
-		Mechanics: map[string]string{"devils_sight": "120"},
-	},
-	"eldritch-sight": {
-		Slug:        "eldritch-sight",
-		Name:        "Eldritch Sight",
-		Description: "You can cast detect magic at will, without expending a spell slot.",
-		Mechanics: map[string]string{"at_will_spell": "detect-magic"},
-	},
-	"eldritch-spear": {
-		Slug:        "eldritch-spear",
-		Name:        "Eldritch Spear",
-		Description: "When you cast eldritch blast, its range is 300 feet.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{RequiresSpell: "eldritch-blast"},
-		Mechanics: map[string]string{"eldritch_spear": "300"},
-	},
-	"eyes-of-the-rune-keeper": {
-		Slug:        "eyes-of-the-rune-keeper",
-		Name:        "Eyes of the Rune Keeper",
-		Description: "You can read all writing.",
-		Mechanics: map[string]string{"read_all_writing": "true"},
-	},
-	"fiendish-vigor": {
-		Slug:        "fiendish-vigor",
-		Name:        "Fiendish Vigor",
-		Description: "You can cast false life on yourself at will as a 1st-level spell, without expending a spell slot or material components.",
-		Mechanics: map[string]string{"at_will_spell": "false-life"},
-	},
-	"gaze-of-two-minds": {
-		Slug:        "gaze-of-two-minds",
-		Name:        "Gaze of Two Minds",
-		Description: "You can use your action to touch a willing humanoid and perceive through its senses until the end of your next turn. As long as the creature is on the same plane of existence as you, you can use your action on subsequent turns to maintain this connection, extending the duration until the end of your next turn.",
-		Mechanics: map[string]string{"gaze_of_two_minds": "true"},
-	},
-	"mask-of-many-faces": {
-		Slug:        "mask-of-many-faces",
-		Name:        "Mask of Many Faces",
-		Description: "You can cast disguise self at will, without expending a spell slot.",
-		Mechanics: map[string]string{"at_will_spell": "disguise-self"},
-	},
-	"misty-visions": {
-		Slug:        "misty-visions",
-		Name:        "Misty Visions",
-		Description: "You can cast silent image at will, without expending a spell slot or material components.",
-		Mechanics: map[string]string{"at_will_spell": "silent-image"},
-	},
-	"repelling-blast": {
-		Slug:        "repelling-blast",
-		Name:        "Repelling Blast",
-		Description: "When you hit a creature with eldritch blast, you can push the creature up to 10 feet away from you in a straight line.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{RequiresSpell: "eldritch-blast"},
-		Mechanics: map[string]string{"repelling_blast": "10"},
-	},
-	"thief-of-five-fates": {
-		Slug:        "thief-of-five-fates",
-		Name:        "Thief of Five Fates",
-		Description: "You can cast bane once using a warlock spell slot. You can't do so again until you finish a long rest.",
-		Mechanics: map[string]string{"once_per_rest_spell": "bane"},
-	},
-	// Level 5+ invocations
-	"mire-the-mind": {
-		Slug:        "mire-the-mind",
-		Name:        "Mire the Mind",
-		Description: "You can cast slow once using a warlock spell slot. You can't do so again until you finish a long rest.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 5},
-		Mechanics: map[string]string{"once_per_rest_spell": "slow"},
-	},
-	"one-with-shadows": {
-		Slug:        "one-with-shadows",
-		Name:        "One with Shadows",
-		Description: "When you are in an area of dim light or darkness, you can use your action to become invisible until you move or take an action or a reaction.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 5},
-		Mechanics: map[string]string{"one_with_shadows": "true"},
-	},
-	"sign-of-ill-omen": {
-		Slug:        "sign-of-ill-omen",
-		Name:        "Sign of Ill Omen",
-		Description: "You can cast bestow curse once using a warlock spell slot. You can't do so again until you finish a long rest.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 5},
-		Mechanics: map[string]string{"once_per_rest_spell": "bestow-curse"},
-	},
-	// Level 7+ invocations
-	"sculptor-of-flesh": {
-		Slug:        "sculptor-of-flesh",
-		Name:        "Sculptor of Flesh",
-		Description: "You can cast polymorph once using a warlock spell slot. You can't do so again until you finish a long rest.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 7},
-		Mechanics: map[string]string{"once_per_rest_spell": "polymorph"},
-	},
-	// Level 9+ invocations
-	"ascendant-step": {
-		Slug:        "ascendant-step",
-		Name:        "Ascendant Step",
-		Description: "You can cast levitate on yourself at will, without expending a spell slot or material components.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 9},
-		Mechanics: map[string]string{"at_will_spell": "levitate"},
-	},
-	"minions-of-chaos": {
-		Slug:        "minions-of-chaos",
-		Name:        "Minions of Chaos",
-		Description: "You can cast conjure elemental once using a warlock spell slot. You can't do so again until you finish a long rest.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 9},
-		Mechanics: map[string]string{"once_per_rest_spell": "conjure-elemental"},
-	},
-	"otherworldly-leap": {
-		Slug:        "otherworldly-leap",
-		Name:        "Otherworldly Leap",
-		Description: "You can cast jump on yourself at will, without expending a spell slot or material components.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 9},
-		Mechanics: map[string]string{"at_will_spell": "jump"},
-	},
-	"whispers-of-the-grave": {
-		Slug:        "whispers-of-the-grave",
-		Name:        "Whispers of the Grave",
-		Description: "You can cast speak with dead at will, without expending a spell slot.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 9},
-		Mechanics: map[string]string{"at_will_spell": "speak-with-dead"},
-	},
-	// Level 12+ invocations
-	"lifedrinker": {
-		Slug:        "lifedrinker",
-		Name:        "Lifedrinker",
-		Description: "When you hit a creature with your pact weapon, the creature takes extra necrotic damage equal to your Charisma modifier (minimum 1).",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 12, Pact: "blade"},
-		Mechanics: map[string]string{"lifedrinker": "true"},
-	},
-	// Level 15+ invocations
-	"master-of-myriad-forms": {
-		Slug:        "master-of-myriad-forms",
-		Name:        "Master of Myriad Forms",
-		Description: "You can cast alter self at will, without expending a spell slot.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 15},
-		Mechanics: map[string]string{"at_will_spell": "alter-self"},
-	},
-	"visions-of-distant-realms": {
-		Slug:        "visions-of-distant-realms",
-		Name:        "Visions of Distant Realms",
-		Description: "You can cast arcane eye at will, without expending a spell slot.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 15},
-		Mechanics: map[string]string{"at_will_spell": "arcane-eye"},
-	},
-	"witch-sight": {
-		Slug:        "witch-sight",
-		Name:        "Witch Sight",
-		Description: "You can see the true form of any shapechanger or creature concealed by illusion or transmutation magic while the creature is within 30 feet of you and within line of sight.",
-		Prerequisites: struct {
-			Level            int      `json:"level,omitempty"`
-			Pact             string   `json:"pact,omitempty"`
-			RequiresSpell    string   `json:"requires_spell,omitempty"`
-			RequiresPatron   string   `json:"requires_patron,omitempty"`
-		}{Level: 15},
-		Mechanics: map[string]string{"witch_sight": "30"},
-	},
-}
-
-// PactBoon represents a Warlock Pact Boon (v0.9.78, PHB p107-108)
-// Warlocks choose one at level 3
-type PactBoon struct {
-	Slug        string `json:"slug"`
-	Name        string `json:"name"`
-	Description string `json:"description"`
-	Mechanics   map[string]interface{} `json:"mechanics,omitempty"`
-}
-
-// The three SRD Pact Boons
-var pactBoons = map[string]PactBoon{
-	"chain": {
-		Slug:        "chain",
-		Name:        "Pact of the Chain",
-		Description: "You learn the find familiar spell and can cast it as a ritual. The spell doesn't count against your number of spells known. When you cast the spell, you can choose one of the normal forms for your familiar or one of the following special forms: imp, pseudodragon, quasit, or sprite. Additionally, when you take the Attack action, you can forgo one of your own attacks to allow your familiar to make one attack with its reaction.",
-		Mechanics: map[string]interface{}{
-			"learn_spell":      "find-familiar",
-			"familiar_forms":   []string{"imp", "pseudodragon", "quasit", "sprite"},
-			"familiar_attack":  true,
-		},
-	},
-	"blade": {
-		Slug:        "blade",
-		Name:        "Pact of the Blade",
-		Description: "You can use your action to create a pact weapon in your empty hand. You can choose the form that this melee weapon takes each time you create it. You are proficient with it while you wield it. This weapon counts as magical for the purpose of overcoming resistance and immunity to nonmagical attacks and damage. Your pact weapon disappears if it is more than 5 feet away from you for 1 minute or more. It also disappears if you use this feature again, if you dismiss the weapon (no action required), or if you die. You can transform one magic weapon into your pact weapon by performing a special ritual while you hold the weapon.",
-		Mechanics: map[string]interface{}{
-			"create_weapon":    true,
-			"weapon_proficient": true,
-			"weapon_magical":   true,
-			"bond_magic_weapon": true,
-		},
-	},
-	"tome": {
-		Slug:        "tome",
-		Name:        "Pact of the Tome",
-		Description: "Your patron gives you a grimoire called a Book of Shadows. When you gain this feature, choose three cantrips from any class's spell list (the three needn't be from the same list). While the book is on your person, you can cast those cantrips at will. They don't count against your number of cantrips known. If they don't appear on the warlock spell list, they are nonetheless warlock spells for you. If you lose your Book of Shadows, you can perform a 1-hour ceremony to receive a replacement from your patron. This ceremony can be performed during a short or long rest, and it destroys the previous book.",
-		Mechanics: map[string]interface{}{
-			"extra_cantrips":      3,
-			"cantrips_any_class":  true,
-			"book_of_shadows":     true,
-		},
-	},
-}
 
 // hasPactBoon checks if a character has a specific pact boon
 func hasPactBoon(characterID int, pact string) bool {
@@ -31607,27 +31295,6 @@ func getPactBoon(characterID int) string {
 	return pactBoon.String
 }
 
-// getMaxInvocations returns how many invocations a Warlock can have at their level
-func getMaxInvocations(warlockLevel int) int {
-	switch {
-	case warlockLevel >= 18:
-		return 8
-	case warlockLevel >= 15:
-		return 7
-	case warlockLevel >= 12:
-		return 6
-	case warlockLevel >= 9:
-		return 5
-	case warlockLevel >= 7:
-		return 4
-	case warlockLevel >= 5:
-		return 3
-	case warlockLevel >= 2:
-		return 2
-	default:
-		return 0
-	}
-}
 
 // getCharacterInvocations returns the eldritch invocations a character has
 func getCharacterInvocations(charID int) []string {
@@ -31694,7 +31361,7 @@ func markInvocationSpellUsed(charID int, invocationSlug string) {
 func getOncePerRestInvocationForSpell(charID int, spellSlug string) (string, bool) {
 	invocations := getCharacterInvocations(charID)
 	for _, invSlug := range invocations {
-		if inv, ok := eldritchInvocations[invSlug]; ok {
+		if inv, ok := game.AvailableInvocations[invSlug]; ok {
 			if spell, hasSpell := inv.Mechanics["once_per_rest_spell"]; hasSpell {
 				if spell == spellSlug {
 					return invSlug, true
@@ -31706,7 +31373,7 @@ func getOncePerRestInvocationForSpell(charID int, spellSlug string) (string, boo
 }
 
 // meetsInvocationPrerequisites checks if a character meets the prereqs for an invocation
-func meetsInvocationPrerequisites(charID int, invocation EldritchInvocation) (bool, string) {
+func meetsInvocationPrerequisites(charID int, invocation game.EldritchInvocation) (bool, string) {
 	var class string
 	var level int
 	var knownSpellsJSON []byte
@@ -42833,7 +42500,7 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			// List all available invocations
 			invocations := []map[string]interface{}{}
-			for slug, inv := range eldritchInvocations {
+			for slug, inv := range game.AvailableInvocations {
 				prereqs := map[string]interface{}{}
 				if inv.Prerequisites.Level > 0 {
 					prereqs["level"] = inv.Prerequisites.Level
@@ -42895,7 +42562,7 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 		
 		knownInvocations := []map[string]interface{}{}
 		for _, slug := range knownSlugs {
-			if inv, ok := eldritchInvocations[slug]; ok {
+			if inv, ok := game.AvailableInvocations[slug]; ok {
 				knownInvocations = append(knownInvocations, map[string]interface{}{
 					"slug":        slug,
 					"name":        inv.Name,
@@ -42905,12 +42572,12 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		
-		maxInvocations := getMaxInvocations(level)
+		maxInvocations := game.GetMaxInvocations(level)
 		canLearnMore := len(knownSlugs) < maxInvocations
 		
 		// Available to learn (filtered by prerequisites)
 		availableToLearn := []map[string]interface{}{}
-		for slug, inv := range eldritchInvocations {
+		for slug, inv := range game.AvailableInvocations {
 			// Skip if already known
 			known := false
 			for _, k := range knownSlugs {
@@ -42998,10 +42665,10 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 	
 	// Validate invocation exists
 	invocationSlug := strings.ToLower(strings.TrimSpace(req.Invocation))
-	inv, validInvocation := eldritchInvocations[invocationSlug]
+	inv, validInvocation := game.AvailableInvocations[invocationSlug]
 	if !validInvocation {
 		validSlugs := []string{}
-		for slug := range eldritchInvocations {
+		for slug := range game.AvailableInvocations {
 			validSlugs = append(validSlugs, slug)
 		}
 		sort.Strings(validSlugs)
@@ -43071,7 +42738,7 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Check if at capacity
-	maxInvocations := getMaxInvocations(level)
+	maxInvocations := game.GetMaxInvocations(level)
 	if len(currentInvocations) >= maxInvocations {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":          "at_capacity",
@@ -43164,7 +42831,7 @@ func handleUniverseInvocations(w http.ResponseWriter, r *http.Request) {
 	
 	// Build list with prerequisites
 	invocations := []map[string]interface{}{}
-	for slug, inv := range eldritchInvocations {
+	for slug, inv := range game.AvailableInvocations {
 		prereqs := map[string]interface{}{}
 		if inv.Prerequisites.Level > 0 {
 			prereqs["level"] = inv.Prerequisites.Level
@@ -43222,7 +42889,7 @@ func handleUniverseInvocations(w http.ResponseWriter, r *http.Request) {
 
 func countInvocationsByLevel(level int) int {
 	count := 0
-	for _, inv := range eldritchInvocations {
+	for _, inv := range game.AvailableInvocations {
 		if inv.Prerequisites.Level == level {
 			count++
 		}
@@ -43241,7 +42908,7 @@ func handleUniversePactBoons(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	boons := []map[string]interface{}{}
-	for slug, boon := range pactBoons {
+	for slug, boon := range game.AvailablePactBoons {
 		boons = append(boons, map[string]interface{}{
 			"slug":        slug,
 			"name":        boon.Name,
@@ -43324,7 +42991,7 @@ func handleCharacterPactBoon(w http.ResponseWriter, r *http.Request) {
 		
 		if pactBoonStr.Valid && pactBoonStr.String != "" {
 			// Has a pact boon
-			if boon, ok := pactBoons[pactBoonStr.String]; ok {
+			if boon, ok := game.AvailablePactBoons[pactBoonStr.String]; ok {
 				response["pact_boon"] = map[string]interface{}{
 					"slug":        boon.Slug,
 					"name":        boon.Name,
@@ -43338,9 +43005,9 @@ func handleCharacterPactBoon(w http.ResponseWriter, r *http.Request) {
 			response["has_pact_boon"] = false
 			response["eligible"] = true
 			response["available_choices"] = []map[string]interface{}{
-				{"slug": "chain", "name": pactBoons["chain"].Name, "description": pactBoons["chain"].Description},
-				{"slug": "blade", "name": pactBoons["blade"].Name, "description": pactBoons["blade"].Description},
-				{"slug": "tome", "name": pactBoons["tome"].Name, "description": pactBoons["tome"].Description},
+				{"slug": "chain", "name": game.AvailablePactBoons["chain"].Name, "description": game.AvailablePactBoons["chain"].Description},
+				{"slug": "blade", "name": game.AvailablePactBoons["blade"].Name, "description": game.AvailablePactBoons["blade"].Description},
+				{"slug": "tome", "name": game.AvailablePactBoons["tome"].Name, "description": game.AvailablePactBoons["tome"].Description},
 			}
 			response["message"] = "You are eligible to choose a Pact Boon! Use POST /api/characters/pact-boon with pact_boon set to chain, blade, or tome."
 		} else {
@@ -43423,7 +43090,7 @@ func handleCharacterPactBoon(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if pactBoonStr.Valid && pactBoonStr.String != "" {
-		existingBoon := pactBoons[pactBoonStr.String]
+		existingBoon := game.AvailablePactBoons[pactBoonStr.String]
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":   "already_chosen",
 			"message": fmt.Sprintf("%s has already chosen %s. Pact Boons cannot be changed.", charName, existingBoon.Name),
@@ -43437,7 +43104,7 @@ func handleCharacterPactBoon(w http.ResponseWriter, r *http.Request) {
 	
 	// Validate the pact boon choice
 	pactBoonSlug := strings.ToLower(strings.TrimSpace(req.PactBoon))
-	chosenBoon, ok := pactBoons[pactBoonSlug]
+	chosenBoon, ok := game.AvailablePactBoons[pactBoonSlug]
 	if !ok {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":         "invalid_pact_boon",
