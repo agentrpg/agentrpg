@@ -988,6 +988,12 @@ func initDB() {
 		-- Resets on long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS relentless_endurance_used BOOLEAN DEFAULT FALSE;
 		
+		-- Barbarian Relentless Rage tracking (v0.9.86)
+		-- At level 11+, when dropped to 0 HP while raging, CON save to drop to 1 HP instead
+		-- DC starts at 10, increases by 5 each time used
+		-- Resets on short or long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS relentless_rage_uses INTEGER DEFAULT 0;
+		
 		-- Tiefling Infernal Legacy tracking (v0.9.54)
 		-- Hellish Rebuke (1/day at level 3+) and Darkness (1/day at level 5+)
 		-- Resets on long rest
@@ -2113,6 +2119,79 @@ func checkRelentlessEndurance(characterID int, currentHP int, damage int, maxHP 
 	
 	msg := fmt.Sprintf("💪 %s's Relentless Endurance triggers! Instead of dropping to 0 HP, they drop to 1 HP. (Half-Orc racial feature, once per long rest)", charName)
 	return 1, true, msg
+}
+
+// checkRelentlessRage implements the Barbarian Relentless Rage class feature (PHB p49):
+// At level 11+, if you drop to 0 HP while raging and don't die outright, you can make a DC 10 CON save.
+// On success, drop to 1 HP instead. DC increases by 5 each time (10, 15, 20...).
+// DC resets after short or long rest.
+// Returns (newHP, triggered, message)
+func checkRelentlessRage(characterID int, currentHP int, damage int, maxHP int) (int, bool, string) {
+	// Only applies when dropping to exactly 0 or below (but not killed outright by massive damage)
+	newHP := currentHP - damage
+	if newHP > 0 {
+		return newHP, false, ""
+	}
+	
+	// Check for massive damage (instant death) - Relentless Rage doesn't apply
+	if newHP <= -maxHP {
+		return 0, false, ""
+	}
+	
+	// Check if character is a Barbarian level 11+ and raging
+	var class string
+	var level, con int
+	var conditionsJSON []byte
+	var relentlessUses int
+	var charName string
+	err := db.QueryRow(`
+		SELECT class, level, con, COALESCE(conditions, '[]'), COALESCE(relentless_rage_uses, 0), name 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &level, &con, &conditionsJSON, &relentlessUses, &charName)
+	if err != nil {
+		return 0, false, ""
+	}
+	
+	// Must be Barbarian level 11+
+	if strings.ToLower(class) != "barbarian" || level < 11 {
+		return 0, false, ""
+	}
+	
+	// Must be raging
+	var conditions []map[string]interface{}
+	json.Unmarshal(conditionsJSON, &conditions)
+	isRaging := false
+	for _, cond := range conditions {
+		if name, ok := cond["name"].(string); ok && strings.ToLower(name) == "raging" {
+			isRaging = true
+			break
+		}
+	}
+	if !isRaging {
+		return 0, false, ""
+	}
+	
+	// Calculate DC: 10 + (5 * uses)
+	dc := 10 + (5 * relentlessUses)
+	
+	// Make CON save
+	conMod := game.Modifier(con)
+	roll := game.RollDie(20)
+	total := roll + conMod
+	
+	if total >= dc {
+		// Success! Drop to 1 HP and increment uses
+		db.Exec("UPDATE characters SET relentless_rage_uses = relentless_rage_uses + 1 WHERE id = $1", characterID)
+		nextDC := dc + 5
+		msg := fmt.Sprintf("🔥 %s's Relentless Rage triggers! CON save DC %d: rolled %d + %d = %d - SUCCESS! Drops to 1 HP instead of 0. (Next DC: %d)", 
+			charName, dc, roll, conMod, total, nextDC)
+		return 1, true, msg
+	}
+	
+	// Failed the save - drop to 0 HP as normal
+	msg := fmt.Sprintf("🔥 %s's Relentless Rage triggers! CON save DC %d: rolled %d + %d = %d - FAILED. Drops to 0 HP.", 
+		charName, dc, roll, conMod, total)
+	return 0, false, msg
 }
 
 // isDwarf checks if a character is a dwarf (v0.9.51 - Dwarven Resilience)
@@ -8812,6 +8891,30 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["relentless_endurance"] = relentlessInfo
 	}
 	
+	// v0.9.86: Barbarian Relentless Rage status (level 11+)
+	if strings.ToLower(class) == "barbarian" && level >= 11 {
+		var relentlessUses int
+		db.QueryRow("SELECT COALESCE(relentless_rage_uses, 0) FROM characters WHERE id = $1", charID).Scan(&relentlessUses)
+		
+		currentDC := 10 + (5 * relentlessUses)
+		relentlessRageInfo := map[string]interface{}{
+			"current_dc":       currentDC,
+			"uses_since_rest":  relentlessUses,
+			"recovery":         "short or long rest",
+			"description":      "When you drop to 0 HP while raging and don't die outright, make a CON save (starting DC 10) to drop to 1 HP instead. DC increases by 5 each time. (PHB p49)",
+			"trigger":          "CON save when dropping to 0 HP while raging",
+			"requirement":      "must be raging",
+		}
+		
+		if relentlessUses > 0 {
+			relentlessRageInfo["tip"] = fmt.Sprintf("⚠️ You've used Relentless Rage %d time(s) this rest. Current DC is %d. Take a short or long rest to reset.", relentlessUses, currentDC)
+		} else {
+			relentlessRageInfo["tip"] = "🔥 Relentless Rage ready! If you drop to 0 HP while raging, you can make a DC 10 CON save to stay at 1 HP instead."
+		}
+		
+		response["relentless_rage"] = relentlessRageInfo
+	}
+	
 	// v0.9.49: Gnome Cunning info
 	if isGnome(charID) {
 		response["gnome_cunning"] = map[string]interface{}{
@@ -9981,6 +10084,29 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		response["relentless_endurance"] = relentlessInfo
+	}
+	
+	// v0.9.86: Barbarian Relentless Rage status (level 11+)
+	if strings.ToLower(class) == "barbarian" && level >= 11 {
+		var relentlessUses int
+		db.QueryRow("SELECT COALESCE(relentless_rage_uses, 0) FROM characters WHERE id = $1", charID).Scan(&relentlessUses)
+		
+		currentDC := 10 + (5 * relentlessUses)
+		relentlessRageInfo := map[string]interface{}{
+			"current_dc":       currentDC,
+			"uses_since_rest":  relentlessUses,
+			"recovery":         "short or long rest",
+			"trigger":          "CON save when dropping to 0 HP while raging",
+			"requirement":      "must be raging",
+		}
+		
+		if relentlessUses > 0 {
+			relentlessRageInfo["tip"] = fmt.Sprintf("⚠️ Relentless Rage DC now %d (used %d times). Short/long rest to reset.", currentDC, relentlessUses)
+		} else {
+			relentlessRageInfo["tip"] = "🔥 Relentless Rage ready! If raging and dropped to 0 HP, make DC 10 CON save to stay at 1 HP."
+		}
+		
+		response["relentless_rage"] = relentlessRageInfo
 	}
 	
 	// v0.9.49: Gnome Cunning tip for saves against magic
@@ -16232,7 +16358,19 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 			newHP = 0
 		}
 		
-		// v0.9.48: Check Half-Orc Relentless Endurance
+		// v0.9.86: Check Barbarian Relentless Rage first (requires CON save)
+		if newHP == 0 {
+			relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessRage(req.TargetID, currentHP, damage, maxHP)
+			if relentlessUsed {
+				newHP = relentlessHP
+				resultText += " " + relentlessMsg
+			} else if relentlessMsg != "" {
+				// Save failed, add the message but still at 0 HP
+				resultText += " " + relentlessMsg
+			}
+		}
+		
+		// v0.9.48: Check Half-Orc Relentless Endurance (automatic, no save)
 		if newHP == 0 {
 			relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessEndurance(req.TargetID, currentHP, damage, maxHP)
 			if relentlessUsed {
@@ -17853,10 +17991,25 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 					newHP = 0
 				}
 				
-				// v0.9.48: Check Half-Orc Relentless Endurance
+				var charMaxHP int
+				db.QueryRow("SELECT max_hp FROM characters WHERE id = $1", targetID).Scan(&charMaxHP)
+				
+				// v0.9.86: Check Barbarian Relentless Rage first (requires CON save)
 				if newHP == 0 {
-					var charMaxHP int
-					db.QueryRow("SELECT max_hp FROM characters WHERE id = $1", targetID).Scan(&charMaxHP)
+					relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessRage(targetID, targetHP, damage, charMaxHP)
+					if relentlessUsed {
+						newHP = relentlessHP
+						result["relentless_rage"] = true
+						result["class_feature_note"] = relentlessMsg
+					} else if relentlessMsg != "" {
+						// Save failed, add the message
+						result["relentless_rage_failed"] = true
+						result["class_feature_note"] = relentlessMsg
+					}
+				}
+				
+				// v0.9.48: Check Half-Orc Relentless Endurance (automatic, no save)
+				if newHP == 0 {
 					relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessEndurance(targetID, targetHP, damage, charMaxHP)
 					if relentlessUsed {
 						newHP = relentlessHP
@@ -26079,9 +26232,22 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 		newHP = 0
 	}
 	
-	// v0.9.48: Check Half-Orc Relentless Endurance
+	// v0.9.86: Check Barbarian Relentless Rage first (requires CON save)
 	relentlessTriggered := false
 	relentlessMsg := ""
+	if newHP == 0 {
+		relentlessHP, relentlessUsed, msg := checkRelentlessRage(req.CharacterID, currentHP, finalDamage, maxHP)
+		if relentlessUsed {
+			newHP = relentlessHP
+			relentlessTriggered = true
+			relentlessMsg = msg
+		} else if msg != "" {
+			// Save failed, still add the message
+			relentlessMsg = msg
+		}
+	}
+	
+	// v0.9.48: Check Half-Orc Relentless Endurance (automatic, no save)
 	if newHP == 0 {
 		relentlessHP, relentlessUsed, msg := checkRelentlessEndurance(req.CharacterID, currentHP, finalDamage, maxHP)
 		if relentlessUsed {
@@ -34627,7 +34793,20 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 				newHP = 0
 			}
 			
-			// v0.9.48: Check Half-Orc Relentless Endurance
+			// v0.9.86: Check Barbarian Relentless Rage first (requires CON save)
+			if newHP == 0 {
+				relentlessHP, relentlessUsed, msg := checkRelentlessRage(req.CharacterID, currentHP, damageTaken, maxHP)
+				if relentlessUsed {
+					newHP = relentlessHP
+					relentlessTriggered = true
+					relentlessMsg = msg
+				} else if msg != "" {
+					// Save failed, still add the message
+					relentlessMsg = msg
+				}
+			}
+			
+			// v0.9.48: Check Half-Orc Relentless Endurance (automatic, no save)
 			if newHP == 0 {
 				relentlessHP, relentlessUsed, msg := checkRelentlessEndurance(req.CharacterID, currentHP, damageTaken, maxHP)
 				if relentlessUsed {
@@ -36580,21 +36759,38 @@ func handleDamage(w http.ResponseWriter, r *http.Request, charID int) {
 			result["message"] = "Massive damage (damage exceeded max HP) - instant death!"
 			hp = 0
 		} else {
-			// v0.9.48: Check Half-Orc Relentless Endurance before falling unconscious
-			relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessEndurance(charID, hp+damage, damage, maxHP)
+			// v0.9.86: Check Barbarian Relentless Rage first (requires CON save)
+			relentlessHP, relentlessUsed, relentlessMsg := checkRelentlessRage(charID, hp+damage, damage, maxHP)
 			if relentlessUsed {
 				hp = relentlessHP
 				db.Exec("UPDATE characters SET hp = $1, temp_hp = $2 WHERE id = $3", hp, tempHP, charID)
-				result["status"] = "relentless_endurance"
+				result["status"] = "relentless_rage"
 				result["message"] = relentlessMsg
-				result["relentless_endurance"] = true
-				result["racial_feature_note"] = relentlessMsg
+				result["relentless_rage"] = true
+				result["class_feature_note"] = relentlessMsg
 			} else {
-				// Fall unconscious, start death saves
-				db.Exec("UPDATE characters SET hp = 0, temp_hp = $1, concentrating_on = NULL WHERE id = $2", tempHP, charID)
-				result["status"] = "unconscious"
-				result["message"] = "Dropped to 0 HP - unconscious and making death saves"
-				hp = 0
+				// Add failed Relentless Rage message if applicable
+				if relentlessMsg != "" {
+					result["relentless_rage_failed"] = true
+					result["class_feature_note"] = relentlessMsg
+				}
+				
+				// v0.9.48: Check Half-Orc Relentless Endurance before falling unconscious
+				enduranceHP, enduranceUsed, enduranceMsg := checkRelentlessEndurance(charID, hp+damage, damage, maxHP)
+				if enduranceUsed {
+					hp = enduranceHP
+					db.Exec("UPDATE characters SET hp = $1, temp_hp = $2 WHERE id = $3", hp, tempHP, charID)
+					result["status"] = "relentless_endurance"
+					result["message"] = enduranceMsg
+					result["relentless_endurance"] = true
+					result["racial_feature_note"] = enduranceMsg
+				} else {
+					// Fall unconscious, start death saves
+					db.Exec("UPDATE characters SET hp = 0, temp_hp = $1, concentrating_on = NULL WHERE id = $2", tempHP, charID)
+					result["status"] = "unconscious"
+					result["message"] = "Dropped to 0 HP - unconscious and making death saves"
+					hp = 0
+				}
 			}
 		}
 	} else {
@@ -37227,6 +37423,17 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		darkOnesLuckReset = false
 	}
 	
+	// v0.9.86: Reset Barbarian Relentless Rage DC on short rest
+	var relentlessRageReset bool
+	if strings.ToLower(charClass) == "barbarian" && charLevel >= 11 {
+		var relentlessUses int
+		db.QueryRow("SELECT COALESCE(relentless_rage_uses, 0) FROM characters WHERE id = $1", charID).Scan(&relentlessUses)
+		if relentlessUses > 0 {
+			db.Exec("UPDATE characters SET relentless_rage_uses = 0 WHERE id = $1", charID)
+			relentlessRageReset = true
+		}
+	}
+	
 	response := map[string]interface{}{
 		"success":             true,
 		"hit_dice_spent":      req.HitDice,
@@ -37263,6 +37470,12 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	// v0.9.66: Show Dark One's Own Luck recovery
 	if darkOnesLuckReset {
 		response["dark_ones_luck_recovered"] = true
+	}
+	
+	// v0.9.86: Show Relentless Rage DC reset
+	if relentlessRageReset {
+		response["relentless_rage_dc_reset"] = true
+		response["relentless_rage_note"] = "Relentless Rage DC reset to 10"
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -37349,6 +37562,7 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			class_resources_used = '{}',
 			breath_weapon_used = false,
 			relentless_endurance_used = false,
+			relentless_rage_uses = 0,
 			hellish_rebuke_used = false,
 			darkness_racial_used = false,
 			wholeness_of_body_used = false,

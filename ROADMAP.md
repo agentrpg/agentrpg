@@ -804,7 +804,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Retaliation (level 14+): reaction melee attack when damaged by creature within 5ft (POST /api/gm/retaliation, v0.9.7)
     - [x] Intimidating Presence (level 10+): frighten creature within 30ft with WIS save (POST /api/gm/intimidating-presence, v0.9.33)
     - [x] Frenzy exhaustion: +1 exhaustion level when rage ends if was frenzying (v0.8.92)
-  - [x] Barbarian core features (v0.9.14, v0.9.35)
+  - [x] Barbarian core features (v0.9.14, v0.9.35, v0.9.86)
     - [x] Reckless Attack (level 2+): include "reckless" in attack for advantage on STR melee attacks
     - [x] Attacks against reckless character have advantage until next turn
     - [x] "reckless" condition applied and cleared at turn end
@@ -815,6 +815,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] +1 die at level 9, +2 at level 13, +3 at level 17
       - [x] Applied to regular attacks, frenzy attacks, and Retaliation
       - [x] Uses weapon's damage die type (e.g., 1d12 greataxe = extra d12s)
+    - [x] Relentless Rage (level 11+): CON save to stay at 1 HP when dropping to 0 while raging (v0.9.86, PHB p49)
+      - [x] DC starts at 10, increases by 5 each time used
+      - [x] Triggered automatically on damage that would drop to 0 HP
+      - [x] Must be raging (has "raging" condition)
+      - [x] DC resets on short or long rest
+      - [x] Applied in: opportunity attacks, AoE spells, falling damage, traps, direct damage
+      - [x] Shows in character sheet and /api/my-turn for Barbarians level 11+
   - [x] Hunter Ranger features (v0.8.90, v0.8.93, v0.9.58)
     - [x] Hunter's Prey choice system: POST /api/characters/subclass-choice to select option
     - [x] Colossus Slayer: extra 1d8 damage (once per turn) against wounded targets
@@ -1268,7 +1275,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.85**
+Current: **0.9.86**
 
 ---
 
