@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.73
+// @version 0.9.74
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.73"
+const version = "0.9.74"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -3709,6 +3709,24 @@ func getAgentFromAuth(r *http.Request) (int, error) {
 	return id, nil
 }
 
+// writeAuthError writes a 401 response with helpful password reset instructions
+func writeAuthError(w http.ResponseWriter, err error) {
+	w.WriteHeader(http.StatusUnauthorized)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": err.Error(),
+		"help": map[string]interface{}{
+			"message": "Authentication failed. If you forgot your password, you can reset it.",
+			"password_reset": map[string]interface{}{
+				"step_1": "POST /api/password-reset/request with {\"email\": \"your@email\"}",
+				"step_2": "Check your email for reset code",
+				"step_3": "POST /api/password-reset/confirm with {\"email\": \"...\", \"token\": \"...\", \"new_password\": \"...\"}",
+			},
+			"docs": "https://agentrpg.org/docs",
+			"skill_md": "https://strangerloops.com/skills/agentrpg.md",
+		},
+	})
+}
+
 // logAPIRequest logs an API request to the database (legacy - use logAPIRequestAsync for new code)
 func logAPIRequest(agentID int, endpoint, method string, lobbyID, characterID int, requestBody string, responseStatus int) {
 	logAPIRequestAsync(agentID, endpoint, method, lobbyID, characterID, requestBody, "", "", responseStatus, 0)
@@ -5423,8 +5441,7 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		agentID, err := getAgentFromAuth(r)
 		if err != nil {
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			writeAuthError(w, err)
 			return
 		}
 		
@@ -5797,8 +5814,7 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -5886,8 +5902,7 @@ func handleCampaignStart(w http.ResponseWriter, r *http.Request, campaignID int)
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -6330,8 +6345,7 @@ func handleCampaignStory(w http.ResponseWriter, r *http.Request, campaignID int)
 
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 
@@ -6403,8 +6417,7 @@ func handleCampaignSections(w http.ResponseWriter, r *http.Request, campaignID i
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -6508,8 +6521,7 @@ func handleCampaignNPCs(w http.ResponseWriter, r *http.Request, campaignID int) 
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -6641,8 +6653,7 @@ func handleCampaignNPCByID(w http.ResponseWriter, r *http.Request, campaignID in
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -6769,8 +6780,7 @@ func handleCampaignSectionByID(w http.ResponseWriter, r *http.Request, campaignI
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -6889,8 +6899,7 @@ func handleCampaignQuests(w http.ResponseWriter, r *http.Request, campaignID int
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -7020,8 +7029,7 @@ func handleCampaignQuestUpdate(w http.ResponseWriter, r *http.Request, campaignI
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -7118,8 +7126,7 @@ func handleCampaignObserve(w http.ResponseWriter, r *http.Request, campaignID in
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -7347,8 +7354,7 @@ func handleObservationPromote(w http.ResponseWriter, r *http.Request, campaignID
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -7539,8 +7545,7 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -8809,8 +8814,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -10154,8 +10158,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -11476,8 +11479,7 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -11696,8 +11698,7 @@ func handleGMNudge(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -11903,8 +11904,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -12431,8 +12431,7 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -12919,8 +12918,7 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -13364,8 +13362,7 @@ func handleGMContestedCheck(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -13643,8 +13640,7 @@ func handleGMShove(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -13836,8 +13832,7 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -14051,8 +14046,7 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -14277,8 +14271,7 @@ func handleGMReleaseGrapple(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -14386,8 +14379,7 @@ func handleGMForcedMovement(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -14496,8 +14488,7 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -14728,8 +14719,7 @@ func handleGMUpdateCharacter(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -14934,8 +14924,7 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -15163,8 +15152,7 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -15336,8 +15324,7 @@ func handleGMGiveItem(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -15491,8 +15478,7 @@ func handleGMRecoverAmmo(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -15601,8 +15587,7 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -16041,8 +16026,7 @@ func handleGMGiantKiller(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -16295,8 +16279,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -16596,8 +16579,7 @@ func handleGMStandAgainstTheTide(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -16856,8 +16838,7 @@ func handleGMProtection(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -17021,8 +17002,7 @@ func handleGMUncannyDodge(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -17177,8 +17157,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -17767,8 +17746,7 @@ func handleGMInspiration(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -17888,8 +17866,7 @@ func handleGMLegendaryResistance(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -18059,8 +18036,7 @@ func handleGMLegendaryAction(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -18294,8 +18270,7 @@ func handleGMLairAction(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -18511,8 +18486,7 @@ func handleGMRegionalEffect(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -18723,8 +18697,7 @@ func handleCharacterAttune(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -18868,8 +18841,7 @@ func handleCharacterEncumbrance(w http.ResponseWriter, r *http.Request) {
 	
 	_, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -19003,8 +18975,7 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 	
 	agent, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -19199,8 +19170,7 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 	
 	agent, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -19364,8 +19334,7 @@ func handleCharacterEquipWeapon(w http.ResponseWriter, r *http.Request) {
 	
 	agent, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -19568,8 +19537,7 @@ func handleCharacterUnequipWeapon(w http.ResponseWriter, r *http.Request) {
 	
 	agent, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -19728,8 +19696,7 @@ func handleCharacterDowntime(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -20564,8 +20531,7 @@ func handleCharacterMount(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -20743,8 +20709,7 @@ func handleCharacterDismount(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -20898,8 +20863,7 @@ func handleCampaignMessages(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -21046,8 +21010,7 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -21584,8 +21547,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -25481,8 +25443,7 @@ func handleTriggerReadied(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -25572,8 +25533,7 @@ func handleGMTriggerReadied(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -25673,8 +25633,7 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -25853,8 +25812,7 @@ func handleGMSuffocation(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -26381,8 +26339,7 @@ func handleGMUnderwater(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -26512,8 +26469,7 @@ func handleGMSetLighting(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -26681,8 +26637,7 @@ func handleGMMoraleCheck(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -26922,8 +26877,7 @@ func handleGMTurnUndead(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -27269,8 +27223,7 @@ func handleGMTurnUnholy(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -27573,8 +27526,7 @@ func handleGMPreserveLife(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -27850,8 +27802,7 @@ func handleGMSacredWeapon(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -28033,8 +27984,7 @@ func handleGMCounterspell(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -28262,8 +28212,7 @@ func handleGMDispelMagic(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -28559,8 +28508,7 @@ func handleGMCuttingWords(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -28746,8 +28694,7 @@ func handleGMDarkOnesLuck(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -28932,8 +28879,7 @@ func handleGMFlanking(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -29193,8 +29139,7 @@ func handleGMFacing(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -29565,8 +29510,7 @@ func handleGMIntimidatingPresence(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -30061,8 +30005,7 @@ func handleGMQuiveringPalm(w http.ResponseWriter, r *http.Request) {
 	
 	_, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -32727,8 +32670,7 @@ func handleGMApplyPoison(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -33120,8 +33062,7 @@ func handleGMApplyDisease(w http.ResponseWriter, r *http.Request) {
 
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 
@@ -33529,8 +33470,7 @@ func handleGMApplyMadness(w http.ResponseWriter, r *http.Request) {
 
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 
@@ -33757,8 +33697,7 @@ func handleGMEnvironmentalHazard(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -34216,8 +34155,7 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -34732,8 +34670,7 @@ func handleGMDeadline(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -34954,8 +34891,7 @@ func handleGMDeadlineAction(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -35105,8 +35041,7 @@ func handleObserve(w http.ResponseWriter, r *http.Request) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -35255,8 +35190,7 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -35449,8 +35383,7 @@ func handleCombatEnd(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -35483,8 +35416,7 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -35680,8 +35612,7 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -35924,8 +35855,7 @@ func handleExplorationSkip(w http.ResponseWriter, r *http.Request, campaignID in
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -36020,8 +35950,7 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -36255,8 +36184,7 @@ func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) 
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -37466,8 +37394,7 @@ func handleCharacterASI(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -37635,8 +37562,7 @@ func handleCharacterFeat(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -37902,8 +37828,7 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -38158,8 +38083,7 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
@@ -38446,8 +38370,7 @@ func handleUseResource(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	agentID, err := getAgentFromAuth(r)
 	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		writeAuthError(w, err)
 		return
 	}
 	
