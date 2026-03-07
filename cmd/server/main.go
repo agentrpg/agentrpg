@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.76
+// @version 0.9.77
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.76"
+const version = "0.9.77"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -445,6 +445,7 @@ func main() {
 	http.HandleFunc("/api/characters/subclass", handleCharacterSubclass)
 	http.HandleFunc("/api/characters/subclass-choice", handleCharacterSubclassChoice)
 	http.HandleFunc("/api/characters/metamagic", handleCharacterMetamagic)
+	http.HandleFunc("/api/characters/invocations", handleCharacterInvocations)
 	http.HandleFunc("/api/characters/flexible-casting", handleFlexibleCasting)
 	http.HandleFunc("/api/characters/multiclass", handleCharacterMulticlass)
 	http.HandleFunc("/api/characters/fighting-style", handleCharacterFightingStyle)
@@ -453,6 +454,7 @@ func main() {
 	http.HandleFunc("/api/characters/wholeness-of-body", handleCharacterWholenessOfBody)
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
+	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
 	http.HandleFunc("/api/universe/rules/", handleUniverseRule)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
@@ -989,6 +991,12 @@ func initDB() {
 		-- Fiend Warlock: Dark One's Own Luck (v0.9.66)
 		-- Add d10 to ability check or saving throw once per short/long rest (PHB p109)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS dark_ones_luck_used BOOLEAN DEFAULT FALSE;
+		
+		-- Eldritch Invocations (v0.9.77)
+		-- JSONB array of invocation slugs the Warlock has chosen
+		-- e.g., ["agonizing-blast", "devils-sight", "mask-of-many-faces"]
+		-- Warlocks gain 2 invocations at level 2, increasing to 8 at level 18
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS eldritch_invocations JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -8437,6 +8445,38 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.77: Eldritch Invocations for Warlocks
+	effectiveWarlockLevel := warlockLevel
+	if !isMulticlass && strings.ToLower(class) == "warlock" {
+		effectiveWarlockLevel = level
+	}
+	if effectiveWarlockLevel >= 2 {
+		invocations := getCharacterInvocations(charID)
+		maxInvocations := getMaxInvocations(effectiveWarlockLevel)
+		
+		if len(invocations) > 0 {
+			invocationsInfo := []map[string]interface{}{}
+			for _, slug := range invocations {
+				if inv, ok := eldritchInvocations[slug]; ok {
+					invocationsInfo = append(invocationsInfo, map[string]interface{}{
+						"slug":        slug,
+						"name":        inv.Name,
+						"description": inv.Description,
+						"mechanics":   inv.Mechanics,
+					})
+				}
+			}
+			response["eldritch_invocations"] = map[string]interface{}{
+				"known":          invocationsInfo,
+				"known_count":    len(invocations),
+				"max_invocations": maxInvocations,
+				"can_learn_more": len(invocations) < maxInvocations,
+			}
+		} else if maxInvocations > 0 {
+			response["invocations_pending"] = fmt.Sprintf("You can learn %d Eldritch Invocations! GET /api/characters/invocations?character_id=%d to see options.", maxInvocations, charID)
+		}
+	}
+	
 	// Known spells (v0.8.63)
 	var knownSpells []string
 	json.Unmarshal(knownSpellsJSON, &knownSpells)
@@ -9980,6 +10020,34 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 			
 			response["dark_ones_luck"] = darkOnesLuckInfo
+		}
+	}
+	
+	// v0.9.77: Eldritch Invocations for Warlocks (level 2+)
+	if strings.ToLower(class) == "warlock" && level >= 2 {
+		invocations := getCharacterInvocations(charID)
+		maxInvocations := getMaxInvocations(level)
+		
+		if len(invocations) > 0 {
+			invocationsInfo := []map[string]interface{}{}
+			for _, slug := range invocations {
+				if inv, ok := eldritchInvocations[slug]; ok {
+					invocationsInfo = append(invocationsInfo, map[string]interface{}{
+						"slug":        slug,
+						"name":        inv.Name,
+						"description": inv.Description,
+					})
+				}
+			}
+			response["eldritch_invocations"] = map[string]interface{}{
+				"known":          invocationsInfo,
+				"known_count":    len(invocations),
+				"max_invocations": maxInvocations,
+				"can_learn_more": len(invocations) < maxInvocations,
+				"tip":            "Invocations like 'agonizing-blast' add CHA mod to eldritch blast damage. 'at_will_spell' invocations let you cast a spell without spell slots.",
+			}
+		} else {
+			response["invocations_prompt"] = fmt.Sprintf("You can learn %d Eldritch Invocations! GET /api/characters/invocations?character_id=%d", maxInvocations, charID)
 		}
 	}
 	
@@ -22906,11 +22974,22 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
+				// v0.9.77: Agonizing Blast (Warlock Invocation, PHB p110)
+				// Add CHA mod to eldritch blast damage
+				agonizingBlastNote := ""
+				if spellKey == "eldritch-blast" && hasInvocation(charID, "agonizing-blast") {
+					chaBonus := game.Modifier(cha)
+					if chaBonus > 0 {
+						dmg += chaBonus
+						agonizingBlastNote = fmt.Sprintf(" (Agonizing Blast: +%d)", chaBonus)
+					}
+				}
+				
 				saveInfo := ""
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, metamagicNote, materialConsumedNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, metamagicNote, materialConsumedNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -31650,6 +31729,368 @@ var availableSubclasses = map[string]Subclass{
 			},
 		},
 	},
+}
+
+// EldritchInvocation represents a Warlock Eldritch Invocation (v0.9.77)
+type EldritchInvocation struct {
+	Slug         string   `json:"slug"`
+	Name         string   `json:"name"`
+	Description  string   `json:"description"`
+	Prerequisites struct {
+		Level            int      `json:"level,omitempty"`            // Minimum warlock level
+		Pact             string   `json:"pact,omitempty"`             // Required pact boon (blade, chain, tome)
+		RequiresSpell    string   `json:"requires_spell,omitempty"`   // Must know a specific spell
+		RequiresPatron   string   `json:"requires_patron,omitempty"`  // Must have specific patron
+	} `json:"prerequisites,omitempty"`
+	Mechanics    map[string]string `json:"mechanics,omitempty"`       // Mechanical effects
+}
+
+// All SRD Eldritch Invocations (PHB pp110-111)
+var eldritchInvocations = map[string]EldritchInvocation{
+	"agonizing-blast": {
+		Slug:        "agonizing-blast",
+		Name:        "Agonizing Blast",
+		Description: "When you cast eldritch blast, add your Charisma modifier to the damage it deals on a hit.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{RequiresSpell: "eldritch-blast"},
+		Mechanics: map[string]string{"agonizing_blast": "true"},
+	},
+	"armor-of-shadows": {
+		Slug:        "armor-of-shadows",
+		Name:        "Armor of Shadows",
+		Description: "You can cast mage armor on yourself at will, without expending a spell slot or material components.",
+		Mechanics: map[string]string{"at_will_spell": "mage-armor"},
+	},
+	"beast-speech": {
+		Slug:        "beast-speech",
+		Name:        "Beast Speech",
+		Description: "You can cast speak with animals at will, without expending a spell slot.",
+		Mechanics: map[string]string{"at_will_spell": "speak-with-animals"},
+	},
+	"beguiling-influence": {
+		Slug:        "beguiling-influence",
+		Name:        "Beguiling Influence",
+		Description: "You gain proficiency in the Deception and Persuasion skills.",
+		Mechanics: map[string]string{"grant_proficiency": "deception,persuasion"},
+	},
+	"devils-sight": {
+		Slug:        "devils-sight",
+		Name:        "Devil's Sight",
+		Description: "You can see normally in darkness, both magical and nonmagical, to a distance of 120 feet.",
+		Mechanics: map[string]string{"devils_sight": "120"},
+	},
+	"eldritch-sight": {
+		Slug:        "eldritch-sight",
+		Name:        "Eldritch Sight",
+		Description: "You can cast detect magic at will, without expending a spell slot.",
+		Mechanics: map[string]string{"at_will_spell": "detect-magic"},
+	},
+	"eldritch-spear": {
+		Slug:        "eldritch-spear",
+		Name:        "Eldritch Spear",
+		Description: "When you cast eldritch blast, its range is 300 feet.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{RequiresSpell: "eldritch-blast"},
+		Mechanics: map[string]string{"eldritch_spear": "300"},
+	},
+	"eyes-of-the-rune-keeper": {
+		Slug:        "eyes-of-the-rune-keeper",
+		Name:        "Eyes of the Rune Keeper",
+		Description: "You can read all writing.",
+		Mechanics: map[string]string{"read_all_writing": "true"},
+	},
+	"fiendish-vigor": {
+		Slug:        "fiendish-vigor",
+		Name:        "Fiendish Vigor",
+		Description: "You can cast false life on yourself at will as a 1st-level spell, without expending a spell slot or material components.",
+		Mechanics: map[string]string{"at_will_spell": "false-life"},
+	},
+	"gaze-of-two-minds": {
+		Slug:        "gaze-of-two-minds",
+		Name:        "Gaze of Two Minds",
+		Description: "You can use your action to touch a willing humanoid and perceive through its senses until the end of your next turn. As long as the creature is on the same plane of existence as you, you can use your action on subsequent turns to maintain this connection, extending the duration until the end of your next turn.",
+		Mechanics: map[string]string{"gaze_of_two_minds": "true"},
+	},
+	"mask-of-many-faces": {
+		Slug:        "mask-of-many-faces",
+		Name:        "Mask of Many Faces",
+		Description: "You can cast disguise self at will, without expending a spell slot.",
+		Mechanics: map[string]string{"at_will_spell": "disguise-self"},
+	},
+	"misty-visions": {
+		Slug:        "misty-visions",
+		Name:        "Misty Visions",
+		Description: "You can cast silent image at will, without expending a spell slot or material components.",
+		Mechanics: map[string]string{"at_will_spell": "silent-image"},
+	},
+	"repelling-blast": {
+		Slug:        "repelling-blast",
+		Name:        "Repelling Blast",
+		Description: "When you hit a creature with eldritch blast, you can push the creature up to 10 feet away from you in a straight line.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{RequiresSpell: "eldritch-blast"},
+		Mechanics: map[string]string{"repelling_blast": "10"},
+	},
+	"thief-of-five-fates": {
+		Slug:        "thief-of-five-fates",
+		Name:        "Thief of Five Fates",
+		Description: "You can cast bane once using a warlock spell slot. You can't do so again until you finish a long rest.",
+		Mechanics: map[string]string{"once_per_rest_spell": "bane"},
+	},
+	// Level 5+ invocations
+	"mire-the-mind": {
+		Slug:        "mire-the-mind",
+		Name:        "Mire the Mind",
+		Description: "You can cast slow once using a warlock spell slot. You can't do so again until you finish a long rest.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 5},
+		Mechanics: map[string]string{"once_per_rest_spell": "slow"},
+	},
+	"one-with-shadows": {
+		Slug:        "one-with-shadows",
+		Name:        "One with Shadows",
+		Description: "When you are in an area of dim light or darkness, you can use your action to become invisible until you move or take an action or a reaction.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 5},
+		Mechanics: map[string]string{"one_with_shadows": "true"},
+	},
+	"sign-of-ill-omen": {
+		Slug:        "sign-of-ill-omen",
+		Name:        "Sign of Ill Omen",
+		Description: "You can cast bestow curse once using a warlock spell slot. You can't do so again until you finish a long rest.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 5},
+		Mechanics: map[string]string{"once_per_rest_spell": "bestow-curse"},
+	},
+	// Level 7+ invocations
+	"sculptor-of-flesh": {
+		Slug:        "sculptor-of-flesh",
+		Name:        "Sculptor of Flesh",
+		Description: "You can cast polymorph once using a warlock spell slot. You can't do so again until you finish a long rest.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 7},
+		Mechanics: map[string]string{"once_per_rest_spell": "polymorph"},
+	},
+	// Level 9+ invocations
+	"ascendant-step": {
+		Slug:        "ascendant-step",
+		Name:        "Ascendant Step",
+		Description: "You can cast levitate on yourself at will, without expending a spell slot or material components.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 9},
+		Mechanics: map[string]string{"at_will_spell": "levitate"},
+	},
+	"minions-of-chaos": {
+		Slug:        "minions-of-chaos",
+		Name:        "Minions of Chaos",
+		Description: "You can cast conjure elemental once using a warlock spell slot. You can't do so again until you finish a long rest.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 9},
+		Mechanics: map[string]string{"once_per_rest_spell": "conjure-elemental"},
+	},
+	"otherworldly-leap": {
+		Slug:        "otherworldly-leap",
+		Name:        "Otherworldly Leap",
+		Description: "You can cast jump on yourself at will, without expending a spell slot or material components.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 9},
+		Mechanics: map[string]string{"at_will_spell": "jump"},
+	},
+	"whispers-of-the-grave": {
+		Slug:        "whispers-of-the-grave",
+		Name:        "Whispers of the Grave",
+		Description: "You can cast speak with dead at will, without expending a spell slot.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 9},
+		Mechanics: map[string]string{"at_will_spell": "speak-with-dead"},
+	},
+	// Level 12+ invocations
+	"lifedrinker": {
+		Slug:        "lifedrinker",
+		Name:        "Lifedrinker",
+		Description: "When you hit a creature with your pact weapon, the creature takes extra necrotic damage equal to your Charisma modifier (minimum 1).",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 12, Pact: "blade"},
+		Mechanics: map[string]string{"lifedrinker": "true"},
+	},
+	// Level 15+ invocations
+	"master-of-myriad-forms": {
+		Slug:        "master-of-myriad-forms",
+		Name:        "Master of Myriad Forms",
+		Description: "You can cast alter self at will, without expending a spell slot.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 15},
+		Mechanics: map[string]string{"at_will_spell": "alter-self"},
+	},
+	"visions-of-distant-realms": {
+		Slug:        "visions-of-distant-realms",
+		Name:        "Visions of Distant Realms",
+		Description: "You can cast arcane eye at will, without expending a spell slot.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 15},
+		Mechanics: map[string]string{"at_will_spell": "arcane-eye"},
+	},
+	"witch-sight": {
+		Slug:        "witch-sight",
+		Name:        "Witch Sight",
+		Description: "You can see the true form of any shapechanger or creature concealed by illusion or transmutation magic while the creature is within 30 feet of you and within line of sight.",
+		Prerequisites: struct {
+			Level            int      `json:"level,omitempty"`
+			Pact             string   `json:"pact,omitempty"`
+			RequiresSpell    string   `json:"requires_spell,omitempty"`
+			RequiresPatron   string   `json:"requires_patron,omitempty"`
+		}{Level: 15},
+		Mechanics: map[string]string{"witch_sight": "30"},
+	},
+}
+
+// getMaxInvocations returns how many invocations a Warlock can have at their level
+func getMaxInvocations(warlockLevel int) int {
+	switch {
+	case warlockLevel >= 18:
+		return 8
+	case warlockLevel >= 15:
+		return 7
+	case warlockLevel >= 12:
+		return 6
+	case warlockLevel >= 9:
+		return 5
+	case warlockLevel >= 7:
+		return 4
+	case warlockLevel >= 5:
+		return 3
+	case warlockLevel >= 2:
+		return 2
+	default:
+		return 0
+	}
+}
+
+// getCharacterInvocations returns the eldritch invocations a character has
+func getCharacterInvocations(charID int) []string {
+	var invocationsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(eldritch_invocations, '[]') FROM characters WHERE id = $1", charID).Scan(&invocationsJSON)
+	if err != nil {
+		return []string{}
+	}
+	var invocations []string
+	json.Unmarshal(invocationsJSON, &invocations)
+	return invocations
+}
+
+// hasInvocation checks if a character has a specific invocation
+func hasInvocation(charID int, slug string) bool {
+	invocations := getCharacterInvocations(charID)
+	for _, inv := range invocations {
+		if inv == slug {
+			return true
+		}
+	}
+	return false
+}
+
+// meetsInvocationPrerequisites checks if a character meets the prereqs for an invocation
+func meetsInvocationPrerequisites(charID int, invocation EldritchInvocation) (bool, string) {
+	var class string
+	var level int
+	var knownSpellsJSON []byte
+	err := db.QueryRow(`
+		SELECT class, level, COALESCE(known_spells, '[]')
+		FROM characters WHERE id = $1
+	`, charID).Scan(&class, &level, &knownSpellsJSON)
+	if err != nil {
+		return false, "Character not found"
+	}
+	
+	// Must be a Warlock
+	if strings.ToLower(class) != "warlock" {
+		return false, "Only Warlocks can take Eldritch Invocations"
+	}
+	
+	// Check level prerequisite
+	if invocation.Prerequisites.Level > 0 && level < invocation.Prerequisites.Level {
+		return false, fmt.Sprintf("Requires Warlock level %d (you are level %d)", invocation.Prerequisites.Level, level)
+	}
+	
+	// Check spell prerequisite (e.g., must know eldritch blast)
+	if invocation.Prerequisites.RequiresSpell != "" {
+		var knownSpells []string
+		json.Unmarshal(knownSpellsJSON, &knownSpells)
+		hasSpell := false
+		for _, spell := range knownSpells {
+			if spell == invocation.Prerequisites.RequiresSpell {
+				hasSpell = true
+				break
+			}
+		}
+		if !hasSpell {
+			return false, fmt.Sprintf("Requires knowing %s", invocation.Prerequisites.RequiresSpell)
+		}
+	}
+	
+	// TODO: Check pact boon prerequisite when pact boons are implemented
+	// For now, skip pact prerequisites
+	if invocation.Prerequisites.Pact != "" {
+		return false, fmt.Sprintf("Requires Pact of the %s (pact boons not yet implemented)", strings.Title(invocation.Prerequisites.Pact))
+	}
+	
+	return true, ""
 }
 
 // MetamagicOption represents a Sorcerer Metamagic option (v0.9.12)
@@ -42744,6 +43185,427 @@ func handleCharacterMetamagic(w http.ResponseWriter, r *http.Request) {
 		"all_known":      currentChoices,
 		"how_to_use":     fmt.Sprintf("Include '%s' in your spell description, e.g., '%s fireball'", metamagicSlug, metamagicSlug),
 	})
+}
+
+// handleCharacterInvocations godoc
+// @Summary Choose or view Eldritch Invocations (Warlock)
+// @Description Warlocks gain Eldritch Invocations at level 2. GET to view options, POST to learn one.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param character_id query integer false "Character ID (for GET)"
+// @Param request body object{character_id=integer,invocation=string} false "Learn an invocation (for POST)"
+// @Success 200 {object} map[string]interface{} "Invocation info"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Router /characters/invocations [get]
+// @Router /characters/invocations [post]
+func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		// View invocations (available and known)
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			// List all available invocations
+			invocations := []map[string]interface{}{}
+			for slug, inv := range eldritchInvocations {
+				prereqs := map[string]interface{}{}
+				if inv.Prerequisites.Level > 0 {
+					prereqs["level"] = inv.Prerequisites.Level
+				}
+				if inv.Prerequisites.RequiresSpell != "" {
+					prereqs["requires_spell"] = inv.Prerequisites.RequiresSpell
+				}
+				if inv.Prerequisites.Pact != "" {
+					prereqs["pact_boon"] = inv.Prerequisites.Pact
+				}
+				invocations = append(invocations, map[string]interface{}{
+					"slug":          slug,
+					"name":          inv.Name,
+					"description":   inv.Description,
+					"prerequisites": prereqs,
+				})
+			}
+			// Sort by name
+			sort.Slice(invocations, func(i, j int) bool {
+				return invocations[i]["name"].(string) < invocations[j]["name"].(string)
+			})
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"available_invocations": invocations,
+				"total":                 len(invocations),
+				"note":                  "Use character_id parameter to see a Warlock's learned invocations",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var invocationsJSON, knownSpellsJSON []byte
+		err = db.QueryRow(`
+			SELECT class, level, COALESCE(eldritch_invocations, '[]'), COALESCE(known_spells, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &invocationsJSON, &knownSpellsJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(class) != "warlock" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_a_warlock",
+				"message": "Only Warlocks can learn Eldritch Invocations",
+			})
+			return
+		}
+		
+		var knownSlugs []string
+		json.Unmarshal(invocationsJSON, &knownSlugs)
+		
+		var knownSpells []string
+		json.Unmarshal(knownSpellsJSON, &knownSpells)
+		
+		knownInvocations := []map[string]interface{}{}
+		for _, slug := range knownSlugs {
+			if inv, ok := eldritchInvocations[slug]; ok {
+				knownInvocations = append(knownInvocations, map[string]interface{}{
+					"slug":        slug,
+					"name":        inv.Name,
+					"description": inv.Description,
+					"mechanics":   inv.Mechanics,
+				})
+			}
+		}
+		
+		maxInvocations := getMaxInvocations(level)
+		canLearnMore := len(knownSlugs) < maxInvocations
+		
+		// Available to learn (filtered by prerequisites)
+		availableToLearn := []map[string]interface{}{}
+		for slug, inv := range eldritchInvocations {
+			// Skip if already known
+			known := false
+			for _, k := range knownSlugs {
+				if k == slug {
+					known = true
+					break
+				}
+			}
+			if known {
+				continue
+			}
+			
+			// Check prerequisites
+			meetsReqs, reason := meetsInvocationPrerequisites(charID, inv)
+			prereqs := map[string]interface{}{}
+			if inv.Prerequisites.Level > 0 {
+				prereqs["level"] = inv.Prerequisites.Level
+			}
+			if inv.Prerequisites.RequiresSpell != "" {
+				prereqs["requires_spell"] = inv.Prerequisites.RequiresSpell
+			}
+			if inv.Prerequisites.Pact != "" {
+				prereqs["pact_boon"] = inv.Prerequisites.Pact
+			}
+			
+			entry := map[string]interface{}{
+				"slug":          slug,
+				"name":          inv.Name,
+				"description":   inv.Description,
+				"prerequisites": prereqs,
+				"eligible":      meetsReqs,
+			}
+			if !meetsReqs {
+				entry["ineligible_reason"] = reason
+			}
+			availableToLearn = append(availableToLearn, entry)
+		}
+		// Sort by eligibility then name
+		sort.Slice(availableToLearn, func(i, j int) bool {
+			iElig := availableToLearn[i]["eligible"].(bool)
+			jElig := availableToLearn[j]["eligible"].(bool)
+			if iElig != jElig {
+				return iElig // Eligible first
+			}
+			return availableToLearn[i]["name"].(string) < availableToLearn[j]["name"].(string)
+		})
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":       charID,
+			"level":              level,
+			"invocations_known":  knownInvocations,
+			"known_count":        len(knownSlugs),
+			"max_invocations":    maxInvocations,
+			"can_learn_more":     canLearnMore,
+			"available_to_learn": availableToLearn,
+			"note":               "Invocations with 'agonizing-blast' add CHA mod to eldritch blast damage. 'at_will_spell' invocations let you cast a spell without using a spell slot.",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Invocation  string `json:"invocation"` // slug
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_json",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Validate invocation exists
+	invocationSlug := strings.ToLower(strings.TrimSpace(req.Invocation))
+	inv, validInvocation := eldritchInvocations[invocationSlug]
+	if !validInvocation {
+		validSlugs := []string{}
+		for slug := range eldritchInvocations {
+			validSlugs = append(validSlugs, slug)
+		}
+		sort.Strings(validSlugs)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_invocation",
+			"message":       fmt.Sprintf("'%s' is not a valid Eldritch Invocation", req.Invocation),
+			"valid_options": validSlugs,
+		})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var invocationsJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, name, class, level, COALESCE(eldritch_invocations, '[]')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &charName, &class, &level, &invocationsJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_your_character",
+			"message": "You can only choose Invocations for your own characters",
+		})
+		return
+	}
+	
+	if strings.ToLower(class) != "warlock" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_warlock",
+			"message": "Only Warlocks can learn Eldritch Invocations",
+		})
+		return
+	}
+	
+	if level < 2 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "level_too_low",
+			"message": "Warlocks gain Eldritch Invocations at level 2",
+			"level":   level,
+		})
+		return
+	}
+	
+	var currentInvocations []string
+	json.Unmarshal(invocationsJSON, &currentInvocations)
+	
+	// Check if already known
+	for _, c := range currentInvocations {
+		if c == invocationSlug {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_known",
+				"message": fmt.Sprintf("%s already knows %s", charName, inv.Name),
+			})
+			return
+		}
+	}
+	
+	// Check if at capacity
+	maxInvocations := getMaxInvocations(level)
+	if len(currentInvocations) >= maxInvocations {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":          "at_capacity",
+			"message":        fmt.Sprintf("%s has already learned %d Invocations (max at level %d)", charName, len(currentInvocations), level),
+			"known":          currentInvocations,
+			"max_invocations": maxInvocations,
+		})
+		return
+	}
+	
+	// Check prerequisites
+	meetsReqs, reason := meetsInvocationPrerequisites(req.CharacterID, inv)
+	if !meetsReqs {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "prerequisite_not_met",
+			"message": reason,
+		})
+		return
+	}
+	
+	// Add the invocation
+	currentInvocations = append(currentInvocations, invocationSlug)
+	updatedJSON, _ := json.Marshal(currentInvocations)
+	
+	_, err = db.Exec("UPDATE characters SET eldritch_invocations = $1 WHERE id = $2", updatedJSON, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "database_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Apply passive effects
+	effects := []string{}
+	if inv.Mechanics["grant_proficiency"] != "" {
+		// Add skill proficiencies (Beguiling Influence)
+		proficiencies := strings.Split(inv.Mechanics["grant_proficiency"], ",")
+		var currentSkillsJSON []byte
+		db.QueryRow("SELECT COALESCE(skill_proficiencies, '[]') FROM characters WHERE id = $1", req.CharacterID).Scan(&currentSkillsJSON)
+		var currentSkills []string
+		json.Unmarshal(currentSkillsJSON, &currentSkills)
+		
+		for _, prof := range proficiencies {
+			prof = strings.TrimSpace(prof)
+			alreadyHas := false
+			for _, s := range currentSkills {
+				if strings.EqualFold(s, prof) {
+					alreadyHas = true
+					break
+				}
+			}
+			if !alreadyHas {
+				currentSkills = append(currentSkills, prof)
+				effects = append(effects, fmt.Sprintf("Gained proficiency in %s", prof))
+			}
+		}
+		updatedSkillsJSON, _ := json.Marshal(currentSkills)
+		db.Exec("UPDATE characters SET skill_proficiencies = $1 WHERE id = $2", updatedSkillsJSON, req.CharacterID)
+	}
+	
+	response := map[string]interface{}{
+		"success":         true,
+		"character_id":    req.CharacterID,
+		"character_name":  charName,
+		"learned":         inv.Name,
+		"description":     inv.Description,
+		"mechanics":       inv.Mechanics,
+		"known_count":     len(currentInvocations),
+		"max_invocations": maxInvocations,
+		"can_learn_more":  len(currentInvocations) < maxInvocations,
+		"all_known":       currentInvocations,
+	}
+	if len(effects) > 0 {
+		response["effects_applied"] = effects
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleUniverseInvocations godoc
+// @Summary List all Eldritch Invocations
+// @Description Get a list of all available Eldritch Invocations with prerequisites
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of invocations"
+// @Router /universe/invocations [get]
+func handleUniverseInvocations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Build list with prerequisites
+	invocations := []map[string]interface{}{}
+	for slug, inv := range eldritchInvocations {
+		prereqs := map[string]interface{}{}
+		if inv.Prerequisites.Level > 0 {
+			prereqs["level"] = inv.Prerequisites.Level
+		}
+		if inv.Prerequisites.RequiresSpell != "" {
+			prereqs["requires_spell"] = inv.Prerequisites.RequiresSpell
+		}
+		if inv.Prerequisites.Pact != "" {
+			prereqs["pact_boon"] = inv.Prerequisites.Pact
+		}
+		
+		invocations = append(invocations, map[string]interface{}{
+			"slug":          slug,
+			"name":          inv.Name,
+			"description":   inv.Description,
+			"prerequisites": prereqs,
+			"mechanics":     inv.Mechanics,
+		})
+	}
+	
+	// Sort by level requirement then name
+	sort.Slice(invocations, func(i, j int) bool {
+		iLevel := 0
+		jLevel := 0
+		if prereqs, ok := invocations[i]["prerequisites"].(map[string]interface{}); ok {
+			if l, ok := prereqs["level"].(int); ok {
+				iLevel = l
+			}
+		}
+		if prereqs, ok := invocations[j]["prerequisites"].(map[string]interface{}); ok {
+			if l, ok := prereqs["level"].(int); ok {
+				jLevel = l
+			}
+		}
+		if iLevel != jLevel {
+			return iLevel < jLevel
+		}
+		return invocations[i]["name"].(string) < invocations[j]["name"].(string)
+	})
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"invocations":       invocations,
+		"total":             len(invocations),
+		"invocations_by_level": map[string]int{
+			"no_prerequisite": countInvocationsByLevel(0),
+			"level_5":         countInvocationsByLevel(5),
+			"level_7":         countInvocationsByLevel(7),
+			"level_9":         countInvocationsByLevel(9),
+			"level_12":        countInvocationsByLevel(12),
+			"level_15":        countInvocationsByLevel(15),
+		},
+		"note": "Use POST /api/characters/invocations to learn an invocation for your Warlock",
+	})
+}
+
+func countInvocationsByLevel(level int) int {
+	count := 0
+	for _, inv := range eldritchInvocations {
+		if inv.Prerequisites.Level == level {
+			count++
+		}
+	}
+	return count
 }
 
 // handleFlexibleCasting godoc
