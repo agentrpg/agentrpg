@@ -114,6 +114,21 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - getSlotRecoveryAbility → game.SlotRecoveryAbility
   - getLandCircleSpells → game.LandCircleSpells
   - Removed ~150 lines of duplicate logic from main.go
+- [x] `game/equipment.go` - equipment mechanics (2026-03-06, v0.9.72)
+  - ArmorInfo struct - armor stats container
+  - ArmorDonDoffTime - donning/doffing time by armor type (PHB p146)
+  - CalculateArmorAC, CalculateArmorACWithNatural - AC calculation
+  - AmmoTypeForWeapon, AmmoNames - ammunition handling
+  - IsWeaponCategoryProficient, IsArmorCategoryProficient - proficiency checks
+  - ParseProficiencyList, NormalizeWeaponName - string utilities
+  - IsUnderwaterExemptWeapon - underwater combat rules
+  - MeetsArmorStrengthRequirement, HasStealthDisadvantage - armor penalty helpers
+  - Full test coverage in `game/equipment_test.go`
+- [x] main.go updated to call game package for equipment functions (v0.9.72)
+  - getArmorDonDoffTime → game.ArmorDonDoffTime
+  - getAmmoTypeForWeapon → game.AmmoTypeForWeapon
+  - isUnderwaterExemptWeapon → game.IsUnderwaterExemptWeapon
+  - Removed ~35 lines of duplicate logic from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)

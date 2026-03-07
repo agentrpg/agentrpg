@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.71"
+const version = "0.9.72"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2696,26 +2696,6 @@ func getArmorInfo(armorSlug string) (*ArmorInfo, error) {
 		return nil, err
 	}
 	return &info, nil
-}
-
-// getArmorDonDoffTime returns donning and doffing times in minutes for an armor type (PHB p146)
-// Shield: 1 action to don, 1 action to doff (represented as 0 minutes, handled specially in combat)
-// Light armor: 1 minute don, 1 minute doff
-// Medium armor: 5 minutes don, 1 minute doff
-// Heavy armor: 10 minutes don, 5 minutes doff
-func getArmorDonDoffTime(armorType string) (donMinutes, doffMinutes int) {
-	switch strings.ToLower(armorType) {
-	case "shield":
-		return 0, 0 // Handled as action in combat
-	case "light":
-		return 1, 1
-	case "medium":
-		return 5, 1
-	case "heavy":
-		return 10, 5
-	default:
-		return 1, 1 // Default to light armor timing
-	}
 }
 
 // isCharacterInCombat checks if a character is currently in an active combat
@@ -19101,7 +19081,7 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		// Block armor changes during combat (PHB p146 - takes too long)
 		if inCombat {
 			w.WriteHeader(http.StatusBadRequest)
-			donTime, _ := getArmorDonDoffTime(armorInfo.Type)
+			donTime, _ := game.ArmorDonDoffTime(armorInfo.Type)
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"error":              "cannot_change_armor_in_combat",
 				"reason":             fmt.Sprintf("Donning %s armor takes %d minutes. You cannot change armor during combat.", armorInfo.Type, donTime),
@@ -19126,7 +19106,7 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		// Calculate donning time
-		donTime, doffTime := getArmorDonDoffTime(armorInfo.Type)
+		donTime, doffTime := game.ArmorDonDoffTime(armorInfo.Type)
 		timeInfo["armor_type"] = armorInfo.Type
 		timeInfo["don_time_minutes"] = donTime
 		timeInfo["doff_time_minutes"] = doffTime
@@ -19135,7 +19115,7 @@ func handleCharacterEquipArmor(w http.ResponseWriter, r *http.Request) {
 		if currentArmor.Valid && currentArmor.String != "" && currentArmor.String != req.Armor {
 			oldArmor, _ := getArmorInfo(currentArmor.String)
 			if oldArmor != nil {
-				_, oldDoffTime := getArmorDonDoffTime(oldArmor.Type)
+				_, oldDoffTime := game.ArmorDonDoffTime(oldArmor.Type)
 				timeInfo["total_time_minutes"] = oldDoffTime + donTime
 				timeInfo["note"] = fmt.Sprintf("Doffing %s (%d min) + donning %s (%d min)", oldArmor.Type, oldDoffTime, armorInfo.Type, donTime)
 			}
@@ -19292,7 +19272,7 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 			doffTime := 1
 			if armorInfo != nil {
 				armorType = armorInfo.Type
-				_, doffTime = getArmorDonDoffTime(armorInfo.Type)
+				_, doffTime = game.ArmorDonDoffTime(armorInfo.Type)
 			}
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -19306,7 +19286,7 @@ func handleCharacterUnequipArmor(w http.ResponseWriter, r *http.Request) {
 		// Calculate doff time
 		armorInfo, _ := getArmorInfo(currentArmor.String)
 		if armorInfo != nil {
-			_, doffTime := getArmorDonDoffTime(armorInfo.Type)
+			_, doffTime := game.ArmorDonDoffTime(armorInfo.Type)
 			timeInfo["armor_type"] = armorInfo.Type
 			timeInfo["doff_time_minutes"] = doffTime
 		}
@@ -21977,7 +21957,7 @@ func resolveAction(action, description string, charID int) string {
 		
 		// Check ammunition for ranged weapons (v0.8.18)
 		if hasWeapon && containsProperty(weapon.Properties, "ammunition") {
-			ammoType := getAmmoTypeForWeapon(weaponKey)
+			ammoType := game.AmmoTypeForWeapon(weaponKey)
 			hasAmmo, ammoErr := checkAndUseAmmo(charID, ammoType)
 			if !hasAmmo {
 				return ammoErr
@@ -22032,7 +22012,7 @@ func resolveAction(action, description string, charID int) string {
 				hasDisadvantage = true
 			} else {
 				// Ranged attacks have disadvantage unless crossbow/net/thrown
-				if !isUnderwaterExemptWeapon(weaponKey) {
+				if !game.IsUnderwaterExemptWeapon(weaponKey) {
 					hasDisadvantage = true
 				}
 			}
@@ -24065,7 +24045,7 @@ func resolveAction(action, description string, charID int) string {
 		
 		// Check ammunition if weapon requires it (decrement for each target)
 		if containsProperty(volleyWeapon.Properties, "ammunition") {
-			volleyAmmoType := getAmmoTypeForWeapon(volleyWeaponKey)
+			volleyAmmoType := game.AmmoTypeForWeapon(volleyWeaponKey)
 			// Check ammo availability for each target by calling checkAndUseAmmo
 			// First pass: verify we have enough ammo before attacking
 			for i := 0; i < volleyTargetCount; i++ {
@@ -25369,21 +25349,6 @@ func consumeSpellMaterial(charID int, materialName string) {
 
 // AMMUNITION TRACKING (v0.8.18)
 
-// getAmmoTypeForWeapon returns the ammunition type needed for a weapon, or "" if none
-func getAmmoTypeForWeapon(weaponKey string) string {
-	// Map weapon keys to their ammunition type
-	ammoMap := map[string]string{
-		"shortbow":       "arrows",
-		"longbow":        "arrows",
-		"light_crossbow": "bolts",
-		"heavy_crossbow": "bolts",
-		"hand_crossbow":  "bolts",
-		"blowgun":        "needles",
-		"sling":          "bullets",
-	}
-	return ammoMap[weaponKey]
-}
-
 // checkAndUseAmmo checks if character has ammunition and decrements it
 // Returns (success, message)
 func checkAndUseAmmo(charID int, ammoType string) (bool, string) {
@@ -26200,22 +26165,6 @@ func isUnderwaterCombat(lobbyID int) bool {
 		return false
 	}
 	return underwater
-}
-
-// isUnderwaterExemptWeapon checks if a weapon is exempt from underwater disadvantage
-// Crossbows, nets, and thrown weapons (javelin, trident, spear, dart) work normally
-func isUnderwaterExemptWeapon(weaponKey string) bool {
-	exemptWeapons := map[string]bool{
-		"crossbow-light": true,
-		"crossbow-heavy": true,
-		"crossbow-hand":  true,
-		"net":            true,
-		"javelin":        true,
-		"trident":        true,
-		"spear":          true,
-		"dart":           true,
-	}
-	return exemptWeapons[strings.ToLower(weaponKey)]
 }
 
 // getTargetCreatureType returns the creature type for a character/monster ID
