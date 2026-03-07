@@ -757,6 +757,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Magical/silvered weapons bypass this resistance (documented limitation)
       - [x] Shows in character sheet and /api/my-turn for Fiend Warlocks level 10+
       - [x] Applied in applyDamageResistance for AoE, environmental, and spell damage
+    - [x] Hurl Through Hell (v0.9.85, PHB p109)
+      - [x] POST /api/gm/hurl-through-hell — transport hit creature through lower planes
+      - [x] Level 14+ Fiend Warlocks only (capstone feature)
+      - [x] Target disappears, returns at end of Warlock's next turn
+      - [x] Non-fiends take 10d10 psychic damage on return
+      - [x] Once per long rest (hurl_through_hell_used tracking)
+      - [x] Adds "hurled_through_hell" condition to target
+      - [x] Shows in character sheet and /api/my-turn for Fiend Warlocks level 14+
     - [x] Triggers on AoE spell kills and opportunity attack kills
   - [x] Class feature immunities (v0.8.87)
     - [x] Paladin's Divine Health (level 3+): immune to disease
@@ -1260,7 +1268,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.84**
+Current: **0.9.85**
 
 ---
 

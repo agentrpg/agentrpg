@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.84"
+const version = "0.9.85"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -412,6 +412,7 @@ func main() {
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dark-ones-luck", handleGMDarkOnesLuck)
+	http.HandleFunc("/api/gm/hurl-through-hell", handleGMHurlThroughHell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
 	http.HandleFunc("/api/gm/facing", handleGMFacing)
@@ -1029,6 +1030,12 @@ func initDB() {
 		-- Can change this choice on short or long rest
 		-- Magical weapons and silver weapons bypass this resistance
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS fiendish_resilience VARCHAR(20);
+		
+		-- Hurl Through Hell (Fiend Warlock level 14+, PHB p109)
+		-- When you hit a creature with an attack, transport them through the lower planes
+		-- They return at end of your next turn, taking 10d10 psychic damage if not a fiend
+		-- Once per long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS hurl_through_hell_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -8942,6 +8949,20 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 				"phb_reference":      "PHB p109 - Fiend Patron",
 				"tip":                "🛡️ Choose a damage type to resist! Change it after resting to adapt to upcoming threats.",
 			}
+			
+			// v0.9.85: Hurl Through Hell (level 14+)
+			if level >= 14 {
+				var hurlUsed bool
+				db.QueryRow("SELECT COALESCE(hurl_through_hell_used, false) FROM characters WHERE id = $1", charID).Scan(&hurlUsed)
+				response["hurl_through_hell"] = map[string]interface{}{
+					"available":     !hurlUsed,
+					"used":          hurlUsed,
+					"recovers_on":   "long rest",
+					"description":   "When you hit a creature with an attack, transport them through the lower planes. They return at the end of your next turn. Non-fiends take 10d10 psychic damage.",
+					"how_to_use":    "After hitting with an attack, ask GM to call POST /api/gm/hurl-through-hell",
+					"phb_reference": "PHB p109 - Fiend Patron",
+				}
+			}
 		}
 	}
 	
@@ -10173,6 +10194,26 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 			
 			response["fiendish_resilience"] = fiendishResInfo
+			
+			// v0.9.85: Hurl Through Hell (level 14+)
+			if level >= 14 {
+				var hurlUsed bool
+				db.QueryRow("SELECT COALESCE(hurl_through_hell_used, false) FROM characters WHERE id = $1", charID).Scan(&hurlUsed)
+				hurlInfo := map[string]interface{}{
+					"available":     !hurlUsed,
+					"used":          hurlUsed,
+					"recovers_on":   "long rest",
+					"description":   "When you hit a creature with an attack, transport them through the lower planes. They return at the end of your next turn. Non-fiends take 10d10 psychic damage.",
+					"how_to_use":    "After hitting with an attack, ask GM to call POST /api/gm/hurl-through-hell",
+					"phb_reference": "PHB p109 - Fiend Patron",
+				}
+				if hurlUsed {
+					hurlInfo["tip"] = "⚠️ You've already used Hurl Through Hell. It recovers on your next long rest."
+				} else {
+					hurlInfo["tip"] = "🔥💀 You can hurl a creature you hit through the nightmare planes! Non-fiends take 10d10 psychic damage."
+				}
+				response["hurl_through_hell"] = hurlInfo
+			}
 		}
 	}
 	
@@ -29180,6 +29221,231 @@ func handleGMDarkOnesLuck(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGMHurlThroughHell godoc
+// @Summary Fiend Warlock's Hurl Through Hell capstone (PHB p109)
+// @Description Level 14+ Fiend Warlocks can use this feature when they hit a creature with an attack. The target is instantly transported through the lower planes, disappearing until the end of the Warlock's next turn. When the target returns, if it is not a fiend, it takes 10d10 psychic damage. This feature can only be used once per long rest. The target gains a "hurled_through_hell" condition while absent.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,target_id=integer,target_is_fiend=boolean} true "character_id (Warlock), target_id (creature hit), target_is_fiend (true if target is a fiend type)"
+// @Success 200 {object} map[string]interface{} "Target hurled through hell"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or feature unavailable"
+// @Router /gm/hurl-through-hell [post]
+func handleGMHurlThroughHell(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	
+	var req struct {
+		CharacterID   int  `json:"character_id"`
+		TargetID      int  `json:"target_id"`
+		TargetIsFiend bool `json:"target_is_fiend"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	if req.TargetID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "target_id required (the creature that was hit)",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var level int
+	var subclass sql.NullString
+	var featureUsed bool
+	err = db.QueryRow(`
+		SELECT name, class, level, subclass, COALESCE(hurl_through_hell_used, false)
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &class, &level, &subclass, &featureUsed)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify character is a Warlock with Fiend patron
+	if strings.ToLower(class) != "warlock" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_warlock",
+			"message": fmt.Sprintf("%s is a %s, not a Warlock. Only Warlocks can use Hurl Through Hell.", charName, class),
+		})
+		return
+	}
+	
+	if !subclass.Valid || strings.ToLower(subclass.String) != "fiend" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_fiend_warlock",
+			"message": fmt.Sprintf("%s is not a Fiend patron warlock. Hurl Through Hell is a Fiend-specific feature.", charName),
+		})
+		return
+	}
+	
+	// Check that character has the feature (level 14+)
+	if level < 14 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "feature_not_available",
+			"message": fmt.Sprintf("%s hasn't unlocked Hurl Through Hell yet (requires Fiend Warlock level 14+, currently level %d)", charName, level),
+		})
+		return
+	}
+	
+	// Check if feature has already been used
+	if featureUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "feature_already_used",
+			"message": fmt.Sprintf("%s has already used Hurl Through Hell since their last long rest", charName),
+			"note":    "This feature refreshes on a long rest",
+		})
+		return
+	}
+	
+	// Get target info
+	var targetName string
+	var targetHP, targetMaxHP int
+	var targetConditions []byte
+	err = db.QueryRow(`
+		SELECT name, hp, max_hp, COALESCE(conditions, '[]')
+		FROM characters WHERE id = $1 AND lobby_id = $2
+	`, req.TargetID, lobbyID).Scan(&targetName, &targetHP, &targetMaxHP, &targetConditions)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "target_not_found",
+			"message": fmt.Sprintf("Target character %d not found in this campaign", req.TargetID),
+		})
+		return
+	}
+	
+	// Mark the feature as used
+	db.Exec("UPDATE characters SET hurl_through_hell_used = true WHERE id = $1", req.CharacterID)
+	
+	// Add "hurled_through_hell" condition to target
+	var conditions []string
+	json.Unmarshal(targetConditions, &conditions)
+	conditions = append(conditions, "hurled_through_hell")
+	conditionsJSON, _ := json.Marshal(conditions)
+	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", conditionsJSON, req.TargetID)
+	
+	// Calculate damage if target is not a fiend
+	var damage int
+	var diceResults []int
+	var damageMessage string
+	
+	if !req.TargetIsFiend {
+		// Roll 10d10 psychic damage
+		for i := 0; i < 10; i++ {
+			roll := game.RollDie(10)
+			diceResults = append(diceResults, roll)
+			damage += roll
+		}
+		
+		// Apply damage when they return (we'll note this for the GM)
+		damageMessage = fmt.Sprintf("When %s returns at the end of %s's next turn, they will take %d psychic damage (10d10: %v).", 
+			targetName, charName, damage, diceResults)
+	} else {
+		damageMessage = fmt.Sprintf("%s is a fiend and takes no damage from the horrific experience.", targetName)
+	}
+	
+	response := map[string]interface{}{
+		"success":      true,
+		"character":    charName,
+		"character_id": req.CharacterID,
+		"target":       targetName,
+		"target_id":    req.TargetID,
+		"feature":      "Hurl Through Hell",
+		"message": fmt.Sprintf("🔥💀 %s uses Hurl Through Hell! %s is instantly transported through the lower planes of existence, disappearing in a burst of hellfire! They hurtle through a nightmare landscape of torment and despair.", 
+			charName, targetName),
+		"effect": map[string]interface{}{
+			"status":    "hurled",
+			"returns":   "At the end of " + charName + "'s next turn",
+			"condition": "hurled_through_hell (target cannot take actions, is absent from the battlefield)",
+		},
+		"damage_on_return": map[string]interface{}{
+			"applies":       !req.TargetIsFiend,
+			"damage":        damage,
+			"damage_type":   "psychic",
+			"dice":          "10d10",
+			"dice_results":  diceResults,
+			"explanation":   damageMessage,
+		},
+		"note": "This feature is now expended until a long rest. When processing the Warlock's next turn end, remove the hurled_through_hell condition and apply the damage if applicable.",
+	}
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("%s uses Hurl Through Hell on %s", charName, targetName)
+	var actionResult string
+	if !req.TargetIsFiend {
+		actionResult = fmt.Sprintf("%s is hurled through the lower planes. Will take %d psychic damage (10d10) when they return.", targetName, damage)
+	} else {
+		actionResult = fmt.Sprintf("%s is hurled through the lower planes. As a fiend, they are unaffected by the horror.", targetName)
+	}
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "hurl_through_hell", actionDesc, actionResult)
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleGMFlanking godoc
 // @Summary Grant flanking advantage (optional rule)
 // @Description Flanking (optional rule from DMG): When you and an ally are on opposite sides of an enemy, you both have advantage on melee attacks against that enemy. The GM calls this when positioning allows flanking. Adds a "flanking:TARGET_ID" condition to the character that grants advantage on melee attacks against that specific target. Condition clears at end of the character's next turn.
@@ -37087,6 +37353,7 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			darkness_racial_used = false,
 			wholeness_of_body_used = false,
 			dark_ones_luck_used = false,
+			hurl_through_hell_used = false,
 			invocation_spells_used = '[]'
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
