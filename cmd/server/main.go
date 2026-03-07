@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.70"
+const version = "0.9.71"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2351,26 +2351,7 @@ func hasWhirlwindAttack(characterID int) bool {
 	return getMultiattackChoice(characterID) == "whirlwind_attack"
 }
 
-// getScaledCantripDamage returns the damage dice for a cantrip at a given character level (v0.9.45)
-// Cantrips scale at character levels 5, 11, and 17 (not caster level - uses total character level)
-// Example: Fire Bolt {"1":"1d10","5":"2d10","11":"3d10","17":"4d10"}
-func getScaledCantripDamage(damageAtCharLevel map[string]string, charLevel int) string {
-	// Find the highest threshold that doesn't exceed the character's level
-	thresholds := []int{17, 11, 5, 1}
-	for _, threshold := range thresholds {
-		if charLevel >= threshold {
-			key := fmt.Sprintf("%d", threshold)
-			if dice, ok := damageAtCharLevel[key]; ok {
-				return dice
-			}
-		}
-	}
-	// Fallback to level 1 damage if no match found
-	if dice, ok := damageAtCharLevel["1"]; ok {
-		return dice
-	}
-	return "" // No damage data available
-}
+// v0.9.71: getScaledCantripDamage moved to game.ScaledCantripDamage
 
 // getExtraAttackCount returns the number of attacks a character can make with a single Attack action
 // Based on class and level per 5e PHB:
@@ -8565,7 +8546,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		
-		maxPrepared := getMaxPreparedSpells(class, level, intl, wis, cha)
+		maxPrepared := game.MaxPreparedSpells(class, level, intl, wis, cha)
 		response["prepared_spells"] = preparedSpellsInfo
 		response["prepared_count"] = len(preparedSpells)
 		response["max_prepared"] = maxPrepared
@@ -9477,7 +9458,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		
-		maxPrepared := getMaxPreparedSpells(class, level, myTurnIntl, myTurnWis, myTurnCha)
+		maxPrepared := game.MaxPreparedSpells(class, level, myTurnIntl, myTurnWis, myTurnCha)
 		characterInfo["prepared_spells"] = preparedInfo
 		characterInfo["max_prepared"] = maxPrepared
 		characterInfo["caster_type"] = "prepared"
@@ -17388,7 +17369,7 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		damageAtCharLevel := map[string]string{}
 		json.Unmarshal(damageAtCharLevelJSON, &damageAtCharLevel)
 		if len(damageAtCharLevel) > 0 && casterCharLevel > 0 {
-			actualDamageDice = getScaledCantripDamage(damageAtCharLevel, casterCharLevel)
+			actualDamageDice = game.ScaledCantripDamage(damageAtCharLevel, casterCharLevel)
 		}
 	}
 	
@@ -22983,7 +22964,7 @@ func resolveAction(action, description string, charID int) string {
 				
 				// v0.9.45: Cantrip damage scaling based on character level
 				if spell.Level == 0 && len(spell.DamageAtCharLevel) > 0 {
-					damageDice = getScaledCantripDamage(spell.DamageAtCharLevel, level)
+					damageDice = game.ScaledCantripDamage(spell.DamageAtCharLevel, level)
 				}
 				
 				dmg := game.RollDamage(damageDice, false)
@@ -32501,74 +32482,7 @@ func getDragonAncestryDamageType(charID int) string {
 	return damageType
 }
 
-// getLandCircleSpells returns circle spells for Circle of the Land druids based on land type (v0.9.23)
-// Land types: arctic, coast, desert, forest, grassland, mountain, swamp, underdark (PHB p68-69)
-func getLandCircleSpells(landType string, level int) []string {
-	// Circle spells by land type - unlocked at druid levels 3, 5, 7, 9 (for 2nd, 3rd, 4th, 5th level spells)
-	circleSpells := map[string]map[int][]string{
-		"arctic": {
-			3: {"hold-person", "spike-growth"},
-			5: {"sleet-storm", "slow"},
-			7: {"freedom-of-movement", "ice-storm"},
-			9: {"commune-with-nature", "cone-of-cold"},
-		},
-		"coast": {
-			3: {"mirror-image", "misty-step"},
-			5: {"water-breathing", "water-walk"},
-			7: {"control-water", "freedom-of-movement"},
-			9: {"conjure-elemental", "scrying"},
-		},
-		"desert": {
-			3: {"blur", "silence"},
-			5: {"create-food-and-water", "protection-from-energy"},
-			7: {"blight", "hallucinatory-terrain"},
-			9: {"insect-plague", "wall-of-stone"},
-		},
-		"forest": {
-			3: {"barkskin", "spider-climb"},
-			5: {"call-lightning", "plant-growth"},
-			7: {"divination", "freedom-of-movement"},
-			9: {"commune-with-nature", "tree-stride"},
-		},
-		"grassland": {
-			3: {"invisibility", "pass-without-trace"},
-			5: {"daylight", "haste"},
-			7: {"divination", "freedom-of-movement"},
-			9: {"dream", "insect-plague"},
-		},
-		"mountain": {
-			3: {"spider-climb", "spike-growth"},
-			5: {"lightning-bolt", "meld-into-stone"},
-			7: {"stone-shape", "stoneskin"},
-			9: {"passwall", "wall-of-stone"},
-		},
-		"swamp": {
-			3: {"darkness", "acid-arrow"}, // Melf's Acid Arrow in SRD
-			5: {"water-walk", "stinking-cloud"},
-			7: {"freedom-of-movement", "locate-creature"},
-			9: {"insect-plague", "scrying"},
-		},
-		"underdark": {
-			3: {"spider-climb", "web"},
-			5: {"gaseous-form", "stinking-cloud"},
-			7: {"greater-invisibility", "stone-shape"},
-			9: {"cloudkill", "insect-plague"},
-		},
-	}
-
-	landSpells, ok := circleSpells[strings.ToLower(landType)]
-	if !ok {
-		return nil
-	}
-
-	var spells []string
-	for spellLevel, spellList := range landSpells {
-		if level >= spellLevel {
-			spells = append(spells, spellList...)
-		}
-	}
-	return spells
-}
+// v0.9.71: getLandCircleSpells moved to game.LandCircleSpells
 
 // getDomainSpells returns the always-prepared spells for a character based on subclass (v0.8.72)
 // These spells don't count against prepared spell limits and are automatically known.
@@ -32577,7 +32491,7 @@ func getLandCircleSpells(landType string, level int) []string {
 func getDomainSpells(subclassSlug string, level int, landType ...string) []string {
 	// v0.9.23: Handle Circle of the Land druids with circle spells
 	if subclassSlug == "land" && len(landType) > 0 && landType[0] != "" {
-		return getLandCircleSpells(landType[0], level)
+		return game.LandCircleSpells(landType[0], level)
 	}
 
 	sub, ok := availableSubclasses[subclassSlug]
@@ -32740,38 +32654,7 @@ func getSpellcastingAbilityMod(class string, intl, wis, cha int) int {
 	}
 }
 
-// getMaxPreparedSpells returns the maximum number of spells a prepared caster can prepare
-// Formula: level + spellcasting modifier (minimum 1)
-// Paladins and Rangers use half level (rounded down, minimum 1) + modifier
-func getMaxPreparedSpells(class string, level, intl, wis, cha int) int {
-	if !game.IsPreparedCaster(class) {
-		return 0
-	}
-	
-	mod := game.SpellcastingAbilityMod(class, intl, wis, cha)
-	classLower := strings.ToLower(class)
-	
-	var preparedCount int
-	switch classLower {
-	case "paladin":
-		// Paladins prepare: paladin level / 2 (round down) + CHA modifier
-		halfLevel := level / 2
-		if halfLevel < 1 {
-			halfLevel = 1
-		}
-		preparedCount = halfLevel + mod
-	case "cleric", "druid", "wizard":
-		// Full casters prepare: class level + spellcasting modifier
-		preparedCount = level + mod
-	default:
-		preparedCount = level + mod
-	}
-	
-	if preparedCount < 1 {
-		preparedCount = 1
-	}
-	return preparedCount
-}
+// v0.9.71: getMaxPreparedSpells moved to game.MaxPreparedSpells
 
 // getClassSpellList returns all spell slugs available to a class from the class_spells table
 // Returns nil if class spell list not seeded (allows any SRD spell as fallback)
@@ -37138,28 +37021,7 @@ func handleRemoveCondition(w http.ResponseWriter, r *http.Request, charID int) {
 // @Failure 400 {object} map[string]interface{} "No hit dice available, invalid slot recovery, or ability already used"
 // @Security BasicAuth
 // @Router /characters/{id}/short-rest [post]
-// v0.8.91: getSlotRecoveryAbility returns the spell slot recovery ability for a class/subclass combo
-// Returns: ability name (for resource tracking), max combined slot levels, max individual slot level, or empty if not available
-func getSlotRecoveryAbility(class, subclass string, level int) (abilityName string, maxCombined int, maxSlotLevel int) {
-	classLower := strings.ToLower(class)
-	subclassLower := strings.ToLower(subclass)
-	
-	// Wizard's Arcane Recovery (PHB p115) - all wizards get this at level 1
-	// Recover slots with combined level ≤ half wizard level (rounded up), max 5th level
-	if classLower == "wizard" {
-		maxCombined = (level + 1) / 2 // Round up
-		return "arcane_recovery", maxCombined, 5
-	}
-	
-	// Druid's Natural Recovery (PHB p68) - Circle of the Land druids only, level 2+
-	// Same mechanics as Arcane Recovery
-	if classLower == "druid" && subclassLower == "land" && level >= 2 {
-		maxCombined = (level + 1) / 2 // Round up
-		return "natural_recovery", maxCombined, 5
-	}
-	
-	return "", 0, 0
-}
+// v0.9.71: getSlotRecoveryAbility moved to game.SlotRecoveryAbility
 
 func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	w.Header().Set("Content-Type", "application/json")
@@ -37288,7 +37150,7 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	}
 	
 	if len(req.RecoverSlots) > 0 {
-		abilityName, maxCombined, maxSlotLevel := getSlotRecoveryAbility(class, subclassStr, level)
+		abilityName, maxCombined, maxSlotLevel := game.SlotRecoveryAbility(class, subclassStr, level)
 		
 		if abilityName == "" {
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -38425,7 +38287,7 @@ func handlePrepareSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	json.Unmarshal(preparedSpellsJSON, &preparedSpells)
 	
 	// Calculate limits
-	maxPrepared := getMaxPreparedSpells(className, level, intl, wis, cha)
+	maxPrepared := game.MaxPreparedSpells(className, level, intl, wis, cha)
 	spellAbility := ""
 	switch strings.ToLower(className) {
 	case "wizard":
@@ -43652,7 +43514,7 @@ func handleCharacterMulticlass(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Calculate new spell slots if multiclassing spellcasters
-	newSpellSlots := getMulticlassSpellSlots(classLevels)
+	newSpellSlots := game.MulticlassSpellSlots(classLevels)
 	if len(newSpellSlots) > 0 {
 		response["spell_slots"] = newSpellSlots
 	}
@@ -43701,67 +43563,7 @@ func formatClassLevels(classLevels map[string]int) string {
 	return strings.Join(parts, "/")
 }
 
-// getMulticlassSpellSlots calculates combined spell slots for multiclass characters
-// PHB p164-165: Combined spellcasting levels determine spell slots
-func getMulticlassSpellSlots(classLevels map[string]int) map[int]int {
-	if len(classLevels) == 0 {
-		return map[int]int{}
-	}
-	
-	// Single class - use standard calculation
-	if len(classLevels) == 1 {
-		for class, level := range classLevels {
-			return game.SpellSlots(class, level)
-		}
-	}
-	
-	// Multiclass spellcasting calculation
-	// Full casters: Bard, Cleric, Druid, Sorcerer, Wizard = full level
-	// Half casters: Paladin, Ranger = half level (round down)
-	// Third casters: Eldritch Knight (Fighter), Arcane Trickster (Rogue) = 1/3 level (round down)
-	// Warlocks: separate Pact Magic, don't add to multiclass calculation
-	
-	fullCasters := map[string]bool{"bard": true, "cleric": true, "druid": true, "sorcerer": true, "wizard": true}
-	halfCasters := map[string]bool{"paladin": true, "ranger": true}
-	
-	combinedLevel := 0
-	warlockLevel := 0
-	
-	for class, level := range classLevels {
-		class = strings.ToLower(class)
-		if fullCasters[class] {
-			combinedLevel += level
-		} else if halfCasters[class] {
-			combinedLevel += level / 2 // Round down
-		} else if class == "warlock" {
-			warlockLevel = level // Warlock pact magic is separate
-		}
-		// Note: Eldritch Knight and Arcane Trickster would need subclass checking
-		// For now, non-caster classes don't contribute
-	}
-	
-	// If no spellcasting levels, return empty
-	if combinedLevel == 0 && warlockLevel == 0 {
-		return map[int]int{}
-	}
-	
-	// Get spell slots based on combined caster level
-	// Use the full caster table for combined level
-	result := map[int]int{}
-	if combinedLevel > 0 {
-		result = game.SpellSlots("wizard", combinedLevel) // Use wizard table for combined slots
-	}
-	
-	// Warlock pact magic is separate - add those slots
-	if warlockLevel > 0 {
-		warlockSlots := game.SpellSlots("warlock", warlockLevel)
-		for slotLevel, count := range warlockSlots {
-			result[slotLevel] += count
-		}
-	}
-	
-	return result
-}
+// v0.9.71: getMulticlassSpellSlots moved to game.MulticlassSpellSlots
 
 // handleUniverseMetamagic godoc
 // @Summary List all Metamagic options

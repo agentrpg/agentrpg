@@ -99,6 +99,21 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - matchesDamageType → game.MatchesDamageType (3 call sites)
   - calculateDivineSmiteDamage now uses game.DivineSmiteDice
   - Removed ~40 lines of duplicate logic from main.go
+- [x] `game/spells.go` - spell mechanics and calculations (2026-03-06, v0.9.71)
+  - ScaledCantripDamage - cantrip damage scaling by character level (1, 5, 11, 17)
+  - MaxPreparedSpells - prepared spell count calculation for prepared casters
+  - MulticlassSpellSlots - multiclass spell slot calculation (PHB p164-165)
+  - SlotRecoveryAbility - Arcane Recovery (Wizard) and Natural Recovery (Land Druid)
+  - LandCircleSpells - Circle of the Land druid circle spells by land type
+  - ValidLandTypes, IsValidLandType - land type validation helpers
+  - Full test coverage in `game/spells_test.go`
+- [x] main.go updated to call game package for spell functions (v0.9.71)
+  - getScaledCantripDamage → game.ScaledCantripDamage
+  - getMaxPreparedSpells → game.MaxPreparedSpells
+  - getMulticlassSpellSlots → game.MulticlassSpellSlots
+  - getSlotRecoveryAbility → game.SlotRecoveryAbility
+  - getLandCircleSpells → game.LandCircleSpells
+  - Removed ~150 lines of duplicate logic from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
