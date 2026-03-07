@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.69"
+const version = "0.9.70"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -175,7 +175,7 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	if immunities != "" {
 		for _, immunity := range strings.Split(immunities, ",") {
 			immunity = strings.TrimSpace(strings.ToLower(immunity))
-			if matchesDamageType(damageType, immunity, isMagical, isSilvered) {
+			if game.MatchesDamageType(damageType, immunity, isMagical, isSilvered) {
 				result.FinalDamage = 0
 				result.Immunities = append(result.Immunities, immunity)
 				result.WasNegated = true
@@ -188,7 +188,7 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	if vulnerabilities != "" {
 		for _, vulnerability := range strings.Split(vulnerabilities, ",") {
 			vulnerability = strings.TrimSpace(strings.ToLower(vulnerability))
-			if matchesDamageType(damageType, vulnerability, isMagical, isSilvered) {
+			if game.MatchesDamageType(damageType, vulnerability, isMagical, isSilvered) {
 				result.FinalDamage = damage * 2
 				result.Vulnerabilities = append(result.Vulnerabilities, vulnerability)
 				result.WasDoubled = true
@@ -202,7 +202,7 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	if resistances != "" {
 		for _, resistance := range strings.Split(resistances, ",") {
 			resistance = strings.TrimSpace(strings.ToLower(resistance))
-			if matchesDamageType(damageType, resistance, isMagical, isSilvered) {
+			if game.MatchesDamageType(damageType, resistance, isMagical, isSilvered) {
 				if result.WasDoubled {
 					// Vulnerability + Resistance = normal damage
 					result.FinalDamage = damage
@@ -218,48 +218,6 @@ func applyMonsterDamageResistance(monsterKey string, damage int, damageType stri
 	}
 	
 	return result
-}
-
-// matchesDamageType checks if a damage type matches a resistance/immunity/vulnerability string (v0.8.94)
-// Handles both simple ("fire") and complex ("bludgeoning, piercing, and slashing from nonmagical attacks") entries
-// isMagical: true if the damage source is magical (spells, +1 weapons, etc.)
-// isSilvered: true if the weapon is silvered
-func matchesDamageType(damageType, resistanceEntry string, isMagical bool, isSilvered bool) bool {
-	// Simple match (no conditional modifiers)
-	if damageType == resistanceEntry {
-		return true
-	}
-	
-	// Check if damage type is contained in the entry (for complex strings)
-	// e.g., "bludgeoning, piercing, and slashing from nonmagical attacks"
-	// e.g., "bludgeoning, piercing, and slashing from nonmagical attacks that aren't silvered"
-	if strings.Contains(resistanceEntry, damageType) {
-		entryLower := strings.ToLower(resistanceEntry)
-		
-		// Check for "nonmagical" condition
-		// Common phrasings: "from nonmagical attacks", "from nonmagical weapons"
-		isNonmagicalOnly := strings.Contains(entryLower, "nonmagical")
-		
-		// Check for "silvered" exception
-		// Common phrasing: "that aren't silvered"
-		hasSilveredExemption := strings.Contains(entryLower, "aren't silvered") || 
-			strings.Contains(entryLower, "not silvered") ||
-			strings.Contains(entryLower, "except silver")
-		
-		// If resistance only applies to nonmagical attacks and this IS magical, resistance doesn't apply
-		if isNonmagicalOnly && isMagical {
-			return false
-		}
-		
-		// If resistance has a silvered exemption and weapon IS silvered, resistance doesn't apply
-		if hasSilveredExemption && isSilvered {
-			return false
-		}
-		
-		return true
-	}
-	
-	return false
 }
 
 // extractDamageTypesFromAPI extracts damage type strings from SRD API response (v0.8.31)
@@ -26348,22 +26306,9 @@ func parseDivineSmiteSlot(description string) (bool, int) {
 // calculateDivineSmiteDamage calculates Divine Smite damage
 // Base: 2d8, +1d8 per slot level above 1st (max 5d8), +1d8 vs undead/fiend
 // isCrit doubles the dice
+// Uses game.DivineSmiteDice for dice calculation (v0.9.70)
 func calculateDivineSmiteDamage(slotLevel int, isUndeadOrFiend bool, isCrit bool) (int, string) {
-	// Calculate number of d8s: 2 + (slotLevel - 1), max 5
-	numDice := 2 + (slotLevel - 1)
-	if numDice > 5 {
-		numDice = 5
-	}
-	
-	// Extra d8 vs undead/fiend (this can exceed the 5d8 cap)
-	if isUndeadOrFiend {
-		numDice++
-	}
-	
-	// Double dice on crit
-	if isCrit {
-		numDice *= 2
-	}
+	numDice := game.DivineSmiteDice(slotLevel, isUndeadOrFiend, isCrit)
 	
 	// Roll the damage
 	total := 0

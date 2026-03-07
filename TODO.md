@@ -86,6 +86,19 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - Updated game.BrutalCriticalDice to take (class, level) for consistency
   - main.go now calls game.CriticalHitRange and game.BrutalCriticalDice
   - Removed getCritRange and getBrutalCriticalDice from main.go (~25 lines)
+- [x] `game/combat.go` - combat mechanics (2026-03-06, v0.9.70)
+  - DamageModResult struct - damage resistance/immunity/vulnerability result
+  - MatchesDamageType - checks if damage type matches resistance entry (handles nonmagical, silvered)
+  - ApplyDamageModifiers - pure logic for applying resistance/immunity/vulnerability
+  - DivineSmiteDice - calculates number of d8s for Paladin Divine Smite
+  - AttackModifiers struct and GetAttackModifiersFromConditions - advantage/disadvantage calculation
+  - IsAutoCriticalHit - checks paralyzed/unconscious within 5ft
+  - CanCriticalHit, IsCriticalMiss - d20 roll helpers
+  - Full test coverage in `game/combat_test.go`
+- [x] main.go updated to call game package for combat functions (v0.9.70)
+  - matchesDamageType → game.MatchesDamageType (3 call sites)
+  - calculateDivineSmiteDamage now uses game.DivineSmiteDice
+  - Removed ~40 lines of duplicate logic from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
@@ -98,11 +111,11 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
 - `handlers_combat.go` - combat system
 - `game/` - game logic as a package:
   - `dice.go` - dice rolling ✅
-  - `combat.go` - attack resolution, damage
+  - `combat.go` - attack resolution, damage ✅
   - `spells.go` - spell mechanics
-  - `conditions.go` - condition effects
-  - `classes.go` - class features
-  - `races.go` - racial features
+  - `conditions.go` - condition effects ✅
+  - `classes.go` - class features ✅
+  - `races.go` - racial features ✅
 - `srd.go` - SRD types, seeding, caches
 - `templates/` - HTML templates as embedded files
 
