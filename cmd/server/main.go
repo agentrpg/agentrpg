@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.77
+// @version 0.9.79
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.77"
+const version = "0.9.79"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -22380,8 +22380,19 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s%s%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote)
+			// v0.9.79: Lifedrinker on auto-crit (Warlock Invocation, PHB p111)
+			// CHA mod as necrotic damage (doesn't double on crit - flat bonus)
+			autoCritLifedrinkerNote := ""
+			if strings.ToLower(class) == "warlock" && level >= 12 && !isRangedAttack && hasPactBoon(charID, "blade") && hasInvocation(charID, "lifedrinker") {
+				chaBonus := game.Modifier(cha)
+				if chaBonus > 0 {
+					dmg += chaBonus
+					autoCritLifedrinkerNote = fmt.Sprintf(" (+%d Lifedrinker, necrotic)", chaBonus)
+				}
+			}
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, autoCritLifedrinkerNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -22539,11 +22550,22 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// v0.9.79: Lifedrinker on crit (Warlock Invocation, PHB p111)
+			// CHA mod as necrotic damage (doesn't double on crit - flat bonus)
+			critLifedrinkerNote := ""
+			if strings.ToLower(class) == "warlock" && level >= 12 && !isRangedAttack && hasPactBoon(charID, "blade") && hasInvocation(charID, "lifedrinker") {
+				chaBonus := game.Modifier(cha)
+				if chaBonus > 0 {
+					dmg += chaBonus
+					critLifedrinkerNote = fmt.Sprintf(" (+%d Lifedrinker, necrotic)", chaBonus)
+				}
+			}
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, critLifedrinkerNote)
 		} else if attackRoll == 1 && !attackHalflingLuckyUsed {
 			// Critical miss (nat 1) - but not if Halfling Lucky was used (they already rerolled)
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
@@ -22669,7 +22691,19 @@ func resolveAction(action, description string, charID int) string {
 			improvedSmiteNote = fmt.Sprintf(" (+%d Improved Divine Smite, 1d8 radiant)", improvedSmiteDmg)
 		}
 		
-		return fmt.Sprintf("Attack with %s: %d to hit%s%s. Damage: %d%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote)
+		// v0.9.79: Lifedrinker (Warlock Invocation, PHB p111)
+		// When you hit with your pact weapon, add CHA modifier as necrotic damage
+		// Requires level 12+ and Pact of the Blade
+		lifedrinkerNote := ""
+		if strings.ToLower(class) == "warlock" && level >= 12 && !isRangedAttack && hasPactBoon(charID, "blade") && hasInvocation(charID, "lifedrinker") {
+			chaBonus := game.Modifier(cha)
+			if chaBonus > 0 {
+				dmg += chaBonus
+				lifedrinkerNote = fmt.Sprintf(" (+%d Lifedrinker, necrotic)", chaBonus)
+			}
+		}
+		
+		return fmt.Sprintf("Attack with %s: %d to hit%s%s. Damage: %d%s%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, lifedrinkerNote)
 		
 	case "cast":
 		// v0.9.22: Non-proficient armor blocks spellcasting entirely (PHB p144)
@@ -23025,11 +23059,18 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
+				// v0.9.79: Repelling Blast (Warlock Invocation, PHB p111)
+				// Push target 10 feet away on eldritch blast hit
+				repellingBlastNote := ""
+				if spellKey == "eldritch-blast" && hasInvocation(charID, "repelling-blast") {
+					repellingBlastNote = " (Repelling Blast: target pushed 10 feet away)"
+				}
+				
 				saveInfo := ""
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, metamagicNote, materialConsumedNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing

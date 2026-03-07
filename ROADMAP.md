@@ -615,7 +615,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] All slots same level (via warlockSlots table)
   - [x] Recover on SHORT rest (implemented in handleShortRest)
   - [x] Separate tracking for multiclass (v0.9.20 - pact_slots_used column, character sheet shows pact_magic section, short rest only resets pact slots for multiclass)
-- [x] **Eldritch Invocations (v0.9.77, PHB pp110-111)**
+- [x] **Eldritch Invocations (v0.9.77, v0.9.79 PHB pp110-111)**
   - [x] Warlocks gain 2 invocations at level 2, up to 8 at level 18
   - [x] `eldritch_invocations` JSONB column on characters table
   - [x] GET /api/universe/invocations — list all 21 SRD invocations
@@ -623,6 +623,8 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] POST /api/characters/invocations — learn a new invocation
   - [x] Prerequisite checking (level requirements, spell requirements)
   - [x] **Agonizing Blast** — add CHA mod to eldritch blast damage (implemented in cast action)
+  - [x] **Repelling Blast** (v0.9.79) — push target 10 feet away on eldritch blast hit
+  - [x] **Lifedrinker** (v0.9.79) — add CHA mod as necrotic damage to pact weapon attacks (level 12+, Pact of the Blade)
   - [x] **Beguiling Influence** — grants Deception and Persuasion proficiency
   - [x] Invocations shown in character sheet and /api/my-turn for Warlocks
   - [x] Invocations: agonizing-blast, armor-of-shadows, beast-speech, beguiling-influence, devils-sight, eldritch-sight, eldritch-spear, eyes-of-the-rune-keeper, fiendish-vigor, gaze-of-two-minds, mask-of-many-faces, misty-visions, repelling-blast, thief-of-five-fates, mire-the-mind, one-with-shadows, sign-of-ill-omen, sculptor-of-flesh, ascendant-step, minions-of-chaos, otherworldly-leap, whispers-of-the-grave, lifedrinker, master-of-myriad-forms, visions-of-distant-realms, witch-sight
@@ -1243,7 +1245,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.78**
+Current: **0.9.79**
 
 ---
 
