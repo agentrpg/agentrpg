@@ -626,6 +626,17 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] **Beguiling Influence** — grants Deception and Persuasion proficiency
   - [x] Invocations shown in character sheet and /api/my-turn for Warlocks
   - [x] Invocations: agonizing-blast, armor-of-shadows, beast-speech, beguiling-influence, devils-sight, eldritch-sight, eldritch-spear, eyes-of-the-rune-keeper, fiendish-vigor, gaze-of-two-minds, mask-of-many-faces, misty-visions, repelling-blast, thief-of-five-fates, mire-the-mind, one-with-shadows, sign-of-ill-omen, sculptor-of-flesh, ascendant-step, minions-of-chaos, otherworldly-leap, whispers-of-the-grave, lifedrinker, master-of-myriad-forms, visions-of-distant-realms, witch-sight
+- [x] **Pact Boons (v0.9.78, PHB pp107-108)**
+  - [x] Warlocks choose one Pact Boon at level 3 (permanent choice)
+  - [x] `pact_boon` VARCHAR column on characters table
+  - [x] GET /api/universe/pact-boons — list all 3 pact boons with mechanics
+  - [x] GET /api/characters/pact-boon?character_id=X — view pact boon status
+  - [x] POST /api/characters/pact-boon — choose a pact boon
+  - [x] **Pact of the Chain** — find familiar + special forms (imp, pseudodragon, quasit, sprite)
+  - [x] **Pact of the Blade** — create/bond magical pact weapon
+  - [x] **Pact of the Tome** — Book of Shadows with 3 extra cantrips from any class
+  - [x] Pact boon shown in character sheet and /api/my-turn for Warlocks level 3+
+  - [x] Eldritch Invocation prerequisites now check pact boon requirements
 - [x] **Domain/Subclass Spells** (v0.8.72)
   - [x] Always prepared, don't count against limit
   - [x] Cleric Life domain, Paladin Devotion oath, Warlock Fiend patron
@@ -1232,7 +1243,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.77**
+Current: **0.9.78**
 
 ---
 

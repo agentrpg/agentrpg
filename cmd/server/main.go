@@ -446,6 +446,7 @@ func main() {
 	http.HandleFunc("/api/characters/subclass-choice", handleCharacterSubclassChoice)
 	http.HandleFunc("/api/characters/metamagic", handleCharacterMetamagic)
 	http.HandleFunc("/api/characters/invocations", handleCharacterInvocations)
+	http.HandleFunc("/api/characters/pact-boon", handleCharacterPactBoon)
 	http.HandleFunc("/api/characters/flexible-casting", handleFlexibleCasting)
 	http.HandleFunc("/api/characters/multiclass", handleCharacterMulticlass)
 	http.HandleFunc("/api/characters/fighting-style", handleCharacterFightingStyle)
@@ -455,6 +456,7 @@ func main() {
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
+	http.HandleFunc("/api/universe/pact-boons", handleUniversePactBoons)
 	http.HandleFunc("/api/universe/rules", handleUniverseRules)
 	http.HandleFunc("/api/universe/rules/", handleUniverseRule)
 	http.HandleFunc("/api/universe/", handleUniverseIndex)
@@ -997,6 +999,11 @@ func initDB() {
 		-- e.g., ["agonizing-blast", "devils-sight", "mask-of-many-faces"]
 		-- Warlocks gain 2 invocations at level 2, increasing to 8 at level 18
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS eldritch_invocations JSONB DEFAULT '[]';
+		
+		-- Warlock Pact Boon (v0.9.78)
+		-- Warlocks choose a Pact Boon at level 3: chain, blade, or tome
+		-- Required by certain Eldritch Invocations as prerequisites
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS pact_boon VARCHAR(20);
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -7995,6 +8002,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	var darkvisionRange, blindsightRange, truesightRange int
 	
 	var subclassChoicesJSON []byte // v0.9.23: For Land druid circle spells
+	var pactBoonRaw sql.NullString // v0.9.78: Warlock Pact Boon
 	err = db.QueryRow(`
 		SELECT name, class, race, COALESCE(background, ''), COALESCE(subclass, ''), level, hp, max_hp, ac, 
 			str, dex, con, intl, wis, cha,
@@ -8015,7 +8023,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 			equipped_main_hand, equipped_off_hand,
 			COALESCE(darkvision_range, 0), COALESCE(blindsight_range, 0), COALESCE(truesight_range, 0),
 			COALESCE(known_spells, '[]'), COALESCE(prepared_spells, '[]'), COALESCE(feats, '[]'),
-			COALESCE(subclass_choices, '{}')
+			COALESCE(subclass_choices, '{}'), pact_boon
 		FROM characters WHERE id = $1
 	`, charID).Scan(&name, &class, &race, &background, &subclassRaw, &level, &hp, &maxHP, &ac,
 		&str, &dex, &con, &intl, &wis, &cha,
@@ -8026,7 +8034,7 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		&weaponProfsRaw, &armorProfsRaw, &expertiseRaw, &languageProfsRaw, &equippedArmor, &equippedShield,
 		&equippedMainHand, &equippedOffHand,
 		&darkvisionRange, &blindsightRange, &truesightRange, &knownSpellsJSON, &preparedSpellsJSON, &featsJSON,
-		&subclassChoicesJSON)
+		&subclassChoicesJSON, &pactBoonRaw)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -8477,6 +8485,22 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.78: Pact Boon for Warlocks level 3+
+	if effectiveWarlockLevel >= 3 {
+		if pactBoonRaw.Valid && pactBoonRaw.String != "" {
+			if boon, ok := pactBoons[pactBoonRaw.String]; ok {
+				response["pact_boon"] = map[string]interface{}{
+					"slug":        boon.Slug,
+					"name":        boon.Name,
+					"description": boon.Description,
+					"mechanics":   boon.Mechanics,
+				}
+			}
+		} else {
+			response["pact_boon_pending"] = "You can choose a Pact Boon! Use POST /api/characters/pact-boon with pact_boon set to chain, blade, or tome."
+		}
+	}
+	
 	// Known spells (v0.8.63)
 	var knownSpells []string
 	json.Unmarshal(knownSpellsJSON, &knownSpells)
@@ -8862,6 +8886,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var attacksRemaining sql.NullInt32
 	var wildShapeForm sql.NullString
 	var wildShapeHP, wildShapeMaxHP sql.NullInt64
+	var pactBoonMyTurn sql.NullString // v0.9.78: Warlock Pact Boon
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, COALESCE(c.subclass, ''), c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
@@ -8877,7 +8902,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			c.mounted_on_creature, c.mount_is_controlled,
 			c.attacks_remaining,
 			COALESCE(c.subclass_choices, '{}'), COALESCE(c.horde_breaker_used, false),
-			c.wild_shape_form, c.wild_shape_hp, c.wild_shape_max_hp
+			c.wild_shape_form, c.wild_shape_hp, c.wild_shape_max_hp, c.pact_boon
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -8890,7 +8915,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&charElectrum, &charPlatinum, &pendingASI,
 		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw,
 		&mountedOnCreature, &mountIsControlled, &attacksRemaining, &subclassChoicesJSON, &hordeUsed,
-		&wildShapeForm, &wildShapeHP, &wildShapeMaxHP)
+		&wildShapeForm, &wildShapeHP, &wildShapeMaxHP, &pactBoonMyTurn)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -10048,6 +10073,21 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			response["invocations_prompt"] = fmt.Sprintf("You can learn %d Eldritch Invocations! GET /api/characters/invocations?character_id=%d", maxInvocations, charID)
+		}
+	}
+	
+	// v0.9.78: Pact Boon for Warlocks level 3+
+	if strings.ToLower(class) == "warlock" && level >= 3 {
+		if pactBoonMyTurn.Valid && pactBoonMyTurn.String != "" {
+			if boon, ok := pactBoons[pactBoonMyTurn.String]; ok {
+				response["pact_boon"] = map[string]interface{}{
+					"slug":        boon.Slug,
+					"name":        boon.Name,
+					"description": boon.Description,
+				}
+			}
+		} else {
+			response["pact_boon_pending"] = "🎁 You can choose a Pact Boon at level 3! Use POST /api/characters/pact-boon with pact_boon set to chain, blade, or tome."
 		}
 	}
 	
@@ -32000,6 +32040,70 @@ var eldritchInvocations = map[string]EldritchInvocation{
 	},
 }
 
+// PactBoon represents a Warlock Pact Boon (v0.9.78, PHB p107-108)
+// Warlocks choose one at level 3
+type PactBoon struct {
+	Slug        string `json:"slug"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Mechanics   map[string]interface{} `json:"mechanics,omitempty"`
+}
+
+// The three SRD Pact Boons
+var pactBoons = map[string]PactBoon{
+	"chain": {
+		Slug:        "chain",
+		Name:        "Pact of the Chain",
+		Description: "You learn the find familiar spell and can cast it as a ritual. The spell doesn't count against your number of spells known. When you cast the spell, you can choose one of the normal forms for your familiar or one of the following special forms: imp, pseudodragon, quasit, or sprite. Additionally, when you take the Attack action, you can forgo one of your own attacks to allow your familiar to make one attack with its reaction.",
+		Mechanics: map[string]interface{}{
+			"learn_spell":      "find-familiar",
+			"familiar_forms":   []string{"imp", "pseudodragon", "quasit", "sprite"},
+			"familiar_attack":  true,
+		},
+	},
+	"blade": {
+		Slug:        "blade",
+		Name:        "Pact of the Blade",
+		Description: "You can use your action to create a pact weapon in your empty hand. You can choose the form that this melee weapon takes each time you create it. You are proficient with it while you wield it. This weapon counts as magical for the purpose of overcoming resistance and immunity to nonmagical attacks and damage. Your pact weapon disappears if it is more than 5 feet away from you for 1 minute or more. It also disappears if you use this feature again, if you dismiss the weapon (no action required), or if you die. You can transform one magic weapon into your pact weapon by performing a special ritual while you hold the weapon.",
+		Mechanics: map[string]interface{}{
+			"create_weapon":    true,
+			"weapon_proficient": true,
+			"weapon_magical":   true,
+			"bond_magic_weapon": true,
+		},
+	},
+	"tome": {
+		Slug:        "tome",
+		Name:        "Pact of the Tome",
+		Description: "Your patron gives you a grimoire called a Book of Shadows. When you gain this feature, choose three cantrips from any class's spell list (the three needn't be from the same list). While the book is on your person, you can cast those cantrips at will. They don't count against your number of cantrips known. If they don't appear on the warlock spell list, they are nonetheless warlock spells for you. If you lose your Book of Shadows, you can perform a 1-hour ceremony to receive a replacement from your patron. This ceremony can be performed during a short or long rest, and it destroys the previous book.",
+		Mechanics: map[string]interface{}{
+			"extra_cantrips":      3,
+			"cantrips_any_class":  true,
+			"book_of_shadows":     true,
+		},
+	},
+}
+
+// hasPactBoon checks if a character has a specific pact boon
+func hasPactBoon(characterID int, pact string) bool {
+	var pactBoon sql.NullString
+	err := db.QueryRow("SELECT pact_boon FROM characters WHERE id = $1", characterID).Scan(&pactBoon)
+	if err != nil || !pactBoon.Valid {
+		return false
+	}
+	return strings.ToLower(pactBoon.String) == strings.ToLower(pact)
+}
+
+// getPactBoon returns the pact boon for a character (empty string if none)
+func getPactBoon(characterID int) string {
+	var pactBoon sql.NullString
+	err := db.QueryRow("SELECT pact_boon FROM characters WHERE id = $1", characterID).Scan(&pactBoon)
+	if err != nil || !pactBoon.Valid {
+		return ""
+	}
+	return pactBoon.String
+}
+
 // getMaxInvocations returns how many invocations a Warlock can have at their level
 func getMaxInvocations(warlockLevel int) int {
 	switch {
@@ -32084,10 +32188,12 @@ func meetsInvocationPrerequisites(charID int, invocation EldritchInvocation) (bo
 		}
 	}
 	
-	// TODO: Check pact boon prerequisite when pact boons are implemented
-	// For now, skip pact prerequisites
+	// Check pact boon prerequisite (v0.9.78)
 	if invocation.Prerequisites.Pact != "" {
-		return false, fmt.Sprintf("Requires Pact of the %s (pact boons not yet implemented)", strings.Title(invocation.Prerequisites.Pact))
+		if !hasPactBoon(charID, invocation.Prerequisites.Pact) {
+			pactName := "the " + strings.Title(invocation.Prerequisites.Pact)
+			return false, fmt.Sprintf("Requires Pact of %s", pactName)
+		}
 	}
 	
 	return true, ""
@@ -43606,6 +43712,248 @@ func countInvocationsByLevel(level int) int {
 		}
 	}
 	return count
+}
+
+// handleUniversePactBoons godoc
+// @Summary List all Warlock Pact Boons
+// @Description Returns the three SRD Pact Boons (Chain, Blade, Tome) with descriptions and mechanics
+// @Tags Universe
+// @Produce json
+// @Success 200 {object} map[string]interface{} "List of pact boons"
+// @Router /universe/pact-boons [get]
+func handleUniversePactBoons(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	boons := []map[string]interface{}{}
+	for slug, boon := range pactBoons {
+		boons = append(boons, map[string]interface{}{
+			"slug":        slug,
+			"name":        boon.Name,
+			"description": boon.Description,
+			"mechanics":   boon.Mechanics,
+		})
+	}
+	
+	// Sort alphabetically
+	sort.Slice(boons, func(i, j int) bool {
+		return boons[i]["name"].(string) < boons[j]["name"].(string)
+	})
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"pact_boons": boons,
+		"total":      len(boons),
+		"note":       "Warlocks choose one Pact Boon at level 3. Use POST /api/characters/pact-boon to choose.",
+		"level":      3,
+	})
+}
+
+// handleCharacterPactBoon godoc
+// @Summary Choose or view Warlock Pact Boon
+// @Description GET: View current pact boon and available choices. POST: Choose a pact boon at level 3+.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int true "Character ID (for GET)"
+// @Param request body object{character_id=int,pact_boon=string} false "Pact boon choice: chain, blade, or tome (for POST)"
+// @Security BasicAuth
+// @Success 200 {object} map[string]interface{} "Pact boon info or confirmation"
+// @Router /characters/pact-boon [get]
+// @Router /characters/pact-boon [post]
+func handleCharacterPactBoon(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		// View pact boon status for a character
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_character_id",
+				"message": "Provide character_id query parameter",
+			})
+			return
+		}
+		
+		var class sql.NullString
+		var level int
+		var charName string
+		var pactBoonStr sql.NullString
+		err = db.QueryRow(`
+			SELECT name, class, level, pact_boon
+			FROM characters WHERE id = $1
+		`, charID).Scan(&charName, &class, &level, &pactBoonStr)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if !class.Valid || strings.ToLower(class.String) != "warlock" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_a_warlock",
+				"message": fmt.Sprintf("%s is a %s, not a Warlock. Only Warlocks have Pact Boons.", charName, class.String),
+			})
+			return
+		}
+		
+		response := map[string]interface{}{
+			"character_id":   charID,
+			"character_name": charName,
+			"class":          class.String,
+			"level":          level,
+		}
+		
+		if pactBoonStr.Valid && pactBoonStr.String != "" {
+			// Has a pact boon
+			if boon, ok := pactBoons[pactBoonStr.String]; ok {
+				response["pact_boon"] = map[string]interface{}{
+					"slug":        boon.Slug,
+					"name":        boon.Name,
+					"description": boon.Description,
+					"mechanics":   boon.Mechanics,
+				}
+				response["has_pact_boon"] = true
+			}
+		} else if level >= 3 {
+			// Eligible but hasn't chosen
+			response["has_pact_boon"] = false
+			response["eligible"] = true
+			response["available_choices"] = []map[string]interface{}{
+				{"slug": "chain", "name": pactBoons["chain"].Name, "description": pactBoons["chain"].Description},
+				{"slug": "blade", "name": pactBoons["blade"].Name, "description": pactBoons["blade"].Description},
+				{"slug": "tome", "name": pactBoons["tome"].Name, "description": pactBoons["tome"].Description},
+			}
+			response["message"] = "You are eligible to choose a Pact Boon! Use POST /api/characters/pact-boon with pact_boon set to chain, blade, or tome."
+		} else {
+			// Not yet level 3
+			response["has_pact_boon"] = false
+			response["eligible"] = false
+			response["message"] = fmt.Sprintf("Warlocks choose a Pact Boon at level 3. %s is currently level %d.", charName, level)
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth check
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		PactBoon    string `json:"pact_boon"` // chain, blade, or tome
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_json",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class sql.NullString
+	var level int
+	var charName string
+	var pactBoonStr sql.NullString
+	err = db.QueryRow(`
+		SELECT agent_id, name, class, level, pact_boon
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &charName, &class, &level, &pactBoonStr)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_your_character",
+			"message": "You can only choose a pact boon for your own characters",
+		})
+		return
+	}
+	
+	if !class.Valid || strings.ToLower(class.String) != "warlock" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_a_warlock",
+			"message": fmt.Sprintf("%s is a %s, not a Warlock. Only Warlocks can choose Pact Boons.", charName, class.String),
+		})
+		return
+	}
+	
+	if level < 3 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_eligible",
+			"message": fmt.Sprintf("Warlocks choose a Pact Boon at level 3. %s is only level %d.", charName, level),
+		})
+		return
+	}
+	
+	if pactBoonStr.Valid && pactBoonStr.String != "" {
+		existingBoon := pactBoons[pactBoonStr.String]
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "already_chosen",
+			"message": fmt.Sprintf("%s has already chosen %s. Pact Boons cannot be changed.", charName, existingBoon.Name),
+			"current_pact_boon": map[string]interface{}{
+				"slug": existingBoon.Slug,
+				"name": existingBoon.Name,
+			},
+		})
+		return
+	}
+	
+	// Validate the pact boon choice
+	pactBoonSlug := strings.ToLower(strings.TrimSpace(req.PactBoon))
+	chosenBoon, ok := pactBoons[pactBoonSlug]
+	if !ok {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_pact_boon",
+			"message":       fmt.Sprintf("'%s' is not a valid pact boon", req.PactBoon),
+			"valid_options": []string{"chain", "blade", "tome"},
+		})
+		return
+	}
+	
+	// Save the pact boon
+	_, err = db.Exec("UPDATE characters SET pact_boon = $1 WHERE id = $2", pactBoonSlug, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "database_error",
+			"message": err.Error(),
+		})
+		return
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":        true,
+		"character_id":   req.CharacterID,
+		"character_name": charName,
+		"pact_boon": map[string]interface{}{
+			"slug":        chosenBoon.Slug,
+			"name":        chosenBoon.Name,
+			"description": chosenBoon.Description,
+			"mechanics":   chosenBoon.Mechanics,
+		},
+		"message": fmt.Sprintf("%s has chosen %s!", charName, chosenBoon.Name),
+		"note":    "This choice is permanent. Certain Eldritch Invocations require specific pact boons as prerequisites.",
+	})
 }
 
 // handleFlexibleCasting godoc
