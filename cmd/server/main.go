@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.67
+// @version 0.9.69
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.68"
+const version = "0.9.69"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -16586,7 +16586,7 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 		}
 		// v0.9.35: Brutal Critical on Retaliation crits
 		brutalCritText := ""
-		brutalDice := getBrutalCriticalDice(class, level)
+		brutalDice := game.BrutalCriticalDice(class, level)
 		if brutalDice > 0 {
 			// Parse weapon damage die
 			parts := strings.Split(strings.ToLower(damageDice), "d")
@@ -22377,7 +22377,7 @@ func resolveAction(action, description string, charID int) string {
 			// Extra weapon damage dice on melee critical hits: +1 at 9, +2 at 13, +3 at 17
 			brutalCritNote := ""
 			if !isRangedAttack {
-				brutalDice := getBrutalCriticalDice(class, level)
+				brutalDice := game.BrutalCriticalDice(class, level)
 				if brutalDice > 0 && hasWeapon {
 					// Parse weapon damage die (e.g., "1d12" -> 12, "2d6" -> 6)
 					parts := strings.Split(strings.ToLower(weapon.Damage), "d")
@@ -22415,10 +22415,7 @@ func resolveAction(action, description string, charID int) string {
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
-		critRange := 20
-		if subclass.Valid && subclass.String != "" {
-			critRange = getCritRange(subclass.String, level)
-		}
+		critRange := game.CriticalHitRange(subclass.String, level)
 		
 		if attackRoll >= critRange {
 			// Critical hit - double damage dice
@@ -22539,7 +22536,7 @@ func resolveAction(action, description string, charID int) string {
 			// Extra weapon damage dice on melee critical hits: +1 at 9, +2 at 13, +3 at 17
 			brutalCritNote := ""
 			if !isRangedAttack {
-				brutalDice := getBrutalCriticalDice(class, level)
+				brutalDice := game.BrutalCriticalDice(class, level)
 				if brutalDice > 0 && hasWeapon {
 					// Parse weapon damage die (e.g., "1d12" -> 12, "2d6" -> 6)
 					parts := strings.Split(strings.ToLower(weapon.Damage), "d")
@@ -23894,7 +23891,7 @@ func resolveAction(action, description string, charID int) string {
 			frenzyDmg := game.RollDamage(weapon.Damage, true) + frenzyDamageMod // crit = double dice
 			// v0.9.35: Brutal Critical on frenzy attack crits (Barbarians get extra dice at 9/13/17)
 			brutalCritText := ""
-			brutalDice := getBrutalCriticalDice(class, level)
+			brutalDice := game.BrutalCriticalDice(class, level)
 			if brutalDice > 0 {
 				parts := strings.Split(strings.ToLower(weapon.Damage), "d")
 				if len(parts) == 2 {
@@ -32848,34 +32845,6 @@ func getClassSpellList(class string) []string {
 		}
 	}
 	return spells // Returns nil if no rows found
-}
-
-// getCritRange returns the critical hit range for a character (default 20, can be 19 or 18 for Champions)
-func getCritRange(subclassSlug string, level int) int {
-	if subclassSlug == "champion" {
-		if level >= 15 {
-			return 18 // Superior Critical: 18-20
-		} else if level >= 3 {
-			return 19 // Improved Critical: 19-20
-		}
-	}
-	return 20 // Standard: only 20 crits
-}
-
-// getBrutalCriticalDice returns the number of extra weapon damage dice for Barbarian's Brutal Critical
-// v0.9.35: Barbarian level 9+ gets extra damage dice on melee critical hits
-func getBrutalCriticalDice(class string, level int) int {
-	if strings.ToLower(class) != "barbarian" {
-		return 0
-	}
-	if level >= 17 {
-		return 3 // Brutal Critical (3 dice)
-	} else if level >= 13 {
-		return 2 // Brutal Critical (2 dice)
-	} else if level >= 9 {
-		return 1 // Brutal Critical (1 die)
-	}
-	return 0
 }
 
 // getSneakAttackDice returns the sneak attack dice for a rogue of the given level

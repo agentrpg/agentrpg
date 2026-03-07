@@ -630,8 +630,12 @@ func BardicInspirationDie(level int) int {
 	return 6 // d6
 }
 
-// BrutalCriticalDice returns the number of extra damage dice for Barbarian's Brutal Critical
-func BrutalCriticalDice(level int) int {
+// BrutalCriticalDice returns the number of extra damage dice for Barbarian's Brutal Critical.
+// Returns 0 for non-Barbarian classes.
+func BrutalCriticalDice(class string, level int) int {
+	if strings.ToLower(class) != "barbarian" {
+		return 0
+	}
 	if level >= 17 {
 		return 3
 	} else if level >= 13 {
@@ -640,6 +644,20 @@ func BrutalCriticalDice(level int) int {
 		return 1
 	}
 	return 0
+}
+
+// CriticalHitRange returns the minimum d20 roll needed for a critical hit.
+// Champion Fighters get Improved Critical (19-20) at level 3 and Superior Critical (18-20) at level 15.
+// All other classes/subclasses need a natural 20.
+func CriticalHitRange(subclass string, level int) int {
+	if strings.ToLower(subclass) == "champion" {
+		if level >= 15 {
+			return 18 // Superior Critical: 18-20
+		} else if level >= 3 {
+			return 19 // Improved Critical: 19-20
+		}
+	}
+	return 20 // Standard: only nat 20 crits
 }
 
 // RageDamageBonus returns the bonus damage while raging for a barbarian at a given level

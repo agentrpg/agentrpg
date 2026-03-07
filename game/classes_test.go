@@ -419,7 +419,8 @@ func TestBardicInspirationDie(t *testing.T) {
 }
 
 func TestBrutalCriticalDice(t *testing.T) {
-	tests := []struct {
+	// Barbarian tests
+	barbarianTests := []struct {
 		level int
 		want  int
 	}{
@@ -433,11 +434,56 @@ func TestBrutalCriticalDice(t *testing.T) {
 		{20, 3},
 	}
 
-	for _, tt := range tests {
-		t.Run("level_"+string(rune(tt.level)), func(t *testing.T) {
-			got := BrutalCriticalDice(tt.level)
+	for _, tt := range barbarianTests {
+		t.Run("barbarian_level_"+string(rune(tt.level)), func(t *testing.T) {
+			got := BrutalCriticalDice("barbarian", tt.level)
 			if got != tt.want {
-				t.Errorf("BrutalCriticalDice(%d) = %d, want %d", tt.level, got, tt.want)
+				t.Errorf("BrutalCriticalDice(barbarian, %d) = %d, want %d", tt.level, got, tt.want)
+			}
+		})
+	}
+
+	// Non-barbarian always returns 0
+	nonBarbarianTests := []string{"fighter", "rogue", "wizard", ""}
+	for _, class := range nonBarbarianTests {
+		t.Run("non_barbarian_"+class, func(t *testing.T) {
+			got := BrutalCriticalDice(class, 20)
+			if got != 0 {
+				t.Errorf("BrutalCriticalDice(%q, 20) = %d, want 0", class, got)
+			}
+		})
+	}
+}
+
+func TestCriticalHitRange(t *testing.T) {
+	tests := []struct {
+		subclass string
+		level    int
+		want     int
+	}{
+		// Non-Champion always needs nat 20
+		{"", 1, 20},
+		{"berserker", 5, 20},
+		{"thief", 15, 20},
+		{"champion", 1, 20}, // Champion before level 3
+		{"champion", 2, 20},
+		// Improved Critical at level 3
+		{"champion", 3, 19},
+		{"champion", 10, 19},
+		{"champion", 14, 19},
+		// Superior Critical at level 15
+		{"champion", 15, 18},
+		{"champion", 20, 18},
+		// Case insensitivity
+		{"Champion", 5, 19},
+		{"CHAMPION", 15, 18},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.subclass+"_level_"+string(rune(tt.level)), func(t *testing.T) {
+			got := CriticalHitRange(tt.subclass, tt.level)
+			if got != tt.want {
+				t.Errorf("CriticalHitRange(%q, %d) = %d, want %d", tt.subclass, tt.level, got, tt.want)
 			}
 		})
 	}

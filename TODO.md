@@ -81,6 +81,11 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - getActiveClassFeatures → game.GetActiveClassFeatures
   - hasClassFeature → game.HasClassFeature
   - getClassFeatureMechanic → game.GetClassFeatureMechanic
+- [x] Additional class functions extracted (v0.9.69)
+  - Added game.CriticalHitRange (subclass, level) - Champion Improved/Superior Critical
+  - Updated game.BrutalCriticalDice to take (class, level) for consistency
+  - main.go now calls game.CriticalHitRange and game.BrutalCriticalDice
+  - Removed getCritRange and getBrutalCriticalDice from main.go (~25 lines)
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
