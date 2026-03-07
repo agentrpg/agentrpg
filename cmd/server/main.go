@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.75
+// @version 0.9.76
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.75"
+const version = "0.9.76"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -11924,6 +11924,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		RequiresHearing  bool   `json:"requires_hearing"`  // v0.8.23: Auto-fail if deafened
 		RequiresSight    bool   `json:"requires_sight"`    // v0.8.23: Auto-fail if blinded
 		UsePeerlessSkill bool   `json:"use_peerless_skill"` // v0.9.32: Lore Bard 14+ adds Bardic Inspiration die to own check
+		HalfSpeedMovement bool  `json:"half_speed_movement"` // v0.9.76: For Supreme Sneak (Thief 9+) - moved no more than half speed this turn
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -12137,6 +12138,15 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.76: Supreme Sneak (Thief Rogue level 9+) - advantage on Stealth if moved no more than half speed
+	supremeSneakAdvantage := false
+	if skillUsed == "stealth" && req.HalfSpeedMovement {
+		if subclassRaw.Valid && hasSubclassFeature(subclassRaw.String, level, "supreme_sneak") {
+			req.Advantage = true
+			supremeSneakAdvantage = true
+		}
+	}
+	
 	// v0.8.22: Poisoned condition gives disadvantage on ability checks
 	poisonedDisadvantage := false
 	if hasCondition(req.CharacterID, "poisoned") {
@@ -12173,6 +12183,9 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		if charmedAdvantage {
 			rollType = "advantage (charmed)"
+		}
+		if supremeSneakAdvantage {
+			rollType = "advantage (Supreme Sneak)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = game.RollWithDisadvantage()

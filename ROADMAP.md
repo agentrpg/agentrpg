@@ -863,6 +863,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Hunter Ranger can choose at level 15 via superior_defense choice
     - [x] Consumes reaction, validates feature ownership
     - [x] hasUncannyDodge() helper checks class level and subclass choices
+  - [x] Supreme Sneak (Thief Rogue 9+) (v0.9.76, PHB p97)
+    - [x] Advantage on Stealth checks if moved no more than half speed
+    - [x] POST /api/gm/skill-check with half_speed_movement=true + skill=stealth
+    - [x] Applied automatically when hasSubclassFeature("thief", level, "supreme_sneak")
+    - [x] GM specifies half_speed_movement based on combat movement tracking
   - [x] Thief's Reflexes (Thief Rogue 17+) (v0.9.64, PHB p97)
     - [x] Level 17+ Thief subclass: two turns during first round of combat
     - [x] Second turn at initiative - 10
@@ -1216,7 +1221,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.75**
+Current: **0.9.76**
 
 ---
 
