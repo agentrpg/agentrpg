@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.83
+// @version 0.9.84
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.83"
+const version = "0.9.84"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -129,6 +129,18 @@ func applyDamageResistance(charID int, damage int, damageType string) DamageModR
 		if hasTieflingHellishResistance(charID) {
 			result.FinalDamage = result.FinalDamage / 2
 			result.Resistances = append(result.Resistances, "fire (Hellish Resistance)")
+			result.WasHalved = true
+		}
+	}
+	
+	// v0.9.84: Fiend Warlock's Fiendish Resilience (PHB p109)
+	// Note: In PHB, magical/silvered weapons bypass this resistance.
+	// For spell/environmental damage (most calls to this function), the resistance applies.
+	// For weapon attacks from monsters, GM should narrate accordingly.
+	if damageType != "" && !result.WasHalved {
+		if hasFiendishResilience(charID, damageType) {
+			result.FinalDamage = result.FinalDamage / 2
+			result.Resistances = append(result.Resistances, fmt.Sprintf("%s (Fiendish Resilience)", damageType))
 			result.WasHalved = true
 		}
 	}
@@ -453,6 +465,7 @@ func main() {
 	http.HandleFunc("/api/characters/breath-weapon", handleCharacterBreathWeapon)
 	http.HandleFunc("/api/characters/infernal-legacy", handleCharacterInfernalLegacy)
 	http.HandleFunc("/api/characters/wholeness-of-body", handleCharacterWholenessOfBody)
+	http.HandleFunc("/api/characters/fiendish-resilience", handleCharacterFiendishResilience)
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
@@ -1010,6 +1023,12 @@ func initDB() {
 		-- e.g., ["thief-of-five-fates", "mire-the-mind"]
 		-- Resets on long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS invocation_spells_used JSONB DEFAULT '[]';
+		
+		-- Fiend Warlock: Fiendish Resilience (v0.9.84, PHB p109)
+		-- At level 10+, Fiend Warlocks can choose one damage type to gain resistance to
+		-- Can change this choice on short or long rest
+		-- Magical weapons and silver weapons bypass this resistance
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS fiendish_resilience VARCHAR(20);
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2128,6 +2147,39 @@ func isTiefling(characterID int) bool {
 // hasTieflingHellishResistance returns true if character has Hellish Resistance (fire damage resistance, v0.9.54 PHB p43)
 func hasTieflingHellishResistance(characterID int) bool {
 	return isTiefling(characterID)
+}
+
+// getFiendishResilience returns the Fiend Warlock's chosen damage resistance type (v0.9.84 PHB p109)
+// Returns empty string if not a Fiend Warlock level 10+ or no choice made yet
+func getFiendishResilience(characterID int) string {
+	var class string
+	var level int
+	var subclass sql.NullString
+	var fiendishRes sql.NullString
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), level, subclass, fiendish_resilience
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &level, &subclass, &fiendishRes)
+	if err != nil {
+		return ""
+	}
+	
+	// Must be Warlock with Fiend subclass at level 10+
+	if strings.ToLower(class) != "warlock" || !subclass.Valid || strings.ToLower(subclass.String) != "fiend" || level < 10 {
+		return ""
+	}
+	
+	if fiendishRes.Valid {
+		return strings.ToLower(fiendishRes.String)
+	}
+	return ""
+}
+
+// hasFiendishResilience returns true if character has Fiendish Resilience for the given damage type (v0.9.84 PHB p109)
+// Note: This resistance is bypassed by magical weapons and silver weapons
+func hasFiendishResilience(characterID int, damageType string) bool {
+	chosenType := getFiendishResilience(characterID)
+	return chosenType != "" && strings.EqualFold(chosenType, damageType)
 }
 
 // v0.9.58: Hunter Ranger Defensive Tactics (PHB p93)
@@ -8868,6 +8920,31 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.84: Fiend Warlock - Fiendish Resilience (level 10+)
+	if strings.ToLower(class) == "warlock" && level >= 10 {
+		if subclassRaw.Valid && strings.ToLower(subclassRaw.String) == "fiend" {
+			var fiendishRes sql.NullString
+			db.QueryRow("SELECT fiendish_resilience FROM characters WHERE id = $1", charID).Scan(&fiendishRes)
+			
+			currentResistance := ""
+			if fiendishRes.Valid {
+				currentResistance = fiendishRes.String
+			}
+			
+			response["fiendish_resilience"] = map[string]interface{}{
+				"current_resistance": currentResistance,
+				"has_resistance":     currentResistance != "",
+				"can_change":         "After a short or long rest",
+				"valid_types":        []string{"acid", "cold", "fire", "lightning", "poison", "thunder", "necrotic", "psychic", "bludgeoning", "piercing", "slashing"},
+				"excluded_types":     []string{"radiant", "force"},
+				"note":               "Magical and silvered weapons bypass this resistance (PHB p109)",
+				"how_to_use":         "POST /api/characters/fiendish-resilience with character_id and damage_type",
+				"phb_reference":      "PHB p109 - Fiend Patron",
+				"tip":                "🛡️ Choose a damage type to resist! Change it after resting to adapt to upcoming threats.",
+			}
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -10064,6 +10141,38 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			}
 			
 			response["dark_ones_luck"] = darkOnesLuckInfo
+		}
+	}
+	
+	// v0.9.84: Fiend Warlock - Fiendish Resilience (level 10+)
+	if strings.ToLower(class) == "warlock" && level >= 10 {
+		if charSubclass.Valid && strings.ToLower(charSubclass.String) == "fiend" {
+			var fiendishRes sql.NullString
+			db.QueryRow("SELECT fiendish_resilience FROM characters WHERE id = $1", charID).Scan(&fiendishRes)
+			
+			currentResistance := ""
+			if fiendishRes.Valid {
+				currentResistance = fiendishRes.String
+			}
+			
+			fiendishResInfo := map[string]interface{}{
+				"current_resistance": currentResistance,
+				"has_resistance":     currentResistance != "",
+				"can_change":         "After a short or long rest",
+				"valid_types":        []string{"acid", "cold", "fire", "lightning", "poison", "thunder", "necrotic", "psychic", "bludgeoning", "piercing", "slashing"},
+				"excluded_types":     []string{"radiant", "force"},
+				"note":               "Magical and silvered weapons bypass this resistance (PHB p109)",
+				"how_to_use":         "POST /api/characters/fiendish-resilience with character_id and damage_type",
+				"phb_reference":      "PHB p109 - Fiend Patron",
+			}
+			
+			if currentResistance != "" {
+				fiendishResInfo["tip"] = fmt.Sprintf("🛡️ You have resistance to %s damage from your Fiendish Resilience!", currentResistance)
+			} else {
+				fiendishResInfo["tip"] = "⚠️ You haven't chosen a damage type for Fiendish Resilience yet! Use POST /api/characters/fiendish-resilience"
+			}
+			
+			response["fiendish_resilience"] = fiendishResInfo
 		}
 	}
 	
@@ -44910,6 +45019,248 @@ func handleCharacterWholenessOfBody(w http.ResponseWriter, r *http.Request) {
 		"action_cost":    "1 action",
 		"description":    fmt.Sprintf("%s channels their inner ki, healing %d hit points.", charName, actualHealing),
 		"recovery":       "Take a long rest to regain this feature",
+	})
+}
+
+// handleCharacterFiendishResilience handles choosing damage resistance for Fiend Warlocks level 10+ (v0.9.84 PHB p109)
+// @Summary Fiendish Resilience - choose damage type for resistance
+// @Description Fiend Warlocks at level 10+ can choose one damage type (except radiant/force) to gain resistance to. Can change on short or long rest. Note: Magical and silvered weapons bypass this resistance.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param character_id query integer false "Character ID (for GET)"
+// @Param request body object{character_id=integer,damage_type=string} false "Fiendish Resilience choice (for POST)"
+// @Success 200 {object} map[string]interface{} "Fiendish Resilience status or confirmation"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not your character"
+// @Router /characters/fiendish-resilience [get]
+// @Router /characters/fiendish-resilience [post]
+func handleCharacterFiendishResilience(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Valid damage types for Fiendish Resilience (PHB p109: "except force or radiant")
+	validDamageTypes := map[string]bool{
+		"acid": true, "cold": true, "fire": true, "lightning": true,
+		"poison": true, "thunder": true, "necrotic": true, "psychic": true,
+		"bludgeoning": true, "piercing": true, "slashing": true,
+	}
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check Fiendish Resilience status",
+				"usage":   "GET /api/characters/fiendish-resilience?character_id=X",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var subclassNull, fiendishResNull sql.NullString
+		err = db.QueryRow(`
+			SELECT class, level, subclass, fiendish_resilience
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &subclassNull, &fiendishResNull)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		subclass := ""
+		if subclassNull.Valid {
+			subclass = subclassNull.String
+		}
+		
+		if strings.ToLower(class) != "warlock" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_warlock",
+				"message": fmt.Sprintf("Fiendish Resilience is a Warlock feature (character is %s)", class),
+			})
+			return
+		}
+		
+		if strings.ToLower(subclass) != "fiend" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "wrong_patron",
+				"message": fmt.Sprintf("Fiendish Resilience is a Fiend patron feature (character's patron: %s)", subclass),
+			})
+			return
+		}
+		
+		if level < 10 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "level_requirement",
+				"message": fmt.Sprintf("Fiendish Resilience requires Fiend Warlock level 10+ (currently level %d)", level),
+			})
+			return
+		}
+		
+		currentResistance := ""
+		if fiendishResNull.Valid {
+			currentResistance = fiendishResNull.String
+		}
+		
+		// List valid damage types
+		damageTypeList := []string{"acid", "cold", "fire", "lightning", "poison", "thunder", "necrotic", "psychic", "bludgeoning", "piercing", "slashing"}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":        charID,
+			"class":               class,
+			"subclass":            subclass,
+			"level":               level,
+			"feature":             "Fiendish Resilience",
+			"current_resistance":  currentResistance,
+			"available":           currentResistance == "",
+			"valid_damage_types":  damageTypeList,
+			"excluded_types":      []string{"radiant", "force"},
+			"can_change":          "After a short or long rest",
+			"note":                "Damage from magical weapons or silver weapons ignores this resistance (PHB p109)",
+			"how_to_use":          "POST /api/characters/fiendish-resilience with character_id and damage_type",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		DamageType  string `json:"damage_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Validate damage type
+	damageTypeLower := strings.ToLower(strings.TrimSpace(req.DamageType))
+	if !validDamageTypes[damageTypeLower] {
+		validList := []string{"acid", "cold", "fire", "lightning", "poison", "thunder", "necrotic", "psychic", "bludgeoning", "piercing", "slashing"}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":              "invalid_damage_type",
+			"message":            fmt.Sprintf("'%s' is not a valid damage type for Fiendish Resilience", req.DamageType),
+			"valid_damage_types": validList,
+			"excluded_types":     []string{"radiant", "force"},
+			"note":               "Radiant and Force are excluded per PHB p109",
+		})
+		return
+	}
+	
+	// Verify ownership and get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var subclassNull, fiendishResNull sql.NullString
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, subclass, fiendish_resilience, lobby_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &subclassNull, &fiendishResNull, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only set Fiendish Resilience for your own characters",
+		})
+		return
+	}
+	
+	subclass := ""
+	if subclassNull.Valid {
+		subclass = subclassNull.String
+	}
+	
+	// Validate class and subclass
+	if strings.ToLower(class) != "warlock" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_warlock",
+			"message": fmt.Sprintf("%s is a %s, not a Warlock. Fiendish Resilience is a Fiend Warlock feature.", charName, class),
+		})
+		return
+	}
+	
+	if strings.ToLower(subclass) != "fiend" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "wrong_patron",
+			"message": fmt.Sprintf("%s has the %s patron, not the Fiend. Fiendish Resilience is a Fiend patron feature.", charName, subclass),
+		})
+		return
+	}
+	
+	if level < 10 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "level_requirement",
+			"message": fmt.Sprintf("%s is level %d. Fiendish Resilience requires Fiend Warlock level 10+.", charName, level),
+		})
+		return
+	}
+	
+	previousResistance := ""
+	if fiendishResNull.Valid {
+		previousResistance = fiendishResNull.String
+	}
+	
+	// Update character
+	_, err = db.Exec(`UPDATE characters SET fiendish_resilience = $1 WHERE id = $2`, damageTypeLower, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "update_failed",
+			"message": "Failed to update Fiendish Resilience",
+		})
+		return
+	}
+	
+	// Log action if in campaign
+	if campaignID.Valid {
+		var actionLog string
+		if previousResistance == "" {
+			actionLog = fmt.Sprintf("🔥 %s attunes their Fiendish Resilience to %s damage, gaining resistance", charName, damageTypeLower)
+		} else {
+			actionLog = fmt.Sprintf("🔥 %s shifts their Fiendish Resilience from %s to %s damage", charName, previousResistance, damageTypeLower)
+		}
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'other', $3, NOW())`, campaignID.Int64, req.CharacterID, actionLog)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":             true,
+		"feature":             "Fiendish Resilience",
+		"class":               "Warlock",
+		"subclass":            "Fiend",
+		"character":           charName,
+		"damage_type":         damageTypeLower,
+		"previous_resistance": previousResistance,
+		"effect":              fmt.Sprintf("%s now has resistance to %s damage", charName, damageTypeLower),
+		"note":                "Damage from magical weapons or silver weapons ignores this resistance (PHB p109)",
+		"can_change":          "After a short or long rest",
 	})
 }
 

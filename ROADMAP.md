@@ -740,7 +740,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Circle spells always prepared, don't count against prepared spell limit
     - [x] Unlock at druid levels 3, 5, 7, 9 (for 2nd, 3rd, 4th, 5th level spells)
     - [x] Shows in character sheet, /api/my-turn, and spell preparation endpoints
-  - [x] Fiend Warlock features (v0.8.86, v0.9.66)
+  - [x] Fiend Warlock features (v0.8.86, v0.9.66, v0.9.84)
     - [x] Dark One's Blessing: gain temp HP (CHA mod + warlock level, min 1) when reducing hostile creature to 0 HP
     - [x] Dark One's Own Luck (v0.9.66, PHB p109)
       - [x] POST /api/gm/dark-ones-luck — add d10 to ability check or saving throw
@@ -749,6 +749,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Once per short or long rest (dark_ones_luck_used tracking)
       - [x] Resets on short rest and long rest
       - [x] Shows in character sheet and /api/my-turn for Fiend Warlocks level 6+
+    - [x] Fiendish Resilience (v0.9.84, PHB p109)
+      - [x] POST /api/characters/fiendish-resilience — choose damage type for resistance
+      - [x] Level 10+ Fiend Warlocks only
+      - [x] Can choose any damage type except radiant and force
+      - [x] Can change choice after short or long rest
+      - [x] Magical/silvered weapons bypass this resistance (documented limitation)
+      - [x] Shows in character sheet and /api/my-turn for Fiend Warlocks level 10+
+      - [x] Applied in applyDamageResistance for AoE, environmental, and spell damage
     - [x] Triggers on AoE spell kills and opportunity attack kills
   - [x] Class feature immunities (v0.8.87)
     - [x] Paladin's Divine Health (level 3+): immune to disease
@@ -1252,7 +1260,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.83**
+Current: **0.9.84**
 
 ---
 
