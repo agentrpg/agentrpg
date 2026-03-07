@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.74
+// @version 0.9.75
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.74"
+const version = "0.9.75"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1908,15 +1908,10 @@ func loadSRDFromDB() {
 var srdSpellsMemory = map[string]SRDSpell{}
 
 // getMonkDie returns the monk's Martial Arts damage die based on level (v0.9.2)
+// getMonkDie returns the monk's Martial Arts damage die based on level (v0.9.2)
+// v0.9.75: now delegates to game.MartialArtsDie
 func getMonkDie(level int) string {
-	if level >= 17 {
-		return "1d10"
-	} else if level >= 11 {
-		return "1d8"
-	} else if level >= 5 {
-		return "1d6"
-	}
-	return "1d4"
+	return fmt.Sprintf("1d%d", game.MartialArtsDie(level))
 }
 
 // formatDuration returns a human-readable duration string (v0.8.48)
@@ -2650,15 +2645,9 @@ func recoverClassResources(charID int, isLongRest bool) map[string]int {
 
 // getBardicInspirationDie returns the die size for Bardic Inspiration based on bard level (v0.9.3)
 // d6 at level 1, d8 at level 5, d10 at level 10, d12 at level 15
+// v0.9.75: now delegates to game.BardicInspirationDie
 func getBardicInspirationDie(level int) int {
-	if level >= 15 {
-		return 12
-	} else if level >= 10 {
-		return 10
-	} else if level >= 5 {
-		return 8
-	}
-	return 6
+	return game.BardicInspirationDie(level)
 }
 
 // ArmorInfo holds armor data for AC calculation
@@ -16428,14 +16417,8 @@ func handleGMRetaliation(w http.ResponseWriter, r *http.Request) {
 	}
 	rageBonus := 0
 	if isRaging {
-		// Rage damage bonus scales with level
-		if level >= 16 {
-			rageBonus = 4
-		} else if level >= 9 {
-			rageBonus = 3
-		} else {
-			rageBonus = 2
-		}
+		// v0.9.75: rage damage bonus now from game.RageDamageBonus
+		rageBonus = game.RageDamageBonus(level)
 	}
 	
 	// Get target AC (monster AC or estimate)
@@ -32548,13 +32531,9 @@ func getClassSpellList(class string) []string {
 
 // getSneakAttackDice returns the sneak attack dice for a rogue of the given level
 // v0.9.4: Rogue Sneak Attack - scales with level (1d6 at 1, 2d6 at 3, 3d6 at 5, etc.)
+// v0.9.75: now delegates to game.SneakAttackDice
 func getSneakAttackDice(level int) string {
-	// Sneak attack increases at odd levels: 1d6 at 1, 2d6 at 3, 3d6 at 5, etc.
-	diceCount := (level + 1) / 2
-	if diceCount < 1 {
-		diceCount = 1
-	}
-	return fmt.Sprintf("%dd6", diceCount)
+	return fmt.Sprintf("%dd6", game.SneakAttackDice(level))
 }
 
 // canSneakAttack checks if a rogue can use sneak attack on this attack

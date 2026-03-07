@@ -142,6 +142,12 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
 - [x] main.go updated to call game package for feat functions (v0.9.73)
   - hasFeatFeature → game.HasFeatFeature
   - Removed ~8 lines of duplicate logic from main.go
+- [x] Additional class helper functions migrated (v0.9.75)
+  - getMonkDie → game.MartialArtsDie
+  - getBardicInspirationDie → game.BardicInspirationDie
+  - getSneakAttackDice → game.SneakAttackDice
+  - Inline rage bonus calculation → game.RageDamageBonus
+  - Removed ~25 lines of duplicate logic from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
