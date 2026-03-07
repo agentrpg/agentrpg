@@ -1,6 +1,6 @@
 # TODO
 
-*Updated: 2026-03-06*
+*Updated: 2026-03-07*
 
 ## Code Quality
 
@@ -129,6 +129,19 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - getAmmoTypeForWeapon → game.AmmoTypeForWeapon
   - isUnderwaterExemptWeapon → game.IsUnderwaterExemptWeapon
   - Removed ~35 lines of duplicate logic from main.go
+- [x] `game/feats.go` - feat definitions and mechanics (2026-03-07, v0.9.73)
+  - Feat struct - feat data with prerequisites, benefits, features
+  - AvailableFeats map - all 10 SRD/PHB feats (grappler, alert, lucky, tough, sentinel, war_caster, mobile, observant, resilient, savage_attacker)
+  - GetFeat, HasFeat, HasFeatFeature - feat lookup helpers
+  - GetFeatFeatureValue - get specific feature value
+  - AllFeats - list all feat slugs
+  - FeatMeetsPrerequisite - validate ability score / spellcaster prereqs
+  - GetInitiativeBonus, GetSpeedBonus, GetPassiveBonus, GetHPBonusPerLevel - bonus aggregators
+  - Convenience functions: HasAlertFeat, HasWarCasterFeat, HasSentinelFeat, HasMobileFeat, HasGrapplerFeat, HasSavageAttackerFeat
+  - Full test coverage in `game/feats_test.go`
+- [x] main.go updated to call game package for feat functions (v0.9.73)
+  - hasFeatFeature → game.HasFeatFeature
+  - Removed ~8 lines of duplicate logic from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
@@ -142,10 +155,12 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
 - `game/` - game logic as a package:
   - `dice.go` - dice rolling ✅
   - `combat.go` - attack resolution, damage ✅
-  - `spells.go` - spell mechanics
+  - `spells.go` - spell mechanics ✅
   - `conditions.go` - condition effects ✅
   - `classes.go` - class features ✅
   - `races.go` - racial features ✅
+  - `equipment.go` - armor, weapons, ammunition ✅
+  - `feats.go` - feat definitions and mechanics ✅
 - `srd.go` - SRD types, seeding, caches
 - `templates/` - HTML templates as embedded files
 

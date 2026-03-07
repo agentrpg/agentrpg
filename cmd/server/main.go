@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.69
+// @version 0.9.73
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.72"
+const version = "0.9.73"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -25099,15 +25099,9 @@ func parseSpellFromDescription(desc string) string {
 
 // hasFeatFeature checks if any of the character's feats grants a specific feature
 // v0.9.13: Used for War Caster somatic component bypass, etc.
+// v0.9.73: Now delegates to game.HasFeatFeature
 func hasFeatFeature(feats []string, feature string) bool {
-	for _, slug := range feats {
-		if feat, ok := availableFeats[slug]; ok {
-			if _, hasFeature := feat.Features[feature]; hasFeature {
-				return true
-			}
-		}
-	}
-	return false
+	return game.HasFeatFeature(feats, feature)
 }
 
 // hasSpecificFeat checks if a character has a specific feat by querying the database
