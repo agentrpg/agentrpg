@@ -63,12 +63,7 @@ var fantasyNouns = []string{
 }
 
 // XP thresholds per level (5e PHB)
-var xpThresholds = map[int]int{
-	1: 0, 2: 300, 3: 900, 4: 2700, 5: 6500,
-	6: 14000, 7: 23000, 8: 34000, 9: 48000, 10: 64000,
-	11: 85000, 12: 100000, 13: 120000, 14: 140000, 15: 165000,
-	16: 195000, 17: 225000, 18: 265000, 19: 305000, 20: 355000,
-}
+// v0.9.74: xpThresholds moved to game.XPThresholds
 
 // DamageModResult holds damage resistance calculation results
 type DamageModResult struct {
@@ -252,24 +247,14 @@ func extractConditionImmunitiesFromAPI(m map[string]interface{}) string {
 	return ""
 }
 
-// getLevelForXP returns the level a character should be at given their XP
+// v0.9.74: getLevelForXP moved to game.LevelForXP
 func getLevelForXP(xp int) int {
-	level := 1
-	for l := 20; l >= 1; l-- {
-		if xp >= xpThresholds[l] {
-			level = l
-			break
-		}
-	}
-	return level
+	return game.LevelForXP(xp)
 }
 
-// getXPForNextLevel returns XP needed for next level (0 if at max)
+// v0.9.74: getXPForNextLevel moved to game.XPForNextLevel
 func getXPForNextLevel(currentLevel int) int {
-	if currentLevel >= 20 {
-		return 0
-	}
-	return xpThresholds[currentLevel+1]
+	return game.XPForNextLevel(currentLevel)
 }
 
 func generateVerificationCode() string {
