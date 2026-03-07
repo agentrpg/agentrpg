@@ -148,6 +148,22 @@ The server has grown to nearly 47K lines in a single file. This is unmaintainabl
   - getSneakAttackDice → game.SneakAttackDice
   - Inline rage bonus calculation → game.RageDamageBonus
   - Removed ~25 lines of duplicate logic from main.go
+- [x] `game/subclasses.go` - subclass features and mechanics (2026-03-07, v0.9.81)
+  - SubclassFeature, Subclass structs moved from main.go
+  - AvailableSubclasses map - all 12 SRD subclasses with features and domain spells
+  - DragonAncestryDamageTypes map - damage types for Draconic Sorcerers
+  - GetSubclassesForClass, GetSubclass - lookup helpers
+  - GetActiveSubclassFeatures, HasSubclassFeature, GetSubclassMechanic - feature mechanics
+  - GetDomainSpells, AllSubclassSlugs, GetNaturalACBase, GetDraconicBonusHP - utility functions
+  - Full test coverage in `game/subclasses_test.go`
+- [x] main.go updated to call game package for subclass functions (v0.9.81)
+  - availableSubclasses → game.AvailableSubclasses
+  - dragonAncestryDamageTypes → game.DragonAncestryDamageTypes
+  - getSubclassesForClass → delegates to game.GetSubclassesForClass
+  - getActiveSubclassFeatures → delegates to game.GetActiveSubclassFeatures
+  - hasSubclassFeature → delegates to game.HasSubclassFeature
+  - getSubclassMechanic → delegates to game.GetSubclassMechanic
+  - Removed ~637 lines of duplicate code from main.go
 
 **Proposed structure:**
 - `main.go` - routing and startup (~200 lines)
