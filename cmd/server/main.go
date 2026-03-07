@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.79
+// @version 0.9.80
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.79"
+const version = "0.9.80"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1004,6 +1004,12 @@ func initDB() {
 		-- Warlocks choose a Pact Boon at level 3: chain, blade, or tome
 		-- Required by certain Eldritch Invocations as prerequisites
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS pact_boon VARCHAR(20);
+		
+		-- Invocation Spells Used (v0.9.80)
+		-- JSONB array of invocation slugs for once-per-rest spells that have been used
+		-- e.g., ["thief-of-five-fates", "mire-the-mind"]
+		-- Resets on long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS invocation_spells_used JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -8461,25 +8467,38 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 	if effectiveWarlockLevel >= 2 {
 		invocations := getCharacterInvocations(charID)
 		maxInvocations := getMaxInvocations(effectiveWarlockLevel)
+		invocationSpellsUsed := getInvocationSpellsUsed(charID)
 		
 		if len(invocations) > 0 {
 			invocationsInfo := []map[string]interface{}{}
 			for _, slug := range invocations {
 				if inv, ok := eldritchInvocations[slug]; ok {
-					invocationsInfo = append(invocationsInfo, map[string]interface{}{
+					invInfo := map[string]interface{}{
 						"slug":        slug,
 						"name":        inv.Name,
 						"description": inv.Description,
 						"mechanics":   inv.Mechanics,
-					})
+					}
+					// v0.9.80: Show used status for once-per-rest invocations
+					if _, hasOncePerRest := inv.Mechanics["once_per_rest_spell"]; hasOncePerRest {
+						invInfo["once_per_rest"] = true
+						invInfo["used"] = hasUsedInvocationSpell(charID, slug)
+					}
+					invocationsInfo = append(invocationsInfo, invInfo)
 				}
 			}
-			response["eldritch_invocations"] = map[string]interface{}{
+			invocationsResponse := map[string]interface{}{
 				"known":          invocationsInfo,
 				"known_count":    len(invocations),
 				"max_invocations": maxInvocations,
 				"can_learn_more": len(invocations) < maxInvocations,
 			}
+			// v0.9.80: Include once-per-rest usage summary
+			if len(invocationSpellsUsed) > 0 {
+				invocationsResponse["spells_used_today"] = invocationSpellsUsed
+				invocationsResponse["note"] = "Once-per-rest invocation spells reset on long rest."
+			}
+			response["eldritch_invocations"] = invocationsResponse
 		} else if maxInvocations > 0 {
 			response["invocations_pending"] = fmt.Sprintf("You can learn %d Eldritch Invocations! GET /api/characters/invocations?character_id=%d to see options.", maxInvocations, charID)
 		}
@@ -10052,25 +10071,41 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	if strings.ToLower(class) == "warlock" && level >= 2 {
 		invocations := getCharacterInvocations(charID)
 		maxInvocations := getMaxInvocations(level)
+		invocationSpellsUsed := getInvocationSpellsUsed(charID)
 		
 		if len(invocations) > 0 {
 			invocationsInfo := []map[string]interface{}{}
 			for _, slug := range invocations {
 				if inv, ok := eldritchInvocations[slug]; ok {
-					invocationsInfo = append(invocationsInfo, map[string]interface{}{
+					invInfo := map[string]interface{}{
 						"slug":        slug,
 						"name":        inv.Name,
 						"description": inv.Description,
-					})
+					}
+					// v0.9.80: Show used status for once-per-rest invocations
+					if spell, hasOncePerRest := inv.Mechanics["once_per_rest_spell"]; hasOncePerRest {
+						invInfo["once_per_rest"] = true
+						invInfo["grants_spell"] = spell
+						invInfo["used"] = hasUsedInvocationSpell(charID, slug)
+						if !hasUsedInvocationSpell(charID, slug) {
+							invInfo["tip"] = fmt.Sprintf("You can cast %s once using a warlock spell slot!", spell)
+						}
+					}
+					invocationsInfo = append(invocationsInfo, invInfo)
 				}
 			}
-			response["eldritch_invocations"] = map[string]interface{}{
+			invocationsResponse := map[string]interface{}{
 				"known":          invocationsInfo,
 				"known_count":    len(invocations),
 				"max_invocations": maxInvocations,
 				"can_learn_more": len(invocations) < maxInvocations,
 				"tip":            "Invocations like 'agonizing-blast' add CHA mod to eldritch blast damage. 'at_will_spell' invocations let you cast a spell without spell slots.",
 			}
+			// v0.9.80: Include once-per-rest usage info
+			if len(invocationSpellsUsed) > 0 {
+				invocationsResponse["spells_used_today"] = invocationSpellsUsed
+			}
+			response["eldritch_invocations"] = invocationsResponse
 		} else {
 			response["invocations_prompt"] = fmt.Sprintf("You can learn %d Eldritch Invocations! GET /api/characters/invocations?character_id=%d", maxInvocations, charID)
 		}
@@ -22910,13 +22945,31 @@ func resolveAction(action, description string, charID int) string {
 				db.Exec("UPDATE characters SET class_resources = $1 WHERE id = $2", updatedResources, charID)
 			}
 			
+			// v0.9.80: Check for once-per-rest invocation spell
+			// Invocations like Thief of Five Fates grant casting a spell once per long rest using a warlock slot
+			invocationUsedNote := ""
+			oncePerRestInvocation := ""
+			if slotLevel > 0 && strings.ToLower(class) == "warlock" {
+				if invSlug, hasInv := getOncePerRestInvocationForSpell(charID, spellKey); hasInv {
+					oncePerRestInvocation = invSlug
+					if hasUsedInvocationSpell(charID, invSlug) {
+						invName := eldritchInvocations[invSlug].Name
+						return fmt.Sprintf("Cannot cast %s via %s - you've already used this invocation. Requires a long rest to use again.", spell.Name, invName)
+					}
+					invName := eldritchInvocations[invSlug].Name
+					invocationUsedNote = fmt.Sprintf(" [%s: uses warlock slot, once per long rest]", invName)
+				}
+			}
+			
 			// Check and use spell slot (non-ritual)
 			// v0.9.20: Support separate pact slot tracking for multiclass Warlocks
 			if slotLevel > 0 {
 				// Check if using pact slot (from description: "pact slot", "pact magic", "warlock slot")
+				// v0.9.80: Once-per-rest invocation spells implicitly use pact slot
 				usePactSlot := strings.Contains(descLower, "pact slot") || 
 					strings.Contains(descLower, "pact magic") || 
-					strings.Contains(descLower, "warlock slot")
+					strings.Contains(descLower, "warlock slot") ||
+					oncePerRestInvocation != ""
 				
 				// Check for multiclass Warlock
 				var classLevelsJSON []byte
@@ -23005,6 +23058,11 @@ func resolveAction(action, description string, charID int) string {
 				materialConsumedNote = fmt.Sprintf(" [Consumed: %s]", materialToConsume)
 			}
 			
+			// v0.9.80: Mark once-per-rest invocation spell as used
+			if oncePerRestInvocation != "" {
+				markInvocationSpellUsed(charID, oncePerRestInvocation)
+			}
+			
 			// Determine damage/healing dice based on slot level (upcasting v0.8.28)
 			upcastInfo := ""
 			if requestedSlotLevel > spell.Level {
@@ -23070,7 +23128,7 @@ func resolveAction(action, description string, charID int) string {
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, invocationUsedNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -23143,9 +23201,9 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
-				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, blessedHealerInfo, spell.Description)
+				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, invocationUsedNote, blessedHealerInfo, spell.Description)
 			}
-			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, spell.Description)
+			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, invocationUsedNote, spell.Description)
 		}
 		return fmt.Sprintf("Cast spell: %s (Save DC: %d)", description, saveDC)
 	
@@ -32190,6 +32248,59 @@ func hasInvocation(charID int, slug string) bool {
 	return false
 }
 
+// getInvocationSpellsUsed returns the list of once-per-rest invocation spells that have been used (v0.9.80)
+func getInvocationSpellsUsed(charID int) []string {
+	var usedJSON []byte
+	err := db.QueryRow("SELECT COALESCE(invocation_spells_used, '[]') FROM characters WHERE id = $1", charID).Scan(&usedJSON)
+	if err != nil {
+		return []string{}
+	}
+	var used []string
+	json.Unmarshal(usedJSON, &used)
+	return used
+}
+
+// hasUsedInvocationSpell checks if a once-per-rest invocation spell has been used (v0.9.80)
+func hasUsedInvocationSpell(charID int, invocationSlug string) bool {
+	used := getInvocationSpellsUsed(charID)
+	for _, slug := range used {
+		if slug == invocationSlug {
+			return true
+		}
+	}
+	return false
+}
+
+// markInvocationSpellUsed marks a once-per-rest invocation spell as used (v0.9.80)
+func markInvocationSpellUsed(charID int, invocationSlug string) {
+	used := getInvocationSpellsUsed(charID)
+	// Check if already marked (shouldn't happen, but safety check)
+	for _, slug := range used {
+		if slug == invocationSlug {
+			return
+		}
+	}
+	used = append(used, invocationSlug)
+	usedJSON, _ := json.Marshal(used)
+	db.Exec("UPDATE characters SET invocation_spells_used = $1 WHERE id = $2", usedJSON, charID)
+}
+
+// getOncePerRestInvocationForSpell finds the invocation slug that grants once-per-rest casting of a spell (v0.9.80)
+// Returns (invocationSlug, spellSlug) if found, empty strings if not
+func getOncePerRestInvocationForSpell(charID int, spellSlug string) (string, bool) {
+	invocations := getCharacterInvocations(charID)
+	for _, invSlug := range invocations {
+		if inv, ok := eldritchInvocations[invSlug]; ok {
+			if spell, hasSpell := inv.Mechanics["once_per_rest_spell"]; hasSpell {
+				if spell == spellSlug {
+					return invSlug, true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
 // meetsInvocationPrerequisites checks if a character meets the prereqs for an invocation
 func meetsInvocationPrerequisites(charID int, invocation EldritchInvocation) (bool, string) {
 	var class string
@@ -37836,7 +37947,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			hellish_rebuke_used = false,
 			darkness_racial_used = false,
 			wholeness_of_body_used = false,
-			dark_ones_luck_used = false
+			dark_ones_luck_used = false,
+			invocation_spells_used = '[]'
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
