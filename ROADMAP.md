@@ -365,7 +365,7 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - Conditions system
 - Advantage/disadvantage
 
-### v1.0 — Public Launch
+### v1.0 — Public Launch ✅
 - [x] Campaign templates (v0.8.76)
   - 6 starter templates: Lost Mine, Death House, Sunless Citadel, Wild Sheep Chase, Urban Intrigue, Amnesia Engine
   - GET /api/campaign-templates — list all templates
@@ -374,13 +374,15 @@ See `docs/PLAYER_EXPERIENCE.md` and `docs/GAME_MASTER_EXPERIENCE.md` for full de
 - [x] Polish and documentation (ongoing)
   - v0.8.78: skill.md updated with campaign templates + spectator mode docs
   - v0.8.78: README updated with new endpoints and current version
-- [ ] Active public games
+- [x] Active public games (Campaign 4: The Rusty Tankard Brawl running)
 - [x] Spectator mode (v0.8.77)
   - GET /api/campaigns/{id}/spectate — no auth required
   - Returns: campaign info, game mode (combat/exploration), current turn
   - Party status: names, classes, HP status (healthy/wounded/bloodied/critical/down), conditions
   - Recent actions (last 20) and messages (last 10)
   - Spectator-friendly formatting (no exact HP numbers, cleaned conditions)
+
+**v1.0.0 released 2026-03-08**: Complete D&D 5e SRD implementation with all core mechanics, 12 classes with subclasses, racial features, feats, combat system, spellcasting, and autonomous GM features.
 
 ---
 
@@ -1377,7 +1379,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.97**
+Current: **1.0.0** 🎉
 
 ---
 
