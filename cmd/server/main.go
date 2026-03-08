@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.86"
+const version = "0.9.87"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -467,6 +467,7 @@ func main() {
 	http.HandleFunc("/api/characters/infernal-legacy", handleCharacterInfernalLegacy)
 	http.HandleFunc("/api/characters/wholeness-of-body", handleCharacterWholenessOfBody)
 	http.HandleFunc("/api/characters/fiendish-resilience", handleCharacterFiendishResilience)
+	http.HandleFunc("/api/characters/favored-enemy", handleCharacterFavoredEnemy) // v0.9.87
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
@@ -1042,6 +1043,13 @@ func initDB() {
 		-- They return at end of your next turn, taking 10d10 psychic damage if not a fiend
 		-- Once per long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS hurl_through_hell_used BOOLEAN DEFAULT FALSE;
+		
+		-- v0.9.87: Ranger Favored Enemy (PHB p91)
+		-- Track chosen enemy types for Ranger class feature
+		-- Rangers can choose enemy types at levels 1, 6, 14
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS favored_enemies JSONB DEFAULT '[]';
+		-- Track Foe Slayer usage (once per turn, Ranger level 20)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS foe_slayer_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -9069,6 +9077,51 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.87: Ranger Favored Enemy info
+	if strings.ToLower(class) == "ranger" {
+		favoredEnemies := getFavoredEnemies(charID)
+		maxChoices := getRangerFavoredEnemyCount(level)
+		
+		// Build enemy info with descriptions
+		enemiesInfo := []map[string]string{}
+		for _, enemy := range favoredEnemies {
+			desc := favoredEnemyTypes[enemy]
+			if desc == "" {
+				desc = enemy
+			}
+			enemiesInfo = append(enemiesInfo, map[string]string{"type": enemy, "description": desc})
+		}
+		
+		favoredEnemyInfo := map[string]interface{}{
+			"enemies":           enemiesInfo,
+			"total":             len(favoredEnemies),
+			"max_choices":       maxChoices,
+			"remaining_choices": maxChoices - len(favoredEnemies),
+			"mechanics":         "Advantage on WIS (Survival) to track and INT checks to recall info about favored enemies",
+			"phb_reference":     "PHB p91 - Ranger",
+		}
+		
+		if len(favoredEnemies) < maxChoices {
+			favoredEnemyInfo["tip"] = "You have unfilled favored enemy choices! Use POST /api/characters/favored-enemy to choose."
+		}
+		
+		// Add Foe Slayer info for level 20+
+		if level >= 20 {
+			var foeSlayerUsed bool
+			db.QueryRow("SELECT COALESCE(foe_slayer_used, false) FROM characters WHERE id = $1", charID).Scan(&foeSlayerUsed)
+			favoredEnemyInfo["foe_slayer"] = map[string]interface{}{
+				"available":       !foeSlayerUsed,
+				"used_this_turn":  foeSlayerUsed,
+				"wis_bonus":       game.Modifier(wis),
+				"description":     "Once per turn, add WIS modifier to attack roll OR damage roll vs favored enemy",
+				"how_to_use":      "Include 'foe slayer' in attack description to add WIS mod to damage",
+				"phb_reference":   "PHB p92 - Ranger",
+			}
+		}
+		
+		response["favored_enemy"] = favoredEnemyInfo
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -12033,12 +12086,12 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 			db.QueryRow("SELECT race FROM characters WHERE id = $1", newActiveID).Scan(&race)
 			speed := getMovementSpeed(race)
 			
-			// Reset turn resources: action, bonus action, movement, reaction, bonus action spell tracking, horde breaker (resets on your turn)
+			// Reset turn resources: action, bonus action, movement, reaction, bonus action spell tracking, horde breaker, sneak attack, foe slayer (resets on your turn)
 			db.Exec(`
 				UPDATE characters 
 				SET action_used = false, bonus_action_used = false, 
 				    movement_remaining = $1, reaction_used = false, bonus_action_spell_cast = false,
-				    horde_breaker_used = false, sneak_attack_used = false
+				    horde_breaker_used = false, sneak_attack_used = false, foe_slayer_used = false
 				WHERE id = $2
 			`, speed, newActiveID)
 			
@@ -12331,15 +12384,16 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	var req struct {
-		CharacterID     int    `json:"character_id"`
-		Skill            string `json:"skill"`             // e.g., "perception", "athletics"
-		Ability          string `json:"ability"`           // e.g., "str", "dex" - used if no skill
-		DC               int    `json:"dc"`                // Difficulty Class
-		Advantage        bool   `json:"advantage"`
-		Disadvantage     bool   `json:"disadvantage"`
-		Description      string `json:"description"`       // Optional context
-		UseInspiration   bool   `json:"use_inspiration"`   // Spend inspiration for advantage
-		TargetID         int    `json:"target_id"`         // Optional: target of the check (for charmed advantage)
+		CharacterID       int    `json:"character_id"`
+		Skill             string `json:"skill"`               // e.g., "perception", "athletics"
+		Ability           string `json:"ability"`             // e.g., "str", "dex" - used if no skill
+		DC                int    `json:"dc"`                  // Difficulty Class
+		Advantage         bool   `json:"advantage"`
+		Disadvantage      bool   `json:"disadvantage"`
+		Description       string `json:"description"`         // Optional context
+		UseInspiration    bool   `json:"use_inspiration"`     // Spend inspiration for advantage
+		TargetID          int    `json:"target_id"`           // Optional: target of the check (for charmed advantage)
+		TargetCreatureType string `json:"target_creature_type"` // v0.9.87: For Ranger Favored Enemy (e.g., "undead", "fiends")
 		RequiresHearing  bool   `json:"requires_hearing"`  // v0.8.23: Auto-fail if deafened
 		RequiresSight    bool   `json:"requires_sight"`    // v0.8.23: Auto-fail if blinded
 		UsePeerlessSkill bool   `json:"use_peerless_skill"` // v0.9.32: Lore Bard 14+ adds Bardic Inspiration die to own check
@@ -12566,6 +12620,20 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.87: Ranger Favored Enemy (PHB p91)
+	// Advantage on Survival checks to track favored enemies and INT checks to recall information about them
+	favoredEnemyAdvantage := false
+	if strings.ToLower(class) == "ranger" && req.TargetCreatureType != "" {
+		// Check if target creature type is a favored enemy
+		if isFavoredEnemy(req.CharacterID, req.TargetCreatureType) {
+			// Survival check to track OR Intelligence check to recall information
+			if skillUsed == "survival" || abilityUsed == "int" || abilityUsed == "intelligence" {
+				req.Advantage = true
+				favoredEnemyAdvantage = true
+			}
+		}
+	}
+	
 	// v0.8.22: Poisoned condition gives disadvantage on ability checks
 	poisonedDisadvantage := false
 	if hasCondition(req.CharacterID, "poisoned") {
@@ -12605,6 +12673,9 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		}
 		if supremeSneakAdvantage {
 			rollType = "advantage (Supreme Sneak)"
+		}
+		if favoredEnemyAdvantage {
+			rollType = "advantage (Favored Enemy)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = game.RollWithDisadvantage()
@@ -23041,7 +23112,35 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		return fmt.Sprintf("Attack with %s: %d to hit%s%s. Damage: %d%s%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, lifedrinkerNote)
+		// v0.9.87: Foe Slayer (Ranger level 20+, PHB p92)
+		// Once per turn, add WIS modifier to attack roll OR damage roll against favored enemy
+		// Use "foe slayer" in description to add to damage
+		foeSlayerNote := ""
+		if strings.ToLower(class) == "ranger" && level >= 20 && targetID > 0 {
+			if strings.Contains(descLower, "foe slayer") || strings.Contains(descLower, "foeslayer") {
+				// Check if target is a favored enemy
+				targetType := getTargetCreatureType(targetID)
+				if targetType != "" && isFavoredEnemy(charID, targetType) {
+					// Check if already used this turn
+					var foeSlayerUsed bool
+					db.QueryRow("SELECT COALESCE(foe_slayer_used, false) FROM characters WHERE id = $1", charID).Scan(&foeSlayerUsed)
+					if !foeSlayerUsed {
+						wisBonus := game.Modifier(wis)
+						if wisBonus > 0 {
+							dmg += wisBonus
+							foeSlayerNote = fmt.Sprintf(" (+%d Foe Slayer, WIS vs %s)", wisBonus, targetType)
+							db.Exec("UPDATE characters SET foe_slayer_used = true WHERE id = $1", charID)
+						}
+					} else {
+						foeSlayerNote = " [Foe Slayer already used this turn]"
+					}
+				} else {
+					foeSlayerNote = fmt.Sprintf(" [Foe Slayer: %s is not a favored enemy]", targetType)
+				}
+			}
+		}
+		
+		return fmt.Sprintf("Attack with %s: %d to hit%s%s. Damage: %d%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, lifedrinkerNote, foeSlayerNote)
 		
 	case "cast":
 		// v0.9.22: Non-proficient armor blocks spellcasting entirely (PHB p144)
@@ -45743,6 +45842,413 @@ func handleCharacterFiendishResilience(w http.ResponseWriter, r *http.Request) {
 		"note":                "Damage from magical weapons or silver weapons ignores this resistance (PHB p109)",
 		"can_change":          "After a short or long rest",
 	})
+}
+
+// v0.9.87: Ranger Favored Enemy (PHB p91)
+// Valid enemy types for Ranger Favored Enemy
+var favoredEnemyTypes = map[string]string{
+	"aberrations":  "Aberrations (beholder, mind flayer)",
+	"beasts":       "Beasts (bear, wolf, dinosaur)",
+	"celestials":   "Celestials (angel, unicorn)",
+	"constructs":   "Constructs (golem, animated armor)",
+	"dragons":      "Dragons (all dragon types)",
+	"elementals":   "Elementals (fire, water, air, earth)",
+	"fey":          "Fey (dryad, satyr)",
+	"fiends":       "Fiends (demon, devil)",
+	"giants":       "Giants (hill giant, frost giant)",
+	"monstrosities": "Monstrosities (owlbear, minotaur)",
+	"oozes":        "Oozes (gelatinous cube, black pudding)",
+	"plants":       "Plants (treant, shambling mound)",
+	"undead":       "Undead (zombie, vampire)",
+	// Humanoid subtypes (PHB p91: "choose two races of humanoid")
+	"humanoids_goblinoids": "Humanoids: Goblinoids (goblin, hobgoblin, bugbear)",
+	"humanoids_orcs":       "Humanoids: Orcs",
+	"humanoids_gnolls":     "Humanoids: Gnolls",
+	"humanoids_kobolds":    "Humanoids: Kobolds",
+	"humanoids_lizardfolk": "Humanoids: Lizardfolk",
+	"humanoids_humans":     "Humanoids: Humans",
+	"humanoids_elves":      "Humanoids: Elves",
+	"humanoids_dwarves":    "Humanoids: Dwarves",
+}
+
+// getRangerFavoredEnemyCount returns how many favored enemies a Ranger can have at their level
+func getRangerFavoredEnemyCount(level int) int {
+	if level >= 14 {
+		return 3 // Third favored enemy at level 14
+	}
+	if level >= 6 {
+		return 2 // Second favored enemy at level 6
+	}
+	return 1 // First favored enemy at level 1
+}
+
+// getFavoredEnemies returns the list of favored enemy types for a character
+func getFavoredEnemies(characterID int) []string {
+	var enemiesJSON []byte
+	err := db.QueryRow("SELECT COALESCE(favored_enemies, '[]') FROM characters WHERE id = $1", characterID).Scan(&enemiesJSON)
+	if err != nil {
+		return []string{}
+	}
+	var enemies []string
+	json.Unmarshal(enemiesJSON, &enemies)
+	return enemies
+}
+
+// isFavoredEnemy checks if a creature type matches any of the character's favored enemies
+func isFavoredEnemy(characterID int, creatureType string) bool {
+	enemies := getFavoredEnemies(characterID)
+	if len(enemies) == 0 {
+		return false
+	}
+	
+	creatureTypeLower := strings.ToLower(creatureType)
+	for _, enemy := range enemies {
+		enemyLower := strings.ToLower(enemy)
+		
+		// Direct match (e.g., "undead" matches "undead")
+		if enemyLower == creatureTypeLower {
+			return true
+		}
+		
+		// Handle humanoid subtypes (e.g., "humanoids_goblinoids" matches "goblin", "hobgoblin", "bugbear")
+		if strings.HasPrefix(enemyLower, "humanoids_") {
+			subtype := strings.TrimPrefix(enemyLower, "humanoids_")
+			switch subtype {
+			case "goblinoids":
+				if creatureTypeLower == "goblin" || creatureTypeLower == "hobgoblin" || creatureTypeLower == "bugbear" ||
+					strings.Contains(creatureTypeLower, "goblin") {
+					return true
+				}
+			case "orcs":
+				if creatureTypeLower == "orc" || strings.Contains(creatureTypeLower, "orc") {
+					return true
+				}
+			case "gnolls":
+				if creatureTypeLower == "gnoll" || strings.Contains(creatureTypeLower, "gnoll") {
+					return true
+				}
+			case "kobolds":
+				if creatureTypeLower == "kobold" || strings.Contains(creatureTypeLower, "kobold") {
+					return true
+				}
+			case "lizardfolk":
+				if creatureTypeLower == "lizardfolk" || strings.Contains(creatureTypeLower, "lizardfolk") {
+					return true
+				}
+			case "humans":
+				if creatureTypeLower == "human" || creatureTypeLower == "humanoid" && strings.Contains(creatureTypeLower, "human") {
+					return true
+				}
+			case "elves":
+				if creatureTypeLower == "elf" || strings.Contains(creatureTypeLower, "elf") || strings.Contains(creatureTypeLower, "elven") {
+					return true
+				}
+			case "dwarves":
+				if creatureTypeLower == "dwarf" || strings.Contains(creatureTypeLower, "dwarf") || strings.Contains(creatureTypeLower, "dwarven") {
+					return true
+				}
+			}
+		}
+		
+		// Partial match for pluralization (e.g., "fiends" matches "fiend")
+		if strings.TrimSuffix(enemyLower, "s") == creatureTypeLower ||
+			enemyLower == creatureTypeLower+"s" {
+			return true
+		}
+	}
+	
+	return false
+}
+
+// handleCharacterFavoredEnemy manages Ranger Favored Enemy choices (PHB p91)
+// @Summary Manage Ranger Favored Enemy
+// @Description View or choose favored enemy types for Ranger characters
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (GET only)"
+// @Param body body object{character_id=int,enemy_type=string} false "POST body"
+// @Success 200 {object} object
+// @Router /characters/favored-enemy [get]
+// @Router /characters/favored-enemy [post]
+func handleCharacterFavoredEnemy(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			// List all available enemy types
+			enemyTypes := []map[string]string{}
+			for key, desc := range favoredEnemyTypes {
+				enemyTypes = append(enemyTypes, map[string]string{"type": key, "description": desc})
+			}
+			// Sort alphabetically
+			sort.Slice(enemyTypes, func(i, j int) bool {
+				return enemyTypes[i]["type"] < enemyTypes[j]["type"]
+			})
+			
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"feature":      "Favored Enemy",
+				"class":        "Ranger",
+				"description":  "You have significant experience studying, tracking, hunting, and even talking to a certain type of enemy. Choose a type of favored enemy.",
+				"mechanics":    "Advantage on WIS (Survival) checks to track favored enemies and INT checks to recall information about them. You also learn one language of your choice spoken by them (if applicable).",
+				"enemy_types":  enemyTypes,
+				"choices_by_level": map[string]int{
+					"level_1":  1,
+					"level_6":  2,
+					"level_14": 3,
+				},
+				"usage": "GET /api/characters/favored-enemy?character_id=X to view choices, POST to add a favored enemy",
+			})
+			return
+		}
+		
+		// Get character info
+		var class, charName string
+		var level int
+		var enemiesJSON []byte
+		err = db.QueryRow(`
+			SELECT class, name, level, COALESCE(favored_enemies, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &charName, &level, &enemiesJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(class) != "ranger" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_ranger",
+				"message": fmt.Sprintf("%s is a %s, not a Ranger. Favored Enemy is a Ranger feature.", charName, class),
+			})
+			return
+		}
+		
+		var currentEnemies []string
+		json.Unmarshal(enemiesJSON, &currentEnemies)
+		
+		maxChoices := getRangerFavoredEnemyCount(level)
+		remainingChoices := maxChoices - len(currentEnemies)
+		
+		// Get descriptions for current enemies
+		currentEnemiesInfo := []map[string]string{}
+		for _, enemy := range currentEnemies {
+			desc := favoredEnemyTypes[enemy]
+			if desc == "" {
+				desc = enemy
+			}
+			currentEnemiesInfo = append(currentEnemiesInfo, map[string]string{"type": enemy, "description": desc})
+		}
+		
+		// Build available choices (exclude already chosen)
+		availableTypes := []map[string]string{}
+		for key, desc := range favoredEnemyTypes {
+			alreadyChosen := false
+			for _, existing := range currentEnemies {
+				if existing == key {
+					alreadyChosen = true
+					break
+				}
+			}
+			if !alreadyChosen {
+				availableTypes = append(availableTypes, map[string]string{"type": key, "description": desc})
+			}
+		}
+		sort.Slice(availableTypes, func(i, j int) bool {
+			return availableTypes[i]["type"] < availableTypes[j]["type"]
+		})
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":       charID,
+			"character":          charName,
+			"class":              class,
+			"level":              level,
+			"feature":            "Favored Enemy",
+			"current_enemies":    currentEnemiesInfo,
+			"max_choices":        maxChoices,
+			"remaining_choices":  remainingChoices,
+			"available_types":    availableTypes,
+			"can_add":            remainingChoices > 0,
+			"next_enemy_at":      getNextFavoredEnemyLevel(len(currentEnemies)),
+			"mechanics":          "Advantage on WIS (Survival) checks to track favored enemies and INT checks to recall information about them.",
+			"how_to_use":         "POST /api/characters/favored-enemy with character_id and enemy_type",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		EnemyType   string `json:"enemy_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_id_required",
+			"message": "Provide character_id",
+		})
+		return
+	}
+	
+	enemyTypeLower := strings.ToLower(strings.TrimSpace(req.EnemyType))
+	if _, valid := favoredEnemyTypes[enemyTypeLower]; !valid {
+		// List valid types
+		validTypes := []string{}
+		for key := range favoredEnemyTypes {
+			validTypes = append(validTypes, key)
+		}
+		sort.Strings(validTypes)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":       "invalid_enemy_type",
+			"message":     fmt.Sprintf("'%s' is not a valid favored enemy type", req.EnemyType),
+			"valid_types": validTypes,
+		})
+		return
+	}
+	
+	// Verify ownership and get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var enemiesJSON []byte
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, COALESCE(favored_enemies, '[]'), lobby_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &enemiesJSON, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only set Favored Enemy for your own characters",
+		})
+		return
+	}
+	
+	if strings.ToLower(class) != "ranger" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_ranger",
+			"message": fmt.Sprintf("%s is a %s, not a Ranger. Favored Enemy is a Ranger feature.", charName, class),
+		})
+		return
+	}
+	
+	var currentEnemies []string
+	json.Unmarshal(enemiesJSON, &currentEnemies)
+	
+	// Check if already chosen
+	for _, enemy := range currentEnemies {
+		if enemy == enemyTypeLower {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_chosen",
+				"message": fmt.Sprintf("%s already has %s as a favored enemy", charName, enemyTypeLower),
+			})
+			return
+		}
+	}
+	
+	// Check if can add more
+	maxChoices := getRangerFavoredEnemyCount(level)
+	if len(currentEnemies) >= maxChoices {
+		nextLevel := 6
+		if len(currentEnemies) >= 2 {
+			nextLevel = 14
+		}
+		if len(currentEnemies) >= 3 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          "max_enemies",
+				"message":        fmt.Sprintf("%s already has the maximum 3 favored enemies", charName),
+				"current_enemies": currentEnemies,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "level_requirement",
+			"message":         fmt.Sprintf("%s can choose %d favored enemies at level %d. Reach level %d for another choice.", charName, maxChoices, level, nextLevel),
+			"current_enemies": currentEnemies,
+			"current_level":   level,
+			"next_enemy_at":   nextLevel,
+		})
+		return
+	}
+	
+	// Add the favored enemy
+	currentEnemies = append(currentEnemies, enemyTypeLower)
+	enemiesJSONNew, _ := json.Marshal(currentEnemies)
+	
+	_, err = db.Exec("UPDATE characters SET favored_enemies = $1 WHERE id = $2", enemiesJSONNew, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "update_failed",
+			"message": "Failed to update favored enemies",
+		})
+		return
+	}
+	
+	// Log action if in campaign
+	if campaignID.Valid {
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'other', $3, NOW())`,
+			campaignID.Int64, req.CharacterID,
+			fmt.Sprintf("🎯 %s designates %s as a favored enemy (Ranger)", charName, favoredEnemyTypes[enemyTypeLower]))
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"feature":           "Favored Enemy",
+		"character":         charName,
+		"new_enemy":         enemyTypeLower,
+		"new_enemy_info":    favoredEnemyTypes[enemyTypeLower],
+		"total_enemies":     len(currentEnemies),
+		"all_enemies":       currentEnemies,
+		"remaining_choices": maxChoices - len(currentEnemies),
+		"mechanics":         "Advantage on WIS (Survival) checks to track this enemy type and INT checks to recall information about them.",
+		"note":              "You also learn one language spoken by this enemy type (if applicable) - update your character's languages.",
+	})
+}
+
+// getNextFavoredEnemyLevel returns the level at which Rangers get their next favored enemy choice
+func getNextFavoredEnemyLevel(currentCount int) interface{} {
+	switch currentCount {
+	case 0:
+		return 1 // First choice at level 1
+	case 1:
+		return 6 // Second choice at level 6
+	case 2:
+		return 14 // Third choice at level 14
+	default:
+		return nil // Max reached
+	}
 }
 
 // handleUniverseFightingStyles returns all available fighting styles

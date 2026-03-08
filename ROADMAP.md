@@ -855,6 +855,20 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
         - [x] Validates Hunter Ranger level 15+ with superior_defense: stand_against_the_tide
         - [x] Rolls attack with provided attack_bonus vs new target's AC
         - [x] Applies damage to character targets automatically
+  - [x] **Ranger Core Features (v0.9.87, PHB p91-92)**
+    - [x] **Favored Enemy** (level 1/6/14)
+      - [x] POST /api/characters/favored-enemy to choose enemy types
+      - [x] 13 creature types + 8 humanoid subtypes available
+      - [x] Advantage on Survival checks to track favored enemies
+      - [x] Advantage on INT checks to recall information about favored enemies
+      - [x] Uses target_creature_type param in POST /api/gm/skill-check
+      - [x] Shows in character sheet and /api/my-turn for Rangers
+      - [x] Choice limits by level: 1 at level 1, 2 at level 6, 3 at level 14
+    - [x] **Foe Slayer** (level 20, PHB p92)
+      - [x] Once per turn: add WIS mod to attack roll OR damage roll vs favored enemy
+      - [x] Include "foe slayer" in attack description to add WIS mod to damage
+      - [x] foe_slayer_used tracking, resets at turn start
+      - [x] Shows in character sheet for Rangers level 20+
   - [x] Monk Ki abilities and Open Hand features (v0.9.2)
     - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
     - [x] patient_defense action: Dodge as bonus action for 1 ki
@@ -1275,7 +1289,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.86**
+Current: **0.9.87**
 
 ---
 
