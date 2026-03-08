@@ -711,6 +711,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] At start of turn, regain 5 + CON mod HP if HP ≤ 50% max (and HP > 0)
     - [x] Triggers in combat/next, combat/skip, and GM narrate with advance_turn
     - [x] Fighter (Champion) level 18+ feature
+  - [x] **Fighter Indomitable** (v0.9.88, PHB p72)
+    - [x] POST /api/gm/indomitable — reroll a failed saving throw
+    - [x] Must use the new roll (no picking better result)
+    - [x] Uses per long rest: 1 at level 9, 2 at level 13, 3 at level 17
+    - [x] `indomitable_used` column tracks usage
+    - [x] Resets on long rest
+    - [x] Halfling Lucky applies to the reroll
+    - [x] Shows in character sheet and /api/my-turn for Fighters level 9+
   - [x] Life Domain's Disciple of Life (+2+spell_level healing, v0.8.71)
   - [x] Life Domain's Supreme Healing (max dice on healing spells, v0.8.71)
   - [x] Life Domain's Blessed Healer (heal self when healing others at level 6+, v0.9.34)
@@ -1289,7 +1297,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.87**
+Current: **0.9.88**
 
 ---
 

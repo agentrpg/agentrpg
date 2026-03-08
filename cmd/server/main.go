@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.87"
+const version = "0.9.88"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -412,6 +412,7 @@ func main() {
 	http.HandleFunc("/api/gm/counterspell", handleGMCounterspell)
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dark-ones-luck", handleGMDarkOnesLuck)
+	http.HandleFunc("/api/gm/indomitable", handleGMIndomitable)
 	http.HandleFunc("/api/gm/hurl-through-hell", handleGMHurlThroughHell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
@@ -1050,6 +1051,12 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS favored_enemies JSONB DEFAULT '[]';
 		-- Track Foe Slayer usage (once per turn, Ranger level 20)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS foe_slayer_used BOOLEAN DEFAULT FALSE;
+		
+		-- v0.9.88: Fighter Indomitable (PHB p72)
+		-- Reroll a failed saving throw, must use new result
+		-- Uses: 1 at level 9, 2 at level 13, 3 at level 17
+		-- Resets on long rest
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS indomitable_used INTEGER DEFAULT 0;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2039,6 +2046,52 @@ func isHalfOrc(characterID int) bool {
 // one additional time and add it to the extra damage of the critical hit.
 func hasSavageAttacks(characterID int) bool {
 	return isHalfOrc(characterID)
+}
+
+// v0.9.88: Fighter Indomitable (PHB p72)
+// Returns max uses based on Fighter level: 1 at 9, 2 at 13, 3 at 17
+func getIndomitableMaxUses(class string, level int) int {
+	if strings.ToLower(class) != "fighter" {
+		return 0
+	}
+	if level >= 17 {
+		return 3
+	}
+	if level >= 13 {
+		return 2
+	}
+	if level >= 9 {
+		return 1
+	}
+	return 0
+}
+
+// hasIndomitable checks if a character has the Indomitable feature (Fighter 9+)
+func hasIndomitable(characterID int) bool {
+	var class string
+	var level int
+	err := db.QueryRow("SELECT class, level FROM characters WHERE id = $1", characterID).Scan(&class, &level)
+	if err != nil {
+		return false
+	}
+	return getIndomitableMaxUses(class, level) > 0
+}
+
+// getIndomitableRemaining returns remaining Indomitable uses for a character
+func getIndomitableRemaining(characterID int) int {
+	var class string
+	var level int
+	var used int
+	err := db.QueryRow("SELECT class, level, COALESCE(indomitable_used, 0) FROM characters WHERE id = $1", characterID).Scan(&class, &level, &used)
+	if err != nil {
+		return 0
+	}
+	maxUses := getIndomitableMaxUses(class, level)
+	remaining := maxUses - used
+	if remaining < 0 {
+		return 0
+	}
+	return remaining
 }
 
 // isGnome checks if a character is a gnome (v0.9.49 - Gnome Cunning)
@@ -9122,6 +9175,35 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["favored_enemy"] = favoredEnemyInfo
 	}
 	
+	// v0.9.88: Fighter Indomitable info (level 9+)
+	if strings.ToLower(class) == "fighter" && level >= 9 {
+		var indomitableUsed int
+		db.QueryRow("SELECT COALESCE(indomitable_used, 0) FROM characters WHERE id = $1", charID).Scan(&indomitableUsed)
+		
+		maxUses := getIndomitableMaxUses(class, level)
+		remaining := maxUses - indomitableUsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		
+		response["indomitable"] = map[string]interface{}{
+			"uses_remaining":   remaining,
+			"uses_max":         maxUses,
+			"uses_spent":       indomitableUsed,
+			"recovery":         "long rest",
+			"description":      "When you fail a saving throw, you can reroll it. You must use the new roll. (PHB p72)",
+			"trigger":          "After failing any saving throw",
+			"how_to_use":       "Ask GM to call POST /api/gm/indomitable with your character_id, ability, and dc",
+			"phb_reference":    "PHB p72 - Fighter",
+		}
+		
+		if remaining > 0 {
+			response["indomitable_tip"] = fmt.Sprintf("⚔️ You have %d Indomitable use(s) remaining! If you fail a save, you can reroll it.", remaining)
+		} else {
+			response["indomitable_tip"] = "⚔️ Indomitable is exhausted for this long rest. Take a long rest to recover."
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -10453,6 +10535,37 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		} else {
 			response["pact_boon_pending"] = "🎁 You can choose a Pact Boon at level 3! Use POST /api/characters/pact-boon with pact_boon set to chain, blade, or tome."
 		}
+	}
+	
+	// v0.9.88: Fighter Indomitable (level 9+)
+	if strings.ToLower(class) == "fighter" && level >= 9 {
+		var indomitableUsed int
+		db.QueryRow("SELECT COALESCE(indomitable_used, 0) FROM characters WHERE id = $1", charID).Scan(&indomitableUsed)
+		
+		maxUses := getIndomitableMaxUses(class, level)
+		remaining := maxUses - indomitableUsed
+		if remaining < 0 {
+			remaining = 0
+		}
+		
+		indomitableInfo := map[string]interface{}{
+			"uses_remaining":   remaining,
+			"uses_max":         maxUses,
+			"uses_spent":       indomitableUsed,
+			"recovery":         "long rest",
+			"description":      "When you fail a saving throw, you can reroll it. You must use the new roll. (PHB p72)",
+			"trigger":          "After failing any saving throw",
+			"how_to_use":       "Ask GM to call POST /api/gm/indomitable with your character_id, ability, and dc",
+			"phb_reference":    "PHB p72 - Fighter",
+		}
+		
+		if remaining > 0 {
+			indomitableInfo["tip"] = fmt.Sprintf("⚔️ You have %d Indomitable use(s)! If you fail a save, you can reroll it.", remaining)
+		} else {
+			indomitableInfo["tip"] = "⚔️ Indomitable exhausted. Take a long rest to recover."
+		}
+		
+		response["indomitable"] = indomitableInfo
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -29486,6 +29599,279 @@ func handleGMDarkOnesLuck(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGMIndomitable godoc
+// @Summary Fighter's Indomitable (PHB p72)
+// @Description Level 9+ Fighters can reroll a failed saving throw. They must use the new roll. Uses per long rest: 1 at level 9, 2 at level 13, 3 at level 17.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,ability=string,dc=integer} true "character_id (Fighter), ability (str/dex/con/int/wis/cha), dc (difficulty class)"
+// @Success 200 {object} map[string]interface{} "Saving throw reroll result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or feature unavailable"
+// @Router /gm/indomitable [post]
+func handleGMIndomitable(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Ability     string `json:"ability"` // str, dex, con, int, wis, cha
+		DC          int    `json:"dc"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	if req.Ability == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "ability required (str, dex, con, int, wis, cha)",
+		})
+		return
+	}
+	
+	if req.DC == 0 {
+		req.DC = 10 // Default DC
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var level, usedCount int
+	var str, dex, con, intl, wis, cha int
+	err = db.QueryRow(`
+		SELECT name, class, level, COALESCE(indomitable_used, 0), str, dex, con, intl, wis, cha
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &class, &level, &usedCount, &str, &dex, &con, &intl, &wis, &cha)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Verify character is a Fighter level 9+
+	maxUses := getIndomitableMaxUses(class, level)
+	if maxUses == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "feature_unavailable",
+			"message": fmt.Sprintf("%s is a level %d %s. Indomitable requires Fighter level 9+.", charName, level, class),
+		})
+		return
+	}
+	
+	// Check if uses remaining
+	remaining := maxUses - usedCount
+	if remaining <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":              "no_uses_remaining",
+			"message":            fmt.Sprintf("%s has used all Indomitable uses for this long rest (%d/%d)", charName, usedCount, maxUses),
+			"indomitable_used":   usedCount,
+			"indomitable_max":    maxUses,
+			"recovery":           "long rest",
+		})
+		return
+	}
+	
+	// Parse the ability and calculate modifier
+	abilityLower := strings.ToLower(req.Ability)
+	var abilityMod int
+	var abilityName string
+	var abilityShort string
+	
+	switch abilityLower {
+	case "str", "strength":
+		abilityMod = game.Modifier(str)
+		abilityName = "Strength"
+		abilityShort = "str"
+	case "dex", "dexterity":
+		abilityMod = game.Modifier(dex)
+		abilityName = "Dexterity"
+		abilityShort = "dex"
+	case "con", "constitution":
+		abilityMod = game.Modifier(con)
+		abilityName = "Constitution"
+		abilityShort = "con"
+	case "int", "intelligence":
+		abilityMod = game.Modifier(intl)
+		abilityName = "Intelligence"
+		abilityShort = "int"
+	case "wis", "wisdom":
+		abilityMod = game.Modifier(wis)
+		abilityName = "Wisdom"
+		abilityShort = "wis"
+	case "cha", "charisma":
+		abilityMod = game.Modifier(cha)
+		abilityName = "Charisma"
+		abilityShort = "cha"
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid ability - use str, dex, con, int, wis, or cha"})
+		return
+	}
+	
+	// Get class saving throw proficiencies
+	var classSaves string
+	_ = db.QueryRow(`SELECT saving_throws FROM classes WHERE slug = $1`, strings.ToLower(class)).Scan(&classSaves)
+	
+	// Check if proficient in this saving throw
+	proficient := false
+	if classSaves != "" {
+		for _, save := range strings.Split(classSaves, ",") {
+			if strings.TrimSpace(strings.ToLower(save)) == abilityShort {
+				proficient = true
+				break
+			}
+		}
+	}
+	
+	// Calculate total modifier
+	totalMod := abilityMod
+	if proficient {
+		totalMod += game.ProficiencyBonus(level)
+	}
+	
+	// Roll the new saving throw (Indomitable reroll)
+	newRoll := game.RollDie(20)
+	
+	// v0.9.47: Halfling Lucky - reroll 1s
+	halflingLuckyUsed := false
+	halflingLuckyOriginal := 0
+	if newRoll == 1 {
+		rerolledValue, rerolled, origRoll := applyHalflingLucky(newRoll, req.CharacterID)
+		if rerolled {
+			halflingLuckyUsed = true
+			halflingLuckyOriginal = origRoll
+			newRoll = rerolledValue
+		}
+	}
+	
+	newTotal := newRoll + totalMod
+	success := newTotal >= req.DC
+	
+	// Natural 20 always succeeds, natural 1 always fails
+	outcomeStr := "FAILURE"
+	if success {
+		outcomeStr = "SUCCESS"
+	}
+	if newRoll == 20 {
+		success = true
+		outcomeStr = "CRITICAL SUCCESS"
+	} else if newRoll == 1 && !halflingLuckyUsed {
+		success = false
+		outcomeStr = "CRITICAL FAILURE"
+	}
+	
+	// Track usage
+	db.Exec("UPDATE characters SET indomitable_used = indomitable_used + 1 WHERE id = $1", req.CharacterID)
+	newUsedCount := usedCount + 1
+	
+	// Build result string
+	rollStr := fmt.Sprintf("d20(%d)", newRoll)
+	if halflingLuckyUsed {
+		rollStr = fmt.Sprintf("d20(%d→%d Lucky)", halflingLuckyOriginal, newRoll)
+	}
+	
+	modStr := ""
+	if totalMod >= 0 {
+		modStr = fmt.Sprintf("+%d", totalMod)
+	} else {
+		modStr = fmt.Sprintf("%d", totalMod)
+	}
+	
+	profStr := ""
+	if proficient {
+		profStr = " (proficient)"
+	}
+	
+	fullResult := fmt.Sprintf("Indomitable reroll: %s saving throw%s: %s%s = %d vs DC %d → %s",
+		abilityName, profStr, rollStr, modStr, newTotal, req.DC, outcomeStr)
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("%s uses Indomitable to reroll failed %s save", charName, abilityName)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "indomitable", actionDesc, fullResult)
+	
+	response := map[string]interface{}{
+		"success":            success,
+		"character":          charName,
+		"ability":            abilityName,
+		"proficient":         proficient,
+		"roll":               newRoll,
+		"ability_mod":        abilityMod,
+		"total_mod":          totalMod,
+		"total":              newTotal,
+		"dc":                 req.DC,
+		"outcome":            outcomeStr,
+		"result":             fullResult,
+		"indomitable_used":   newUsedCount,
+		"indomitable_max":    maxUses,
+		"indomitable_remaining": maxUses - newUsedCount,
+		"feature_note":       "Indomitable (Fighter): You must use the new roll result.",
+	}
+	
+	if halflingLuckyUsed {
+		response["halfling_lucky"] = true
+		response["halfling_lucky_original"] = halflingLuckyOriginal
+		response["halfling_lucky_note"] = "🍀 Halfling Lucky rerolled the 1"
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleGMHurlThroughHell godoc
 // @Summary Fiend Warlock's Hurl Through Hell capstone (PHB p109)
 // @Description Level 14+ Fiend Warlocks can use this feature when they hit a creature with an attack. The target is instantly transported through the lower planes, disappearing until the end of the Warlock's next turn. When the target returns, if it is not a fiend, it takes 10d10 psychic damage. This feature can only be used once per long rest. The target gains a "hurled_through_hell" condition while absent.
@@ -37667,7 +38053,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			wholeness_of_body_used = false,
 			dark_ones_luck_used = false,
 			hurl_through_hell_used = false,
-			invocation_spells_used = '[]'
+			invocation_spells_used = '[]',
+			indomitable_used = 0
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -37702,6 +38089,14 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 		response["exhaustion_reduced"] = true
 		response["exhaustion_level"] = newExhaustion
 		response["message"] = fmt.Sprintf("Long rest complete. HP and spell slots restored. Exhaustion reduced to %d.", newExhaustion)
+	}
+	
+	// v0.9.88: Show Indomitable recovery for Fighters level 9+
+	indomitableMaxUses := getIndomitableMaxUses(class, level)
+	if indomitableMaxUses > 0 {
+		response["indomitable_recovered"] = true
+		response["indomitable_max"] = indomitableMaxUses
+		response["indomitable_note"] = fmt.Sprintf("Indomitable uses restored (%d per long rest)", indomitableMaxUses)
 	}
 	
 	json.NewEncoder(w).Encode(response)
