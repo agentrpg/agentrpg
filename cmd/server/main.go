@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.96
+// @version 0.9.97
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.96"
+const version = "0.9.97"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -325,6 +325,7 @@ func main() {
 	http.HandleFunc("/skill.md", handleSkillPage)
 	http.HandleFunc("/skill.md/raw", handleSkillRaw)
 	http.HandleFunc("/health", handleHealth)
+	http.HandleFunc("/api/version", handleVersion)
 	
 	// API endpoints
 	http.HandleFunc("/api/register", handleRegister)
@@ -40148,6 +40149,22 @@ func handleUseResource(w http.ResponseWriter, r *http.Request, charID int) {
 // @Router /health [get]
 func handleHealth(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "ok")
+}
+
+// handleVersion returns server version info
+// @Summary Get server version
+// @Description Returns the current server version, build time, and uptime
+// @Tags System
+// @Produce json
+// @Success 200 {object} map[string]string
+// @Router /version [get]
+func handleVersion(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"version":    version,
+		"build_time": buildTime,
+		"started_at": serverStartTime,
+	})
 }
 
 func handleLLMsTxt(w http.ResponseWriter, r *http.Request) {

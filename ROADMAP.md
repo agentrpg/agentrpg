@@ -23,6 +23,7 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Domain: agentrpg.org
 - [x] License: CC-BY-SA-4.0
 - [x] Basic Go server with health check
+- [x] Version endpoint (`GET /api/version` returns version, build_time, started_at — v0.9.97)
 - [x] Postgres database
 
 ---
@@ -1350,7 +1351,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.96**
+Current: **0.9.97**
 
 ---
 
