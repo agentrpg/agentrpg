@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.92"
+const version = "0.9.93"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -470,6 +470,7 @@ func main() {
 	http.HandleFunc("/api/characters/wholeness-of-body", handleCharacterWholenessOfBody)
 	http.HandleFunc("/api/characters/fiendish-resilience", handleCharacterFiendishResilience)
 	http.HandleFunc("/api/characters/favored-enemy", handleCharacterFavoredEnemy) // v0.9.87
+	http.HandleFunc("/api/characters/mystic-arcanum", handleCharacterMysticArcanum) // v0.9.93
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
@@ -1058,6 +1059,14 @@ func initDB() {
 		-- Uses: 1 at level 9, 2 at level 13, 3 at level 17
 		-- Resets on long rest
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS indomitable_used INTEGER DEFAULT 0;
+		
+		-- v0.9.93: Warlock Mystic Arcanum (PHB p108)
+		-- At 11th level, Warlocks gain a 6th-level spell they can cast once per long rest
+		-- Additional arcanum at levels 13 (7th), 15 (8th), and 17 (9th)
+		-- JSONB stores chosen spells: {"6": "spell-slug", "7": "spell-slug", ...}
+		-- Used tracking stores which levels have been cast: [6, 7]
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mystic_arcanum JSONB DEFAULT '{}';
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mystic_arcanum_used JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -8809,6 +8818,62 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v0.9.93: Mystic Arcanum for Warlocks level 11+
+	if effectiveWarlockLevel >= 11 {
+		var arcanumJSON, usedJSON []byte
+		db.QueryRow("SELECT COALESCE(mystic_arcanum, '{}'), COALESCE(mystic_arcanum_used, '[]') FROM characters WHERE id = $1", charID).Scan(&arcanumJSON, &usedJSON)
+		var arcanum map[string]string
+		var usedLevels []int
+		json.Unmarshal(arcanumJSON, &arcanum)
+		json.Unmarshal(usedJSON, &usedLevels)
+		
+		availableLevels := getAvailableMysticArcanumLevels(effectiveWarlockLevel)
+		arcanumInfo := []map[string]interface{}{}
+		unchosen := []int{}
+		
+		for _, spellLvl := range availableLevels {
+			spellSlug := arcanum[strconv.Itoa(spellLvl)]
+			info := map[string]interface{}{"spell_level": spellLvl}
+			
+			if spellSlug != "" {
+				var spellName string
+				db.QueryRow("SELECT name FROM spells WHERE slug = $1", spellSlug).Scan(&spellName)
+				info["spell"] = spellSlug
+				info["spell_name"] = spellName
+				// Check if used
+				used := false
+				for _, usedLvl := range usedLevels {
+					if usedLvl == spellLvl {
+						used = true
+						break
+					}
+				}
+				info["used"] = used
+				if used {
+					info["status"] = "Used (resets on long rest)"
+				} else {
+					info["status"] = "Available"
+				}
+			} else {
+				info["spell"] = nil
+				info["status"] = "Not chosen"
+				unchosen = append(unchosen, spellLvl)
+			}
+			arcanumInfo = append(arcanumInfo, info)
+		}
+		
+		mysticArcanumResponse := map[string]interface{}{
+			"arcanum":   arcanumInfo,
+			"note":      "Mystic Arcanum spells can be cast once per long rest without a spell slot. Include 'arcanum' in your cast description.",
+			"how_to_cast": "POST /api/action with action='cast', description='cast [spell] using arcanum'",
+		}
+		if len(unchosen) > 0 {
+			mysticArcanumResponse["unchosen_levels"] = unchosen
+			mysticArcanumResponse["how_to_choose"] = "POST /api/characters/mystic-arcanum with character_id, spell_level, spell_slug"
+		}
+		response["mystic_arcanum"] = mysticArcanumResponse
+	}
+	
 	// Known spells (v0.8.63)
 	var knownSpells []string
 	json.Unmarshal(knownSpellsJSON, &knownSpells)
@@ -10625,6 +10690,66 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		} else {
 			response["pact_boon_pending"] = "🎁 You can choose a Pact Boon at level 3! Use POST /api/characters/pact-boon with pact_boon set to chain, blade, or tome."
 		}
+	}
+	
+	// v0.9.93: Mystic Arcanum for Warlocks level 11+
+	if strings.ToLower(class) == "warlock" && level >= 11 {
+		var arcanumJSON, usedJSON []byte
+		db.QueryRow("SELECT COALESCE(mystic_arcanum, '{}'), COALESCE(mystic_arcanum_used, '[]') FROM characters WHERE id = $1", charID).Scan(&arcanumJSON, &usedJSON)
+		var arcanum map[string]string
+		var usedLevels []int
+		json.Unmarshal(arcanumJSON, &arcanum)
+		json.Unmarshal(usedJSON, &usedLevels)
+		
+		availableLevels := getAvailableMysticArcanumLevels(level)
+		arcanumInfo := []map[string]interface{}{}
+		unchosen := []int{}
+		anyAvailable := false
+		
+		for _, spellLvl := range availableLevels {
+			spellSlug := arcanum[strconv.Itoa(spellLvl)]
+			info := map[string]interface{}{"spell_level": spellLvl}
+			
+			if spellSlug != "" {
+				var spellName string
+				db.QueryRow("SELECT name FROM spells WHERE slug = $1", spellSlug).Scan(&spellName)
+				info["spell"] = spellSlug
+				info["spell_name"] = spellName
+				// Check if used
+				used := false
+				for _, usedLvl := range usedLevels {
+					if usedLvl == spellLvl {
+						used = true
+						break
+					}
+				}
+				info["used"] = used
+				if used {
+					info["status"] = "Used"
+				} else {
+					info["status"] = "Available"
+					anyAvailable = true
+				}
+			} else {
+				info["spell"] = nil
+				info["status"] = "Not chosen"
+				unchosen = append(unchosen, spellLvl)
+			}
+			arcanumInfo = append(arcanumInfo, info)
+		}
+		
+		mysticArcanumResponse := map[string]interface{}{
+			"arcanum":       arcanumInfo,
+			"how_to_cast":   "Include 'arcanum' in cast description: 'cast [spell] using arcanum'",
+		}
+		if len(unchosen) > 0 {
+			mysticArcanumResponse["unchosen_levels"] = unchosen
+			mysticArcanumResponse["how_to_choose"] = fmt.Sprintf("POST /api/characters/mystic-arcanum with character_id=%d, spell_level, spell_slug", charID)
+		}
+		if anyAvailable {
+			mysticArcanumResponse["tip"] = "✨ You have Mystic Arcanum spells ready! Cast them once per long rest without a slot."
+		}
+		response["mystic_arcanum"] = mysticArcanumResponse
 	}
 	
 	// v0.9.88: Fighter Indomitable (level 9+)
@@ -23865,6 +23990,71 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// v0.9.93: Check for Mystic Arcanum casting (Warlock level 11+)
+			// Keywords: "arcanum", "mystic arcanum", "using arcanum"
+			useMysticArcanum := strings.Contains(descLower, "arcanum") || 
+				strings.Contains(descLower, "mystic arcanum") ||
+				strings.Contains(descLower, "using arcanum")
+			mysticArcanumNote := ""
+			
+			if useMysticArcanum && slotLevel >= 6 && slotLevel <= 9 {
+				// Check if Warlock with the appropriate arcanum
+				if strings.ToLower(class) != "warlock" {
+					return "Mystic Arcanum is a Warlock feature"
+				}
+				
+				warlockLevel := level
+				// For multiclass, get warlock level
+				var classLevelsJSON []byte
+				db.QueryRow("SELECT COALESCE(class_levels, '{}') FROM characters WHERE id = $1", charID).Scan(&classLevelsJSON)
+				var classLevels map[string]int
+				json.Unmarshal(classLevelsJSON, &classLevels)
+				if len(classLevels) > 1 {
+					for c, lvl := range classLevels {
+						if strings.ToLower(c) == "warlock" {
+							warlockLevel = lvl
+							break
+						}
+					}
+				}
+				
+				requiredLevel := getMysticArcanumLevelRequirement(slotLevel)
+				if warlockLevel < requiredLevel {
+					return fmt.Sprintf("Mystic Arcanum for %dth-level spells requires Warlock level %d (current: %d)", slotLevel, requiredLevel, warlockLevel)
+				}
+				
+				// Check if this spell is chosen as arcanum at this level
+				var arcanumJSON, usedJSON []byte
+				db.QueryRow("SELECT COALESCE(mystic_arcanum, '{}'), COALESCE(mystic_arcanum_used, '[]') FROM characters WHERE id = $1", charID).Scan(&arcanumJSON, &usedJSON)
+				var arcanum map[string]string
+				var usedLevels []int
+				json.Unmarshal(arcanumJSON, &arcanum)
+				json.Unmarshal(usedJSON, &usedLevels)
+				
+				chosenSpell := arcanum[strconv.Itoa(slotLevel)]
+				if chosenSpell == "" {
+					return fmt.Sprintf("No %dth-level Mystic Arcanum chosen. Use POST /api/characters/mystic-arcanum to choose one.", slotLevel)
+				}
+				if chosenSpell != spellKey {
+					return fmt.Sprintf("Your %dth-level Mystic Arcanum is %s, not %s", slotLevel, chosenSpell, spell.Name)
+				}
+				
+				// Check if already used
+				for _, usedLvl := range usedLevels {
+					if usedLvl == slotLevel {
+						return fmt.Sprintf("Already used %dth-level Mystic Arcanum (%s) today. Requires a long rest to cast again.", slotLevel, spell.Name)
+					}
+				}
+				
+				// Mark as used
+				usedLevels = append(usedLevels, slotLevel)
+				usedJSONNew, _ := json.Marshal(usedLevels)
+				db.Exec("UPDATE characters SET mystic_arcanum_used = $1 WHERE id = $2", usedJSONNew, charID)
+				
+				mysticArcanumNote = fmt.Sprintf(" [Mystic Arcanum: %dth-level, no slot used]", slotLevel)
+				slotLevel = 0 // No slot consumption
+			}
+			
 			// Check and use spell slot (non-ritual)
 			// v0.9.20: Support separate pact slot tracking for multiclass Warlocks
 			if slotLevel > 0 {
@@ -24032,7 +24222,7 @@ func resolveAction(action, description string, charID int) string {
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, invocationUsedNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -24107,7 +24297,7 @@ func resolveAction(action, description string, charID int) string {
 				
 				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, invocationUsedNote, blessedHealerInfo, spell.Description)
 			}
-			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, invocationUsedNote, spell.Description)
+			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, spell.Description)
 		}
 		return fmt.Sprintf("Cast spell: %s (Save DC: %d)", description, saveDC)
 	
@@ -38626,7 +38816,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			dark_ones_luck_used = false,
 			hurl_through_hell_used = false,
 			invocation_spells_used = '[]',
-			indomitable_used = 0
+			indomitable_used = 0,
+			mystic_arcanum_used = '[]'
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -47232,6 +47423,386 @@ func getNextFavoredEnemyLevel(currentCount int) interface{} {
 	default:
 		return nil // Max reached
 	}
+}
+
+// getMysticArcanumLevelRequirement returns the warlock level required for a given spell level arcanum
+func getMysticArcanumLevelRequirement(spellLevel int) int {
+	switch spellLevel {
+	case 6:
+		return 11
+	case 7:
+		return 13
+	case 8:
+		return 15
+	case 9:
+		return 17
+	default:
+		return 0 // Invalid
+	}
+}
+
+// getAvailableMysticArcanumLevels returns which arcanum spell levels a warlock can choose based on their level
+func getAvailableMysticArcanumLevels(warlockLevel int) []int {
+	levels := []int{}
+	if warlockLevel >= 11 {
+		levels = append(levels, 6)
+	}
+	if warlockLevel >= 13 {
+		levels = append(levels, 7)
+	}
+	if warlockLevel >= 15 {
+		levels = append(levels, 8)
+	}
+	if warlockLevel >= 17 {
+		levels = append(levels, 9)
+	}
+	return levels
+}
+
+// handleCharacterMysticArcanum handles Warlock Mystic Arcanum spell selection and casting
+// @Summary Warlock Mystic Arcanum (PHB p108)
+// @Description Choose 6th-9th level spells that can be cast once per long rest. Warlocks gain arcanum at levels 11, 13, 15, and 17.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (for GET)"
+// @Param body body object{character_id=int,spell_level=int,spell_slug=string} false "Body for POST"
+// @Success 200 {object} object
+// @Router /characters/mystic-arcanum [get]
+// @Router /characters/mystic-arcanum [post]
+func handleCharacterMysticArcanum(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			// Return info about the feature
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"feature":     "Mystic Arcanum",
+				"class":       "Warlock",
+				"description": "At 11th level, your patron bestows upon you a magical secret called an arcanum. Choose one 6th-level spell from the warlock spell list as this arcanum. You can cast your arcanum spell once without expending a spell slot. You must finish a long rest before you can do so again. At higher levels, you gain more warlock spells of your choice that can be cast this way.",
+				"mechanics": map[string]interface{}{
+					"level_11": "Choose one 6th-level warlock spell",
+					"level_13": "Choose one 7th-level warlock spell",
+					"level_15": "Choose one 8th-level warlock spell",
+					"level_17": "Choose one 9th-level warlock spell",
+				},
+				"notes": []string{
+					"Each arcanum can be cast once per long rest without a spell slot",
+					"You can change an arcanum when you gain a level in Warlock",
+					"Arcanum spells don't count against your known spells",
+				},
+				"usage": "GET /api/characters/mystic-arcanum?character_id=X to view choices, POST to choose a spell",
+			})
+			return
+		}
+		
+		// Get character info
+		var class, charName string
+		var level int
+		var arcanumJSON, usedJSON []byte
+		err = db.QueryRow(`
+			SELECT class, name, level, 
+				COALESCE(mystic_arcanum, '{}'),
+				COALESCE(mystic_arcanum_used, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &charName, &level, &arcanumJSON, &usedJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(class) != "warlock" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_warlock",
+				"message": fmt.Sprintf("%s is a %s, not a Warlock. Mystic Arcanum is a Warlock feature.", charName, class),
+			})
+			return
+		}
+		
+		if level < 11 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":         "level_requirement",
+				"message":       fmt.Sprintf("%s is level %d. Mystic Arcanum is available at Warlock level 11.", charName, level),
+				"required_level": 11,
+				"current_level": level,
+			})
+			return
+		}
+		
+		var currentArcanum map[string]string
+		json.Unmarshal(arcanumJSON, &currentArcanum)
+		
+		var usedLevels []int
+		json.Unmarshal(usedJSON, &usedLevels)
+		
+		availableLevels := getAvailableMysticArcanumLevels(level)
+		
+		// Build current arcanum info with spell details
+		arcanumInfo := []map[string]interface{}{}
+		for _, spellLvl := range availableLevels {
+			spellLvlStr := strconv.Itoa(spellLvl)
+			spellSlug := currentArcanum[spellLvlStr]
+			
+			info := map[string]interface{}{
+				"spell_level":    spellLvl,
+				"unlocked_at":    getMysticArcanumLevelRequirement(spellLvl),
+			}
+			
+			if spellSlug != "" {
+				// Get spell info
+				var spellName, school, castingTime, spellRange, components, duration, description string
+				err := db.QueryRow(`
+					SELECT name, school, casting_time, range, components, duration, description
+					FROM spells WHERE slug = $1
+				`, spellSlug).Scan(&spellName, &school, &castingTime, &spellRange, &components, &duration, &description)
+				if err == nil {
+					info["chosen_spell"] = spellSlug
+					info["spell_name"] = spellName
+					info["school"] = school
+					info["casting_time"] = castingTime
+					info["range"] = spellRange
+					info["components"] = components
+					info["duration"] = duration
+					// Check if used
+					used := false
+					for _, usedLvl := range usedLevels {
+						if usedLvl == spellLvl {
+							used = true
+							break
+						}
+					}
+					info["used"] = used
+					if used {
+						info["status"] = "Used (resets on long rest)"
+					} else {
+						info["status"] = "Available"
+					}
+				} else {
+					info["chosen_spell"] = spellSlug
+					info["error"] = "spell_not_found"
+				}
+			} else {
+				info["chosen_spell"] = nil
+				info["status"] = "Not yet chosen"
+			}
+			
+			arcanumInfo = append(arcanumInfo, info)
+		}
+		
+		// Get available spells for unchosen levels
+		unchosenLevels := []int{}
+		for _, lvl := range availableLevels {
+			if currentArcanum[strconv.Itoa(lvl)] == "" {
+				unchosenLevels = append(unchosenLevels, lvl)
+			}
+		}
+		
+		availableSpells := map[string][]map[string]string{}
+		for _, spellLvl := range unchosenLevels {
+			// Query warlock spells of this level
+			rows, err := db.Query(`
+				SELECT s.slug, s.name, s.school
+				FROM spells s
+				JOIN class_spells cs ON s.slug = cs.spell_slug
+				WHERE cs.class = 'warlock' AND s.level = $1
+				ORDER BY s.name
+			`, spellLvl)
+			if err == nil {
+				defer rows.Close()
+				spells := []map[string]string{}
+				for rows.Next() {
+					var slug, name, school string
+					rows.Scan(&slug, &name, &school)
+					spells = append(spells, map[string]string{"slug": slug, "name": name, "school": school})
+				}
+				availableSpells[strconv.Itoa(spellLvl)] = spells
+			}
+		}
+		
+		response := map[string]interface{}{
+			"character_id":    charID,
+			"character":       charName,
+			"class":           class,
+			"level":           level,
+			"feature":         "Mystic Arcanum",
+			"arcanum":         arcanumInfo,
+			"unchosen_levels": unchosenLevels,
+			"how_to_choose":   "POST /api/characters/mystic-arcanum with character_id, spell_level, and spell_slug",
+		}
+		
+		if len(availableSpells) > 0 {
+			response["available_spells"] = availableSpells
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		SpellLevel  int    `json:"spell_level"`
+		SpellSlug   string `json:"spell_slug"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_id_required",
+			"message": "Provide character_id",
+		})
+		return
+	}
+	
+	if req.SpellLevel < 6 || req.SpellLevel > 9 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "invalid_spell_level",
+			"message":       "Mystic Arcanum spells must be 6th-9th level",
+			"valid_levels":  []int{6, 7, 8, 9},
+		})
+		return
+	}
+	
+	// Verify ownership and get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var arcanumJSON []byte
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, COALESCE(mystic_arcanum, '{}'), lobby_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &arcanumJSON, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only set Mystic Arcanum for your own characters",
+		})
+		return
+	}
+	
+	if strings.ToLower(class) != "warlock" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_warlock",
+			"message": fmt.Sprintf("%s is a %s, not a Warlock. Mystic Arcanum is a Warlock feature.", charName, class),
+		})
+		return
+	}
+	
+	// Check level requirement for this spell level
+	requiredLevel := getMysticArcanumLevelRequirement(req.SpellLevel)
+	if level < requiredLevel {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":          "level_requirement",
+			"message":        fmt.Sprintf("%s is level %d. A %dth-level Mystic Arcanum requires Warlock level %d.", charName, level, req.SpellLevel, requiredLevel),
+			"required_level": requiredLevel,
+			"current_level":  level,
+		})
+		return
+	}
+	
+	// Verify spell exists and is on warlock list at the correct level
+	var spellName, school string
+	var spellLevelDB int
+	err = db.QueryRow(`
+		SELECT s.name, s.level, s.school
+		FROM spells s
+		JOIN class_spells cs ON s.slug = cs.spell_slug
+		WHERE s.slug = $1 AND cs.class = 'warlock'
+	`, req.SpellSlug).Scan(&spellName, &spellLevelDB, &school)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "spell_not_found",
+			"message": fmt.Sprintf("'%s' is not a valid warlock spell", req.SpellSlug),
+		})
+		return
+	}
+	
+	if spellLevelDB != req.SpellLevel {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "wrong_spell_level",
+			"message": fmt.Sprintf("%s is a %dth-level spell, not %dth-level", spellName, spellLevelDB, req.SpellLevel),
+		})
+		return
+	}
+	
+	// Update the arcanum
+	var currentArcanum map[string]string
+	json.Unmarshal(arcanumJSON, &currentArcanum)
+	
+	oldSpell := currentArcanum[strconv.Itoa(req.SpellLevel)]
+	currentArcanum[strconv.Itoa(req.SpellLevel)] = req.SpellSlug
+	
+	arcanumJSONNew, _ := json.Marshal(currentArcanum)
+	
+	_, err = db.Exec("UPDATE characters SET mystic_arcanum = $1 WHERE id = $2", arcanumJSONNew, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "update_failed",
+			"message": "Failed to update Mystic Arcanum",
+		})
+		return
+	}
+	
+	// Log action if in campaign
+	if campaignID.Valid {
+		actionText := fmt.Sprintf("✨ %s chooses %s as their %dth-level Mystic Arcanum", charName, spellName, req.SpellLevel)
+		if oldSpell != "" {
+			actionText = fmt.Sprintf("✨ %s changes their %dth-level Mystic Arcanum to %s", charName, req.SpellLevel, spellName)
+		}
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'other', $3, NOW())`,
+			campaignID.Int64, req.CharacterID, actionText)
+	}
+	
+	response := map[string]interface{}{
+		"success":     true,
+		"feature":     "Mystic Arcanum",
+		"character":   charName,
+		"spell_level": req.SpellLevel,
+		"spell":       req.SpellSlug,
+		"spell_name":  spellName,
+		"school":      school,
+		"note":        fmt.Sprintf("You can cast %s once without expending a spell slot. Resets on long rest.", spellName),
+	}
+	
+	if oldSpell != "" {
+		response["replaced"] = oldSpell
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleUniverseFightingStyles returns all available fighting styles

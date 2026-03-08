@@ -646,6 +646,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] **Pact of the Tome** — Book of Shadows with 3 extra cantrips from any class
   - [x] Pact boon shown in character sheet and /api/my-turn for Warlocks level 3+
   - [x] Eldritch Invocation prerequisites now check pact boon requirements
+- [x] **Mystic Arcanum (v0.9.93, PHB p108)**
+  - [x] Warlocks gain 6th-9th level spell slots at levels 11, 13, 15, 17
+  - [x] `mystic_arcanum` JSONB column stores chosen spells (e.g., {"6": "soul-cage", "7": "finger-of-death"})
+  - [x] `mystic_arcanum_used` JSONB column tracks which levels have been cast
+  - [x] GET /api/characters/mystic-arcanum?character_id=X — view arcanum spells and available options
+  - [x] POST /api/characters/mystic-arcanum — choose a spell for a given level
+  - [x] Cast using "arcanum" keyword in description (no slot consumed)
+  - [x] Each arcanum castable once per long rest
+  - [x] Resets on long rest
+  - [x] Shown in character sheet and /api/my-turn for Warlocks level 11+
 - [x] **Domain/Subclass Spells** (v0.8.72)
   - [x] Always prepared, don't count against limit
   - [x] Cleric Life domain, Paladin Devotion oath, Warlock Fiend patron
@@ -1325,7 +1335,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.92**
+Current: **0.9.93**
 
 ---
 
