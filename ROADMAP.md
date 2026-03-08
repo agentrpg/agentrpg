@@ -887,6 +887,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Use action to heal 3 × monk level HP
       - [x] Once per long rest (wholeness_of_body_used tracking)
       - [x] Shows in character sheet and /api/my-turn for Open Hand monks level 6+
+    - [x] **Tranquility** (level 11, v0.9.89, PHB p79)
+      - [x] At end of long rest, gain effect of Sanctuary spell until next long rest
+      - [x] Attackers must make WIS save (DC 8 + prof + WIS mod) or choose different target
+      - [x] "sanctuary:DC" condition auto-applied after long rest
+      - [x] checkSanctuaryProtection() validates attacks and forces WIS saves
+      - [x] Halfling Lucky applies to the WIS save
+      - [x] Effect ends early if monk attacks or casts offensive spell (removeSanctuaryOnOffensiveAction)
+      - [x] Shows in long rest response (tranquility, tranquility_dc, tranquility_note)
     - [x] Quivering Palm (level 17): POST /api/gm/quivering-palm (v0.9.36)
       - [x] Setup: after unarmed strike hit, spend 3 ki to set vibrations
       - [x] Trigger: use action - CON save or drop to 0 HP (success: 10d10 necrotic)
@@ -1297,7 +1305,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.88**
+Current: **0.9.89**
 
 ---
 

@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.88"
+const version = "0.9.89"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -3625,6 +3625,95 @@ func getCharmerID(charID int) int {
 func isCharmedBy(charID, charmerID int) bool {
 	charmer := getCharmerID(charID)
 	return charmer == charmerID && charmerID > 0
+}
+
+// ============================================
+// SANCTUARY / TRANQUILITY (v0.9.89, PHB p272, p79)
+// ============================================
+
+// getSanctuaryDC returns the DC of a target's sanctuary condition, or 0 if not protected
+// Sanctuary condition format: "sanctuary" (generic DC 13) or "sanctuary:15" (specific DC)
+func getSanctuaryDC(charID int) int {
+	conditions := getCharConditions(charID)
+	for _, c := range conditions {
+		cLower := strings.ToLower(c)
+		if strings.HasPrefix(cLower, "sanctuary:") {
+			parts := strings.Split(c, ":")
+			if len(parts) == 2 {
+				if dc, err := strconv.Atoi(parts[1]); err == nil {
+					return dc
+				}
+			}
+		} else if cLower == "sanctuary" {
+			return 13 // Default spell DC
+		}
+	}
+	return 0
+}
+
+// checkSanctuaryProtection checks if target is protected by Sanctuary and handles the save
+// Returns (blockMessage, noteText) - blockMessage is non-empty if attack is blocked
+func checkSanctuaryProtection(attackerID, targetID, attackerWis int) (string, string) {
+	if targetID <= 0 {
+		return "", ""
+	}
+	
+	sanctuaryDC := getSanctuaryDC(targetID)
+	if sanctuaryDC == 0 {
+		return "", ""
+	}
+	
+	// Get target name for messaging
+	var targetName string
+	db.QueryRow("SELECT name FROM characters WHERE id = $1", targetID).Scan(&targetName)
+	if targetName == "" {
+		targetName = "the target"
+	}
+	
+	// Attacker must make WIS save against the DC
+	wisMod := game.Modifier(attackerWis)
+	roll := game.RollDie(20)
+	total := roll + wisMod
+	
+	// Check for Halfling Lucky on nat 1
+	luckyNote := ""
+	var attackerRace string
+	db.QueryRow("SELECT COALESCE(race, '') FROM characters WHERE id = $1", attackerID).Scan(&attackerRace)
+	if roll == 1 && strings.ToLower(attackerRace) == "halfling" {
+		reroll := game.RollDie(20)
+		luckyNote = fmt.Sprintf(" 🍀[Lucky: %d→%d]", roll, reroll)
+		roll = reroll
+		total = roll + wisMod
+	}
+	
+	if total >= sanctuaryDC {
+		// Save succeeded - can attack, but include note
+		return "", fmt.Sprintf(" (WIS save vs Sanctuary DC %d: %d%s = %d ✓)", sanctuaryDC, roll, luckyNote, total)
+	}
+	
+	// Save failed - cannot attack this target
+	return fmt.Sprintf("🕊️ %s is protected by Sanctuary! WIS save DC %d: rolled %d%s + %d = %d (FAILED). You must choose a different target or take a different action.", 
+		targetName, sanctuaryDC, roll, luckyNote, wisMod, total), ""
+}
+
+// removeSanctuaryOnOffensiveAction removes sanctuary condition when character attacks or casts offensive spell
+// Called when a protected character takes offensive action (ends the Sanctuary/Tranquility effect)
+func removeSanctuaryOnOffensiveAction(charID int) {
+	conditions := getCharConditions(charID)
+	newConditions := []string{}
+	removed := false
+	for _, c := range conditions {
+		cLower := strings.ToLower(c)
+		if cLower == "sanctuary" || strings.HasPrefix(cLower, "sanctuary:") {
+			removed = true
+			continue
+		}
+		newConditions = append(newConditions, c)
+	}
+	if removed {
+		updatedJSON, _ := json.Marshal(newConditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedJSON, charID)
+	}
 }
 
 // hasAnyCharm checks if character has any form of charmed condition
@@ -22524,6 +22613,9 @@ func resolveAction(action, description string, charID int) string {
 	
 	switch action {
 	case "attack":
+		// v0.9.89: Attacking ends Sanctuary/Tranquility protection on the attacker
+		removeSanctuaryOnOffensiveAction(charID)
+		
 		// Parse weapon from description or use default
 		weaponKey := parseWeaponFromDescription(description)
 		weapon, hasWeapon := srdWeapons[weaponKey]
@@ -22662,6 +22754,13 @@ func resolveAction(action, description string, charID int) string {
 				targetName = "your charmer"
 			}
 			return fmt.Sprintf("Cannot attack %s — you are charmed by them!", targetName)
+		}
+		
+		// v0.9.89: Sanctuary / Tranquility check (PHB p272, p79)
+		// Target protected by Sanctuary requires WIS save or must choose different target
+		sanctuaryBlock, _ := checkSanctuaryProtection(charID, targetID, wis)
+		if sanctuaryBlock != "" {
+			return sanctuaryBlock
 		}
 		
 		if targetID > 0 && isAutoCrit(targetID) {
@@ -23263,6 +23362,13 @@ func resolveAction(action, description string, charID int) string {
 		
 		// Parse spell from description
 		spellKey := parseSpellFromDescription(description)
+		
+		// v0.9.89: Check if this is an offensive spell (deals damage or has save DC)
+		// Casting offensive spells ends Sanctuary/Tranquility protection
+		spellData, hasSpellData := srdSpellsMemory[spellKey]
+		if hasSpellData && (spellData.DamageDice != "" || spellData.SavingThrow != "") {
+			removeSanctuaryOnOffensiveAction(charID)
+		}
 		spell, hasSpell := srdSpellsMemory[spellKey]
 		
 		// Check for ritual casting keyword
@@ -37981,12 +38087,13 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	// Get character info including last long rest
 	var class string
-	var level, con, hitDiceSpent, exhaustionLevel int
+	var level, con, wis, hitDiceSpent, exhaustionLevel int
 	var lastLongRest sql.NullTime
+	var subclass sql.NullString
 	err := db.QueryRow(`
-		SELECT class, level, con, COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0), last_long_rest
+		SELECT class, level, con, wis, COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0), last_long_rest, subclass
 		FROM characters WHERE id = $1
-	`, charID).Scan(&class, &level, &con, &hitDiceSpent, &exhaustionLevel, &lastLongRest)
+	`, charID).Scan(&class, &level, &con, &wis, &hitDiceSpent, &exhaustionLevel, &lastLongRest, &subclass)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "Character not found",
@@ -38097,6 +38204,22 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 		response["indomitable_recovered"] = true
 		response["indomitable_max"] = indomitableMaxUses
 		response["indomitable_note"] = fmt.Sprintf("Indomitable uses restored (%d per long rest)", indomitableMaxUses)
+	}
+	
+	// v0.9.89: Open Hand Monk Tranquility (PHB p79) - gain Sanctuary effect at end of long rest
+	if subclass.Valid && hasSubclassFeature(subclass.String, level, "tranquility") {
+		// Calculate Sanctuary spell save DC (8 + proficiency + WIS modifier)
+		profBonus := game.ProficiencyBonus(level)
+		wisMod := game.Modifier(wis)
+		sanctuaryDC := 8 + profBonus + wisMod
+		
+		// Apply the sanctuary condition with DC
+		sanctuaryCondition := fmt.Sprintf("sanctuary:%d", sanctuaryDC)
+		db.Exec(`UPDATE characters SET conditions = '["` + sanctuaryCondition + `"]' WHERE id = $1`, charID)
+		
+		response["tranquility"] = true
+		response["tranquility_dc"] = sanctuaryDC
+		response["tranquility_note"] = fmt.Sprintf("Tranquility grants Sanctuary effect (DC %d WIS save). Attackers must save or choose different target. Lasts until next long rest (or you attack/cast offensive spell).", sanctuaryDC)
 	}
 	
 	json.NewEncoder(w).Encode(response)
