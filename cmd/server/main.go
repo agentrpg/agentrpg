@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.91"
+const version = "0.9.92"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -26731,12 +26731,12 @@ func handleGMTriggerReadied(w http.ResponseWriter, r *http.Request) {
 
 // handleGMFallingDamage godoc
 // @Summary Apply falling damage to a character
-// @Description Deal falling damage: 1d6 per 10 feet fallen (max 20d6 at 200ft). Damage type is bludgeoning.
+// @Description Deal falling damage: 1d6 per 10 feet fallen (max 20d6 at 200ft). Damage type is bludgeoning. Monks level 4+ can use Slow Fall (use_slow_fall=true) to reduce damage by 5 × monk level using their reaction.
 // @Tags GM Tools
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{character_id=integer,distance_feet=integer,reason=string} true "Falling details"
+// @Param request body object{character_id=integer,distance_feet=integer,reason=string,use_slow_fall=boolean} true "Falling details. use_slow_fall requires Monk level 4+ and uses reaction."
 // @Success 200 {object} map[string]interface{} "Damage applied"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 403 {object} map[string]interface{} "Not GM"
@@ -26759,6 +26759,7 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 		CharacterID  int    `json:"character_id"`
 		DistanceFeet int    `json:"distance_feet"`
 		Reason       string `json:"reason"`
+		UseSlowFall  bool   `json:"use_slow_fall"` // v0.9.92: Monk Slow Fall (PHB p78)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -26813,18 +26814,82 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	// Roll the dice
 	rolls, totalDamage := game.RollDice(diceCount, 6)
 	
-	// Get character info
-	var charName string
-	var currentHP, maxHP int
-	err = db.QueryRow("SELECT name, hp, max_hp FROM characters WHERE id = $1", req.CharacterID).Scan(&charName, &currentHP, &maxHP)
+	// Get character info including class info for Slow Fall
+	var charName, class string
+	var currentHP, maxHP, level int
+	var reactionUsed bool
+	var classLevelsJSON []byte
+	err = db.QueryRow(`
+		SELECT name, hp, max_hp, class, level, COALESCE(reaction_used, false), COALESCE(class_levels, '{}')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &currentHP, &maxHP, &class, &level, &reactionUsed, &classLevelsJSON)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
 		return
 	}
 	
+	// v0.9.92: Monk Slow Fall (PHB p78)
+	// When falling, can use reaction to reduce damage by 5 × monk level
+	slowFallReduction := 0
+	slowFallUsed := false
+	slowFallMsg := ""
+	
+	if req.UseSlowFall {
+		// Calculate monk level (supports multiclassing)
+		monkLevel := 0
+		var classLevels map[string]int
+		json.Unmarshal(classLevelsJSON, &classLevels)
+		if len(classLevels) > 0 {
+			monkLevel = classLevels["monk"]
+		} else if strings.ToLower(class) == "monk" {
+			monkLevel = level
+		}
+		
+		if monkLevel < 4 {
+			if monkLevel == 0 {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "not_monk",
+					"message": fmt.Sprintf("%s is not a Monk. Slow Fall is a Monk feature (level 4+).", charName),
+				})
+				return
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "level_requirement",
+				"message": fmt.Sprintf("%s is a Monk level %d. Slow Fall requires Monk level 4+.", charName, monkLevel),
+			})
+			return
+		}
+		
+		if reactionUsed {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "no_reaction",
+				"message": fmt.Sprintf("%s has already used their reaction this round", charName),
+			})
+			return
+		}
+		
+		// Calculate reduction: 5 × monk level
+		slowFallReduction = 5 * monkLevel
+		slowFallUsed = true
+		
+		// Mark reaction as used
+		db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
+		
+		slowFallMsg = fmt.Sprintf("🍃 Slow Fall reduces damage by %d (5 × %d monk levels)", slowFallReduction, monkLevel)
+	}
+	
+	// Apply Slow Fall reduction first (can reduce to 0)
+	damageAfterSlowFall := totalDamage - slowFallReduction
+	if damageAfterSlowFall < 0 {
+		damageAfterSlowFall = 0
+	}
+	
 	// Apply damage resistance if character has bludgeoning resistance (e.g., petrified)
-	damageResult := applyDamageResistance(req.CharacterID, totalDamage, "bludgeoning")
+	damageResult := applyDamageResistance(req.CharacterID, damageAfterSlowFall, "bludgeoning")
 	finalDamage := damageResult.FinalDamage
 	
 	// Apply the damage
@@ -26884,6 +26949,9 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 	// Log the action
 	actionDesc := fmt.Sprintf("Falling damage: %s %s", charName, reason)
 	actionResult := fmt.Sprintf("%dd6 = %v → %d bludgeoning damage", diceCount, rolls, totalDamage)
+	if slowFallUsed {
+		actionResult += fmt.Sprintf(" (Slow Fall: -%d)", slowFallReduction)
+	}
 	if damageResult.WasHalved {
 		actionResult += " (halved due to resistance)"
 	}
@@ -26892,6 +26960,14 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
 		VALUES ($1, $2, $3, $4, $5)
 	`, lobbyID, req.CharacterID, "falling_damage", actionDesc, actionResult)
+	
+	// Build message
+	message := fmt.Sprintf("%s %s and takes %d bludgeoning damage (%dd6=%v)", charName, reason, finalDamage, diceCount, rolls)
+	if slowFallUsed && slowFallReduction >= totalDamage {
+		message = fmt.Sprintf("%s %s but lands gracefully thanks to Slow Fall (🍃 negated %d damage)", charName, reason, totalDamage)
+	} else if slowFallUsed {
+		message = fmt.Sprintf("%s %s, using Slow Fall to reduce the impact (🍃 -%d), taking %d bludgeoning damage", charName, reason, slowFallReduction, finalDamage)
+	}
 	
 	response := map[string]interface{}{
 		"success":        true,
@@ -26906,7 +26982,17 @@ func handleGMFallingDamage(w http.ResponseWriter, r *http.Request) {
 		"previous_hp":    currentHP,
 		"current_hp":     newHP,
 		"max_hp":         maxHP,
-		"message":        fmt.Sprintf("%s %s and takes %d bludgeoning damage (%dd6=%v)", charName, reason, finalDamage, diceCount, rolls),
+		"message":        message,
+	}
+	
+	// v0.9.92: Add Slow Fall info if used
+	if slowFallUsed {
+		response["slow_fall"] = map[string]interface{}{
+			"used":           true,
+			"reduction":      slowFallReduction,
+			"reaction_used":  true,
+			"note":           slowFallMsg,
+		}
 	}
 	
 	if damageResult.WasHalved {

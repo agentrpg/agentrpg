@@ -908,6 +908,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Attack roll uses proficiency + DEX modifier
     - [x] Handles multiclass monks (uses monk class level, not total level)
     - [x] Consumes reaction
+  - [x] **Slow Fall** (Monk level 4+, v0.9.92, PHB p78)
+    - [x] POST /api/gm/falling-damage with use_slow_fall=true
+    - [x] Uses reaction when falling to reduce damage by 5 × monk level
+    - [x] Can reduce damage to 0 (graceful landing)
+    - [x] Handles multiclass monks (uses monk class level, not total level)
+    - [x] Consumes reaction
   - [x] Lore Bard Cutting Words (v0.9.3)
   - [x] Lore Bard Peerless Skill (v0.9.32)
     - [x] POST /api/gm/skill-check with use_peerless_skill=true
@@ -1319,7 +1325,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.91**
+Current: **0.9.92**
 
 ---
 
