@@ -1086,9 +1086,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Include "sharpshooter" in attack description to activate
     - [x] Ignore long range disadvantage (documented)
     - [x] Ignore half and three-quarters cover (documented)
-  - [x] **Crossbow Expert (v0.9.99, PHB p165)**
+  - [x] **Crossbow Expert (v0.9.99, v1.0.1, PHB p165)**
     - [x] Ignore loading property (documented)
-    - [x] No disadvantage in melee (documented)
+    - [x] No disadvantage in melee (v1.0.1 - mechanically enforced)
+      - [x] Close-range ranged attack disadvantage rule (PHB p195) now implemented
+      - [x] Keywords "close range", "in melee", "within 5", "point blank" trigger disadvantage for ranged attacks
+      - [x] Crossbow Expert negates this penalty
+      - [x] Shows "🎯 (Crossbow Expert negates close-range penalty)" in attack result
     - [x] Hand crossbow bonus attack (documented, GM adjudicated)
   - [x] **Polearm Master (v0.9.99, PHB p168)**
     - [x] Bonus action butt end attack (documented, GM adjudicated)
@@ -1379,7 +1383,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.0** 🎉
+Current: **1.0.1**
 
 ---
 

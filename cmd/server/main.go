@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.0
+// @version 1.0.1
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.0"
+const version = "1.0.1"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -22880,6 +22880,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		Target                  string `json:"target"`
 		MovementCost            int    `json:"movement_cost"`              // feet of movement for move actions
 		TowardFrightenedSource  bool   `json:"toward_frightened_source"`   // v0.8.64: set true if moving toward source of fear (blocks movement)
+		CloseRange              bool   `json:"close_range"`                // v1.0.1: set true if within 5ft of hostile creature (ranged attacks have disadvantage, PHB p195)
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	
@@ -23325,6 +23326,26 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
+		// v1.0.1: Close-range ranged attack disadvantage (PHB p195)
+		// "When you make a ranged attack with a weapon, a spell, or some other means,
+		// you have disadvantage on the attack roll if you are within 5 feet of a hostile
+		// creature who can see you and who isn't incapacitated."
+		// Crossbow Expert negates this penalty.
+		closeRangeNote := ""
+		isCloseRange := strings.Contains(descLower, "close range") || 
+			strings.Contains(descLower, "in melee") || 
+			strings.Contains(descLower, "within 5") ||
+			strings.Contains(descLower, "point blank") ||
+			strings.Contains(descLower, "point-blank")
+		if isRangedAttack && isCloseRange {
+			if hasSpecificFeat(charID, "crossbow_expert") {
+				closeRangeNote = " 🎯 (Crossbow Expert negates close-range penalty)"
+			} else {
+				hasDisadvantage = true
+				closeRangeNote = " ⚠️ Close-range penalty (disadvantage)"
+			}
+		}
+		
 		// Override with explicit request
 		if requestedAdvantage {
 			hasAdvantage = true
@@ -23488,6 +23509,10 @@ func resolveAction(action, description string, charID int) string {
 		// v0.9.18: Add facing note to roll info
 		if facingNote != "" {
 			rollInfo = facingNote + rollInfo
+		}
+		// v1.0.1: Add close-range note to roll info
+		if closeRangeNote != "" {
+			rollInfo = closeRangeNote + rollInfo
 		}
 		
 		// Auto-crit against paralyzed/unconscious targets (within 5ft assumed for melee)
