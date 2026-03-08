@@ -900,6 +900,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Trigger: use action - CON save or drop to 0 HP (success: 10d10 necrotic)
       - [x] Only one creature can be quivering at a time
     - [x] Monk Martial Arts damage die scales with level (d4→d6→d8→d10)
+  - [x] **Deflect Missiles** (Monk level 3+, v0.9.91, PHB p78)
+    - [x] POST /api/gm/deflect-missiles — use reaction when hit by ranged weapon attack
+    - [x] Damage reduced by 1d10 + DEX mod + monk level
+    - [x] If reduced to 0: can catch the missile
+    - [x] If caught + have 1 ki: can throw back (20/60 range) for martial arts die + DEX damage
+    - [x] Attack roll uses proficiency + DEX modifier
+    - [x] Handles multiclass monks (uses monk class level, not total level)
+    - [x] Consumes reaction
   - [x] Lore Bard Cutting Words (v0.9.3)
   - [x] Lore Bard Peerless Skill (v0.9.32)
     - [x] POST /api/gm/skill-check with use_peerless_skill=true
@@ -1311,7 +1319,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.90**
+Current: **0.9.91**
 
 ---
 

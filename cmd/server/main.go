@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.90"
+const version = "0.9.91"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -378,6 +378,7 @@ func main() {
 	http.HandleFunc("/api/gm/stand-against-the-tide", handleGMStandAgainstTheTide)
 	http.HandleFunc("/api/gm/protection", handleGMProtection)
 	http.HandleFunc("/api/gm/uncanny-dodge", handleGMUncannyDodge)
+	http.HandleFunc("/api/gm/deflect-missiles", handleGMDeflectMissiles)
 	http.HandleFunc("/api/gm/intimidating-presence", handleGMIntimidatingPresence)
 	http.HandleFunc("/api/gm/quivering-palm", handleGMQuiveringPalm)
 	http.HandleFunc("/api/gm/aoe-cast", handleGMAoECast)
@@ -17832,6 +17833,288 @@ func handleGMUncannyDodge(w http.ResponseWriter, r *http.Request) {
 		"reaction_used":   true,
 		"note":            fmt.Sprintf("%s's reaction is now expended for this round", charName),
 	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMDeflectMissiles godoc
+// @Summary Use Deflect Missiles to reduce ranged attack damage
+// @Description When a Monk level 3+ is hit by a ranged weapon attack, they can use their reaction to deflect/catch the missile. Damage is reduced by 1d10 + DEX mod + monk level. If reduced to 0, they can spend 1 ki to throw it back.
+// @Tags GM
+// @Accept json
+// @Produce json
+// @Security BasicAuth
+// @Param request body object{character_id=integer,damage=integer,attacker_name=string,throw_back=bool} true "Deflect Missiles details"
+// @Success 200 {object} map[string]interface{} "Deflection result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not the GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or requirements not met"
+// @Router /gm/deflect-missiles [post]
+func handleGMDeflectMissiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	
+	// Get the GM's active campaign
+	var campaignID int
+	err = db.QueryRow(`
+		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+	`, agentID).Scan(&campaignID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of any active campaign",
+		})
+		return
+	}
+	
+	var req struct {
+		CharacterID   int    `json:"character_id"`   // The Monk using Deflect Missiles
+		Damage        int    `json:"damage"`         // The original damage amount
+		AttackerName  string `json:"attacker_name"`  // Name of the attacker (for logging)
+		AttackerAC    int    `json:"attacker_ac"`    // AC of attacker for throw-back attack (optional)
+		ThrowBack     bool   `json:"throw_back"`     // If true, attempt to throw the missile back
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	if req.Damage <= 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "damage must be a positive integer",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var charLobbyID, level, dex, profBonus int
+	var reactionUsed bool
+	var kiPointsUsed, kiPointsMax int
+	var classLevelsJSON []byte
+	err = db.QueryRow(`
+		SELECT name, lobby_id, class, level, dex, 
+		       COALESCE(reaction_used, false),
+		       COALESCE(ki_points_used, 0),
+		       COALESCE(class_levels, '{}')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &charLobbyID, &class, &level, &dex,
+		&reactionUsed, &kiPointsUsed, &classLevelsJSON)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	if charLobbyID != campaignID {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_in_campaign"})
+		return
+	}
+	
+	// Calculate monk level (handle multiclass)
+	monkLevel := 0
+	var classLevels map[string]int
+	json.Unmarshal(classLevelsJSON, &classLevels)
+	if len(classLevels) > 0 {
+		// Multiclass: get monk level from class_levels
+		monkLevel = classLevels["monk"]
+	} else if strings.ToLower(class) == "monk" {
+		// Single class monk
+		monkLevel = level
+	}
+	
+	// Check if character is a monk with Deflect Missiles
+	if monkLevel < 3 {
+		w.WriteHeader(http.StatusBadRequest)
+		if monkLevel == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_monk",
+				"message": fmt.Sprintf("%s is not a Monk. Deflect Missiles is a Monk feature.", charName),
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "level_requirement",
+				"message": fmt.Sprintf("%s is a Monk level %d. Deflect Missiles requires Monk level 3+.", charName, monkLevel),
+			})
+		}
+		return
+	}
+	
+	// Calculate proficiency bonus and ki points max
+	profBonus = game.ProficiencyBonus(level)
+	kiPointsMax = monkLevel // Ki points = monk level
+	kiPointsAvailable := kiPointsMax - kiPointsUsed
+	
+	// Check if reaction is available
+	if reactionUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "no_reaction",
+			"message": fmt.Sprintf("%s has already used their reaction this round", charName),
+		})
+		return
+	}
+	
+	// Calculate DEX modifier
+	dexMod := game.Modifier(dex)
+	
+	// Roll 1d10 for deflection
+	deflectRoll := game.RollDie(10)
+	
+	// Calculate total damage reduction: 1d10 + DEX mod + monk level
+	damageReduction := deflectRoll + dexMod + monkLevel
+	if damageReduction < 0 {
+		damageReduction = 0
+	}
+	
+	// Calculate final damage
+	finalDamage := req.Damage - damageReduction
+	if finalDamage < 0 {
+		finalDamage = 0
+	}
+	
+	// Mark reaction as used
+	db.Exec(`UPDATE characters SET reaction_used = true WHERE id = $1`, req.CharacterID)
+	
+	// Build result
+	attackerText := "the attacker"
+	if req.AttackerName != "" {
+		attackerText = req.AttackerName
+	}
+	
+	// Determine martial arts die for throw-back
+	martialArtsDie := "d4"
+	if monkLevel >= 17 {
+		martialArtsDie = "d10"
+	} else if monkLevel >= 11 {
+		martialArtsDie = "d8"
+	} else if monkLevel >= 5 {
+		martialArtsDie = "d6"
+	}
+	
+	response := map[string]interface{}{
+		"success":           true,
+		"character":         charName,
+		"monk_level":        monkLevel,
+		"attacker":          attackerText,
+		"original_damage":   req.Damage,
+		"deflect_roll":      deflectRoll,
+		"dex_mod":           dexMod,
+		"damage_reduction":  damageReduction,
+		"calculation":       fmt.Sprintf("1d10(%d) + DEX mod(%d) + monk level(%d) = %d", deflectRoll, dexMod, monkLevel, damageReduction),
+		"final_damage":      finalDamage,
+		"reaction_used":     true,
+	}
+	
+	resultText := ""
+	
+	if finalDamage == 0 {
+		// Caught the missile!
+		response["caught"] = true
+		response["can_throw_back"] = kiPointsAvailable >= 1
+		response["ki_available"] = kiPointsAvailable
+		response["martial_arts_die"] = martialArtsDie
+		
+		resultText = fmt.Sprintf("🥷 DEFLECT MISSILES: %s catches the missile from %s! (1d10[%d] + %d DEX + %d monk level = %d reduction, negating all %d damage)",
+			charName, attackerText, deflectRoll, dexMod, monkLevel, damageReduction, req.Damage)
+		
+		if req.ThrowBack && kiPointsAvailable >= 1 {
+			// Throw the missile back!
+			// Attack roll: d20 + DEX mod + proficiency bonus
+			attackRoll := game.RollDie(20)
+			attackTotal := attackRoll + dexMod + profBonus
+			
+			// Damage roll: martial arts die + DEX mod
+			var damageRoll int
+			switch martialArtsDie {
+			case "d4":
+				damageRoll = game.RollDie(4)
+			case "d6":
+				damageRoll = game.RollDie(6)
+			case "d8":
+				damageRoll = game.RollDie(8)
+			case "d10":
+				damageRoll = game.RollDie(10)
+			}
+			throwDamage := damageRoll + dexMod
+			if throwDamage < 1 {
+				throwDamage = 1
+			}
+			
+			// Spend 1 ki point
+			db.Exec(`UPDATE characters SET ki_points_used = ki_points_used + 1 WHERE id = $1`, req.CharacterID)
+			
+			response["throw_back"] = map[string]interface{}{
+				"attack_roll":    attackRoll,
+				"attack_mod":     dexMod + profBonus,
+				"attack_total":   attackTotal,
+				"damage_roll":    damageRoll,
+				"damage_mod":     dexMod,
+				"damage_total":   throwDamage,
+				"damage_type":    "same as original missile",
+				"range":          "20/60",
+				"ki_spent":       1,
+				"ki_remaining":   kiPointsAvailable - 1,
+			}
+			
+			hitText := ""
+			if req.AttackerAC > 0 {
+				if attackTotal >= req.AttackerAC {
+					hitText = fmt.Sprintf(" HIT! (%d vs AC %d) dealing %d damage!", attackTotal, req.AttackerAC, throwDamage)
+				} else {
+					hitText = fmt.Sprintf(" MISS (%d vs AC %d)", attackTotal, req.AttackerAC)
+				}
+			} else {
+				hitText = fmt.Sprintf(" Attack: %d (d20[%d] + %d). Compare to target AC.", attackTotal, attackRoll, dexMod+profBonus)
+			}
+			
+			resultText += fmt.Sprintf(" %s spends 1 ki to hurl it back!%s", charName, hitText)
+		} else if kiPointsAvailable >= 1 {
+			response["throw_back_available"] = true
+			response["throw_back_note"] = fmt.Sprintf("Can spend 1 ki (have %d) to throw missile back: attack = d20+%d, damage = 1%s+%d",
+				kiPointsAvailable, dexMod+profBonus, martialArtsDie, dexMod)
+		}
+	} else {
+		// Deflected but still took some damage
+		response["caught"] = false
+		resultText = fmt.Sprintf("🥷 DEFLECT MISSILES: %s deflects the missile from %s, reducing the damage! (1d10[%d] + %d DEX + %d monk level = %d reduction: %d → %d damage)",
+			charName, attackerText, deflectRoll, dexMod, monkLevel, damageReduction, req.Damage, finalDamage)
+	}
+	
+	response["result"] = resultText
+	response["note"] = fmt.Sprintf("%s's reaction is now expended for this round", charName)
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("Deflect Missiles by %s against %s's ranged attack", charName, attackerText)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, 'deflect_missiles', $2, $3)
+	`, campaignID, actionDesc, resultText)
 	
 	json.NewEncoder(w).Encode(response)
 }
