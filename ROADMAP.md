@@ -805,6 +805,15 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Land Druid's Nature's Ward (level 10+): immune to poison and disease, immune to charm/frighten from elementals/fey (v0.9.57)
   - [x] Devotion Paladin's Aura of Devotion (charm immunity at level 7+, v0.8.88)
   - [x] Paladin's Aura of Courage (frighten immunity at level 10+, v0.8.88)
+  - [x] **Paladin's Aura of Protection** (v0.9.98, PHB p85)
+    - [x] Level 6+: allies within 10ft add Paladin's CHA mod (minimum +1) to all saving throws
+    - [x] Level 18+: range increases to 30ft (tracked via class feature mechanics)
+    - [x] Paladin benefits from their own aura
+    - [x] Requires consciousness (not incapacitated/unconscious)
+    - [x] Applied in POST /api/gm/saving-throw and POST /api/gm/aoe-cast
+    - [x] Shows "🛡️ Aura of Protection" note in save results with bonus and source
+    - [x] getPaladinAuraBonus() helper handles multiclass Paladins
+    - [x] Since no position tracking, assumes party is within aura range (theater-of-the-mind)
   - [x] Devotion Paladin's Turn the Unholy (v0.9.31)
     - [x] POST /api/gm/turn-unholy — Channel Divinity to turn fiends and undead
     - [x] Targets both fiends AND undead (unlike Cleric's Turn Undead)

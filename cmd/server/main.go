@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.97
+// @version 0.9.98
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.97"
+const version = "0.9.98"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -3289,6 +3289,85 @@ func isIncapacitated(charID int) bool {
 		}
 	}
 	return false
+}
+
+// PALADIN AURA OF PROTECTION (v0.9.98)
+// ============================================
+
+// getPaladinAuraBonus returns the bonus to saving throws from Paladin's Aura of Protection
+// PHB p85: At level 6+, allies within 10ft (30ft at level 18) add Paladin's CHA mod to saves
+// Returns the highest bonus from all conscious Paladins in the party
+// Note: Since we don't track positions, we assume party members are within aura range
+// The GM can separate the party narratively if needed
+func getPaladinAuraBonus(campaignID int, excludeCharID int) (int, string) {
+	// Find all Paladins in this campaign who are:
+	// 1. Level 6+ (Aura of Protection unlocks at level 6)
+	// 2. Conscious (not incapacitated, unconscious, etc.)
+	rows, err := db.Query(`
+		SELECT c.id, c.name, c.cha, c.level, COALESCE(c.class_levels, '{}')::jsonb as class_levels
+		FROM characters c
+		WHERE c.lobby_id = $1
+		  AND c.id != $2
+		  AND (LOWER(c.class) = 'paladin' OR c.class_levels::text ILIKE '%paladin%')
+	`, campaignID, excludeCharID)
+	if err != nil {
+		return 0, ""
+	}
+	defer rows.Close()
+
+	bestBonus := 0
+	bestPaladinName := ""
+
+	for rows.Next() {
+		var charID int
+		var charName string
+		var cha, level int
+		var classLevelsJSON []byte
+
+		if err := rows.Scan(&charID, &charName, &cha, &level, &classLevelsJSON); err != nil {
+			continue
+		}
+
+		// Check if this Paladin is incapacitated (aura requires consciousness)
+		if isIncapacitated(charID) {
+			continue
+		}
+
+		// Determine Paladin level (for multiclass)
+		paladinLevel := 0
+		var classLevels map[string]int
+		if err := json.Unmarshal(classLevelsJSON, &classLevels); err == nil && len(classLevels) > 0 {
+			// Multiclass - check Paladin-specific level
+			for className, lvl := range classLevels {
+				if strings.ToLower(className) == "paladin" {
+					paladinLevel = lvl
+					break
+				}
+			}
+		} else {
+			// Single class - total level is Paladin level
+			paladinLevel = level
+		}
+
+		// Aura of Protection requires Paladin level 6+
+		if paladinLevel < 6 {
+			continue
+		}
+
+		// Calculate CHA modifier (minimum +1 per PHB)
+		chaBonus := game.Modifier(cha)
+		if chaBonus < 1 {
+			chaBonus = 1
+		}
+
+		// Track the best bonus
+		if chaBonus > bestBonus {
+			bestBonus = chaBonus
+			bestPaladinName = charName
+		}
+	}
+
+	return bestBonus, bestPaladinName
 }
 
 // canMove checks if character's speed is not reduced to 0 by conditions
@@ -13893,6 +13972,48 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if proficient {
 		totalMod += game.ProficiencyBonus(level)
 	}
+
+	// v0.9.98: Paladin's Aura of Protection (PHB p85)
+	// At level 6+, allies within 10ft (30ft at level 18) add Paladin's CHA mod to saves
+	// The Paladin also benefits from their own aura
+	auraBonus := 0
+	auraPaladinName := ""
+	
+	// First check if THIS character is a Paladin level 6+ (they benefit from own aura)
+	paladinLevelSelf := 0
+	var selfClassLevelsJSON []byte
+	_ = db.QueryRow(`SELECT COALESCE(class_levels, '{}')::jsonb FROM characters WHERE id = $1`, req.CharacterID).Scan(&selfClassLevelsJSON)
+	var selfClassLevels map[string]int
+	if err := json.Unmarshal(selfClassLevelsJSON, &selfClassLevels); err == nil && len(selfClassLevels) > 0 {
+		for cn, lvl := range selfClassLevels {
+			if strings.ToLower(cn) == "paladin" {
+				paladinLevelSelf = lvl
+				break
+			}
+		}
+	} else if strings.ToLower(className) == "paladin" {
+		paladinLevelSelf = level
+	}
+	
+	if paladinLevelSelf >= 6 && !isIncapacitated(req.CharacterID) {
+		selfChaBonus := game.Modifier(cha)
+		if selfChaBonus < 1 {
+			selfChaBonus = 1
+		}
+		auraBonus = selfChaBonus
+		auraPaladinName = charName + " (self)"
+	}
+	
+	// Then check for other Paladins in the party
+	otherAura, otherPaladin := getPaladinAuraBonus(campaignID, req.CharacterID)
+	if otherAura > auraBonus {
+		auraBonus = otherAura
+		auraPaladinName = otherPaladin
+	}
+	
+	if auraBonus > 0 {
+		totalMod += auraBonus
+	}
 	
 	// CHECK: Auto-fail conditions (paralyzed, stunned, unconscious auto-fail STR/DEX saves)
 	if autoFailsSave(req.CharacterID, abilityShort) {
@@ -14179,6 +14300,13 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if halflingBraveActive {
 		response["halfling_brave"] = true
 		response["racial_feature_note"] = fmt.Sprintf("💪 %s's Halfling Brave grants advantage on saves against frightened", charName)
+	}
+	// v0.9.98: Add Paladin's Aura of Protection note
+	if auraBonus > 0 {
+		response["aura_of_protection"] = true
+		response["aura_bonus"] = auraBonus
+		response["aura_source"] = auraPaladinName
+		response["paladin_aura_note"] = fmt.Sprintf("🛡️ Aura of Protection (+%d from %s)", auraBonus, auraPaladinName)
 	}
 	json.NewEncoder(w).Encode(response)
 }
@@ -18564,9 +18692,16 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		
 		// Get target's save modifier
 		saveMod := 0
+		// v0.9.98: Track aura for each target
+		targetAuraBonus := 0
+		targetAuraPaladin := ""
+		
 		if targetID > 0 && savingThrow != "" {
-			var str, dex, con, intl, wis, cha int
-			db.QueryRow(`SELECT str, dex, con, intl, wis, cha FROM characters WHERE id = $1`, targetID).Scan(&str, &dex, &con, &intl, &wis, &cha)
+			var str, dex, con, intl, wis, cha, targetLevel int
+			var targetClass string
+			var targetClassLevelsJSON []byte
+			db.QueryRow(`SELECT str, dex, con, intl, wis, cha, level, class, COALESCE(class_levels, '{}')::jsonb 
+				FROM characters WHERE id = $1`, targetID).Scan(&str, &dex, &con, &intl, &wis, &cha, &targetLevel, &targetClass, &targetClassLevelsJSON)
 			switch strings.ToUpper(savingThrow) {
 			case "STR":
 				saveMod = game.Modifier(str)
@@ -18580,6 +18715,41 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 				saveMod = game.Modifier(wis)
 			case "CHA":
 				saveMod = game.Modifier(cha)
+			}
+			
+			// v0.9.98: Paladin's Aura of Protection for AoE saves
+			// Check if target is a Paladin 6+ (benefits from own aura)
+			targetPaladinLevel := 0
+			var targetClassLevels map[string]int
+			if err := json.Unmarshal(targetClassLevelsJSON, &targetClassLevels); err == nil && len(targetClassLevels) > 0 {
+				for cn, lvl := range targetClassLevels {
+					if strings.ToLower(cn) == "paladin" {
+						targetPaladinLevel = lvl
+						break
+					}
+				}
+			} else if strings.ToLower(targetClass) == "paladin" {
+				targetPaladinLevel = targetLevel
+			}
+			
+			if targetPaladinLevel >= 6 && !isIncapacitated(targetID) {
+				selfCha := game.Modifier(cha)
+				if selfCha < 1 {
+					selfCha = 1
+				}
+				targetAuraBonus = selfCha
+				targetAuraPaladin = targetName + " (self)"
+			}
+			
+			// Check for other Paladins in the party
+			otherAura, otherPaladin := getPaladinAuraBonus(campaignID, targetID)
+			if otherAura > targetAuraBonus {
+				targetAuraBonus = otherAura
+				targetAuraPaladin = otherPaladin
+			}
+			
+			if targetAuraBonus > 0 {
+				saveMod += targetAuraBonus
 			}
 		}
 		
@@ -18674,6 +18844,14 @@ func handleGMAoECast(w http.ResponseWriter, r *http.Request) {
 		if gnomeCunningAoE {
 			result["gnome_cunning"] = true
 			result["gnome_cunning_info"] = "🧠 Gnome Cunning: Rolled with advantage on save against magic"
+		}
+		
+		// v0.9.98: Add Paladin's Aura of Protection info to result
+		if targetAuraBonus > 0 {
+			result["aura_of_protection"] = true
+			result["aura_bonus"] = targetAuraBonus
+			result["aura_source"] = targetAuraPaladin
+			result["paladin_aura_info"] = fmt.Sprintf("🛡️ Aura of Protection: +%d to save from %s", targetAuraBonus, targetAuraPaladin)
 		}
 		
 		// Apply damage to characters or monsters
