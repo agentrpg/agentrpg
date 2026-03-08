@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.88
+// @version 0.9.90
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.89"
+const version = "0.9.90"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -33083,6 +33083,77 @@ func getClassFeatureMechanic(class string, level int, mechanic string) (string, 
 	return "", false
 }
 
+// getSongOfRestBonus v0.9.90: Check if there's a Bard with Song of Rest in the campaign
+// Returns the die size (6, 8, 10, or 12), the Bard's name, and whether Song of Rest is available
+// Song of Rest (PHB p54): Bard level 2+ can use soothing music to help allies heal during short rest
+// Die scales: d6 (level 2-8), d8 (level 9-12), d10 (level 13-16), d12 (level 17+)
+func getSongOfRestBonus(campaignID int64, excludeCharID int) (dieSize int, bardName string, available bool) {
+	// Find the highest-level Bard in the campaign (excluding the resting character themselves to avoid self-benefit edge case)
+	var bestBardLevel int
+	var bestBardName string
+	
+	rows, err := db.Query(`
+		SELECT c.level, c.name, c.class, COALESCE(c.class_levels, '{}')
+		FROM characters c
+		WHERE c.lobby_id = $1 AND c.id != $2
+	`, campaignID, excludeCharID)
+	if err != nil {
+		return 0, "", false
+	}
+	defer rows.Close()
+	
+	for rows.Next() {
+		var level int
+		var name, class string
+		var classLevelsJSON []byte
+		if err := rows.Scan(&level, &name, &class, &classLevelsJSON); err != nil {
+			continue
+		}
+		
+		// Check for Bard levels (support multiclass)
+		bardLevel := 0
+		classLower := strings.ToLower(class)
+		if classLower == "bard" {
+			bardLevel = level
+		} else {
+			// Check multiclass levels
+			var classLevels map[string]int
+			if err := json.Unmarshal(classLevelsJSON, &classLevels); err == nil {
+				for c, lvl := range classLevels {
+					if strings.ToLower(c) == "bard" {
+						bardLevel = lvl
+						break
+					}
+				}
+			}
+		}
+		
+		// Song of Rest requires Bard level 2+
+		if bardLevel >= 2 && bardLevel > bestBardLevel {
+			bestBardLevel = bardLevel
+			bestBardName = name
+		}
+	}
+	
+	if bestBardLevel < 2 {
+		return 0, "", false
+	}
+	
+	// Determine die size based on Bard level (PHB p54)
+	switch {
+	case bestBardLevel >= 17:
+		dieSize = 12
+	case bestBardLevel >= 13:
+		dieSize = 10
+	case bestBardLevel >= 9:
+		dieSize = 8
+	default: // level 2-8
+		dieSize = 6
+	}
+	
+	return dieSize, bestBardName, true
+}
+
 // hasEvasion checks if a character has the Evasion feature (Monk 7+, Rogue 7+, or Hunter Ranger 15+ with evasion choice)
 // v0.9.6: Evasion - on DEX save for half damage: success = no damage, fail = half damage
 // v0.9.61: Also check Hunter Ranger's Superior Hunter's Defense choice
@@ -37774,15 +37845,16 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		req.HitDice = 0 // Default to 0 if not specified (don't spend hit dice unless requested)
 	}
 	
-	// Get character info including subclass for Natural Recovery and class_levels for multiclass
+	// Get character info including subclass for Natural Recovery, class_levels for multiclass, and lobby_id for Song of Rest
 	var class string
 	var level, hp, maxHP, con, hitDiceSpent int
 	var subclass sql.NullString
 	var classLevelsJSON []byte
+	var lobbyID sql.NullInt64
 	err := db.QueryRow(`
-		SELECT class, level, hp, max_hp, con, COALESCE(hit_dice_spent, 0), subclass, COALESCE(class_levels, '{}')
+		SELECT class, level, hp, max_hp, con, COALESCE(hit_dice_spent, 0), subclass, COALESCE(class_levels, '{}'), lobby_id
 		FROM characters WHERE id = $1
-	`, charID).Scan(&class, &level, &hp, &maxHP, &con, &hitDiceSpent, &subclass, &classLevelsJSON)
+	`, charID).Scan(&class, &level, &hp, &maxHP, &con, &hitDiceSpent, &subclass, &classLevelsJSON, &lobbyID)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "Character not found",
@@ -37835,6 +37907,20 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		}
 		rolls = append(rolls, roll)
 		totalHealing += healing
+	}
+	
+	// v0.9.90: Song of Rest - Bard level 2+ grants extra healing to allies during short rest (PHB p54)
+	var songOfRestBonus int
+	var songOfRestDie int
+	var songOfRestBard string
+	if req.HitDice > 0 && lobbyID.Valid {
+		dieSize, bardName, available := getSongOfRestBonus(lobbyID.Int64, charID)
+		if available {
+			songOfRestDie = dieSize
+			songOfRestBard = bardName
+			songOfRestBonus = game.RollDie(dieSize)
+			totalHealing += songOfRestBonus
+		}
 	}
 	
 	// Apply healing (can't exceed max HP)
@@ -38041,6 +38127,16 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	if warlockRecovery != "" {
 		response["warlock_recovery"] = warlockRecovery
+	}
+	
+	// v0.9.90: Show Song of Rest bonus
+	if songOfRestBonus > 0 {
+		response["song_of_rest"] = map[string]interface{}{
+			"bonus":    songOfRestBonus,
+			"die":      fmt.Sprintf("d%d", songOfRestDie),
+			"bard":     songOfRestBard,
+			"note":     fmt.Sprintf("%s's Song of Rest (d%d): +%d HP", songOfRestBard, songOfRestDie, songOfRestBonus),
+		}
 	}
 	
 	// v0.8.91: Show slot recovery results

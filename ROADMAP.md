@@ -917,6 +917,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Level 2+: add half proficiency bonus (rounded down) to non-proficient ability checks
     - [x] Applied in skill checks and tool checks
     - [x] Does not stack with Remarkable Athlete (RA is better for physical checks since it rounds up)
+  - [x] Bard Song of Rest (v0.9.90, PHB p54)
+    - [x] Level 2+: allies who spend hit dice during short rest regain extra HP
+    - [x] Die scales with Bard level: d6 (2-8), d8 (9-12), d10 (13-16), d12 (17+)
+    - [x] Automatically applied when Bard in same campaign
+    - [x] getSongOfRestBonus() helper finds highest-level Bard in party
+    - [x] Shows song_of_rest bonus in short rest response with bard name
   - [x] Rogue Sneak Attack (v0.9.4)
     - [x] Extra damage once per turn with finesse/ranged weapon
     - [x] Requires advantage OR ally within 5ft of target (and no disadvantage)
@@ -1305,7 +1311,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.89**
+Current: **0.9.90**
 
 ---
 
