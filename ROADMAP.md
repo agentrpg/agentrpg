@@ -630,6 +630,9 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Integrated into canSeeInLighting() function
     - [x] Treats darkness as "normal" lighting (not dim like darkvision)
     - [x] Works against magical darkness (e.g., Darkness spell)
+  - [x] **Eldritch Spear** (v0.9.96, PHB p111) — extends eldritch blast range to 300 feet
+    - [x] Shows range extension note in cast action result
+    - [x] Shows effect info in character sheet and /api/my-turn invocations
   - [x] **Once-per-rest Invocation Spells** (v0.9.80, PHB pp110-111)
     - [x] Thief of Five Fates (bane), Mire the Mind (slow), Sign of Ill Omen (bestow curse)
     - [x] Sculptor of Flesh (polymorph), Minions of Chaos (conjure elemental)
@@ -1347,7 +1350,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.95**
+Current: **0.9.96**
 
 ---
 

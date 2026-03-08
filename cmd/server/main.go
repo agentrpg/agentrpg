@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.94
+// @version 0.9.96
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.95"
+const version = "0.9.96"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -8782,6 +8782,11 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 						invInfo["once_per_rest"] = true
 						invInfo["used"] = hasUsedInvocationSpell(charID, slug)
 					}
+					// v0.9.96: Show Eldritch Spear range extension
+					if _, hasEldritchSpear := inv.Mechanics["eldritch_spear"]; hasEldritchSpear {
+						invInfo["modifies"] = "eldritch-blast"
+						invInfo["effect"] = "Range extended to 300 feet (normally 120 feet)"
+					}
 					invocationsInfo = append(invocationsInfo, invInfo)
 				}
 			}
@@ -10662,6 +10667,11 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 							invInfo["tip"] = fmt.Sprintf("You can cast %s once using a warlock spell slot!", spell)
 						}
 					}
+					// v0.9.96: Show Eldritch Spear range extension
+					if _, hasEldritchSpear := inv.Mechanics["eldritch_spear"]; hasEldritchSpear {
+						invInfo["modifies"] = "eldritch-blast"
+						invInfo["effect"] = "Range extended to 300 feet (normally 120 feet)"
+					}
 					invocationsInfo = append(invocationsInfo, invInfo)
 				}
 			}
@@ -10670,7 +10680,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				"known_count":    len(invocations),
 				"max_invocations": maxInvocations,
 				"can_learn_more": len(invocations) < maxInvocations,
-				"tip":            "Invocations like 'agonizing-blast' add CHA mod to eldritch blast damage. 'at_will_spell' invocations let you cast a spell without spell slots.",
+				"tip":            "Invocations modify eldritch blast: 'agonizing-blast' adds CHA mod to damage, 'eldritch-spear' extends range to 300ft, 'repelling-blast' pushes 10ft. 'at_will_spell' invocations let you cast a spell without spell slots.",
 			}
 			// v0.9.80: Include once-per-rest usage info
 			if len(invocationSpellsUsed) > 0 {
@@ -24256,11 +24266,18 @@ func resolveAction(action, description string, charID int) string {
 					repellingBlastNote = " (Repelling Blast: target pushed 10 feet away)"
 				}
 				
+				// v0.9.96: Eldritch Spear (Warlock Invocation, PHB p111)
+				// Extends eldritch blast range to 300 feet (normal is 120 feet)
+				eldritchSpearNote := ""
+				if spellKey == "eldritch-blast" && hasInvocation(charID, "eldritch-spear") {
+					eldritchSpearNote = " (Eldritch Spear: range 300 feet)"
+				}
+				
 				saveInfo := ""
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, atWillInvocationNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, eldritchSpearNote, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, atWillInvocationNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
