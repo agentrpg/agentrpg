@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.98"
+const version = "0.9.99"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -23272,6 +23272,40 @@ func resolveAction(action, description string, charID int) string {
 			attackMod += sacredWeaponBonus
 		}
 		
+		// v0.9.99: Great Weapon Master / Sharpshooter power attack (-5 hit, +10 damage)
+		// Triggered by "gwm", "power attack", or "sharpshooter" in description
+		powerAttackActive := false
+		powerAttackNote := ""
+		powerAttackDamageBonus := 0
+		wantsPowerAttack := strings.Contains(descLower, "gwm") || strings.Contains(descLower, "power attack") || 
+			strings.Contains(descLower, "great weapon master") || strings.Contains(descLower, "sharpshooter")
+		
+		if wantsPowerAttack {
+			// Check for Great Weapon Master (melee with heavy weapon)
+			if !isRangedAttack && hasSpecificFeat(charID, "great_weapon_master") {
+				if hasWeapon && containsProperty(weapon.Properties, "heavy") {
+					powerAttackActive = true
+					attackMod -= 5
+					powerAttackDamageBonus = 10
+					powerAttackNote = " ⚔️ GWM (-5/+10)"
+				} else if hasWeapon {
+					powerAttackNote = " [GWM requires heavy weapon]"
+				} else {
+					powerAttackNote = " [GWM requires a weapon]"
+				}
+			} else if isRangedAttack && hasSpecificFeat(charID, "sharpshooter") {
+				// Sharpshooter (ranged weapon)
+				powerAttackActive = true
+				attackMod -= 5
+				powerAttackDamageBonus = 10
+				powerAttackNote = " 🎯 Sharpshooter (-5/+10)"
+			} else if !isRangedAttack && !hasSpecificFeat(charID, "great_weapon_master") {
+				powerAttackNote = " [You don't have Great Weapon Master]"
+			} else if isRangedAttack && !hasSpecificFeat(charID, "sharpshooter") {
+				powerAttackNote = " [You don't have Sharpshooter]"
+			}
+		}
+		
 		// Get condition-based advantage/disadvantage (pass isRanged for prone handling)
 		hasAdvantage, hasDisadvantage := getAttackModifiers(charID, []string{}, isRangedAttack)
 		
@@ -23483,6 +23517,11 @@ func resolveAction(action, description string, charID int) string {
 			if autoCritIsOneHandedMelee && hasFightingStyle(charID, "dueling") {
 				dmg += 2
 				autoCritDuelingNote = " (Dueling +2)"
+			}
+			
+			// v0.9.99: Great Weapon Master / Sharpshooter +10 damage on auto-crit
+			if powerAttackActive {
+				dmg += powerAttackDamageBonus
 			}
 			
 			weaponName := "unarmed"
@@ -23794,7 +23833,8 @@ func resolveAction(action, description string, charID int) string {
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
-			return fmt.Sprintf("Attack with %s: %d (%s)%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, critLifedrinkerNote)
+			// v0.9.99: Include power attack note in crit result
+			return fmt.Sprintf("Attack with %s: %d (%s)%s%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, powerAttackNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, critLifedrinkerNote)
 		} else if attackRoll == 1 && !attackHalflingLuckyUsed {
 			// Critical miss (nat 1) - but not if Halfling Lucky was used (they already rerolled)
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
@@ -23830,6 +23870,11 @@ func resolveAction(action, description string, charID int) string {
 			// Shield is fine for Dueling (only blocks with off-hand)
 			dmg += 2
 			duelingNote = " (Dueling +2)"
+		}
+		
+		// v0.9.99: Great Weapon Master / Sharpshooter +10 damage on normal hit
+		if powerAttackActive {
+			dmg += powerAttackDamageBonus
 		}
 		
 		// Check for Hunter's Colossus Slayer (v0.8.90)
@@ -23960,7 +24005,8 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		return fmt.Sprintf("Attack with %s: %d to hit%s%s. Damage: %d%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, lifedrinkerNote, foeSlayerNote)
+		// v0.9.99: Include power attack note in normal hit result
+		return fmt.Sprintf("Attack with %s: %d to hit%s%s%s. Damage: %d%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, powerAttackNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, lifedrinkerNote, foeSlayerNote)
 		
 	case "cast":
 		// v0.9.22: Non-proficient armor blocks spellcasting entirely (PHB p144)
@@ -33196,6 +33242,61 @@ var availableFeats = map[string]Feat{
 		},
 		Features: map[string]string{
 			"reroll_melee_damage": "true",
+		},
+	},
+	// v0.9.99: Popular PHB feats
+	"great_weapon_master": {
+		Name:         "Great Weapon Master",
+		Description:  "You've learned to put the weight of a weapon to your advantage, letting its momentum empower your strikes. (PHB p167)",
+		Prerequisite: "",
+		Benefits: []string{
+			"On your turn, when you score a critical hit with a melee weapon or reduce a creature to 0 hit points with one, you can make one melee weapon attack as a bonus action",
+			"Before you make a melee attack with a heavy weapon that you are proficient with, you can choose to take a -5 penalty to the attack roll. If the attack hits, you add +10 to the attack's damage",
+		},
+		Features: map[string]string{
+			"power_attack":       "true", // -5 hit, +10 damage with heavy weapons
+			"crit_bonus_attack":  "true", // bonus action attack on crit or kill
+			"requires_heavy":     "true",
+		},
+	},
+	"sharpshooter": {
+		Name:        "Sharpshooter",
+		Description: "You have mastered ranged weapons and can make shots that others find impossible. (PHB p170)",
+		Benefits: []string{
+			"Attacking at long range doesn't impose disadvantage on your ranged weapon attack rolls",
+			"Your ranged weapon attacks ignore half cover and three-quarters cover",
+			"Before you make an attack with a ranged weapon with which you are proficient, you can choose to take a -5 penalty to the attack roll. If the attack hits, you add +10 to the attack's damage",
+		},
+		Features: map[string]string{
+			"power_attack":         "true", // -5 hit, +10 damage with ranged weapons
+			"ignore_long_range":    "true",
+			"ignore_cover":         "true",
+		},
+	},
+	"crossbow_expert": {
+		Name:        "Crossbow Expert",
+		Description: "Thanks to extensive practice with the crossbow, you gain the following benefits. (PHB p165)",
+		Benefits: []string{
+			"You ignore the loading property of crossbows with which you are proficient",
+			"Being within 5 feet of a hostile creature doesn't impose disadvantage on your ranged attack rolls",
+			"When you use the Attack action and attack with a one-handed weapon, you can use a bonus action to attack with a hand crossbow you are holding",
+		},
+		Features: map[string]string{
+			"ignore_loading":        "true",
+			"no_melee_disadvantage": "true",
+			"hand_crossbow_bonus":   "true",
+		},
+	},
+	"polearm_master": {
+		Name:        "Polearm Master",
+		Description: "You can keep your enemies at bay with reach weapons. (PHB p168)",
+		Benefits: []string{
+			"When you take the Attack action and attack with only a glaive, halberd, quarterstaff, or spear, you can use a bonus action to make a melee attack with the opposite end of the weapon. This attack uses the same ability modifier as the primary attack and deals 1d4 bludgeoning damage",
+			"While you are wielding a glaive, halberd, pike, quarterstaff, or spear, other creatures provoke an opportunity attack from you when they enter your reach",
+		},
+		Features: map[string]string{
+			"butt_end_attack":       "true", // bonus action 1d4 attack
+			"enter_reach_reaction":  "true", // OA when enemies enter reach
 		},
 	},
 }

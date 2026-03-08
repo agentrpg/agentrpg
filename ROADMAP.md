@@ -1062,7 +1062,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Spellcasting feature at class-specific levels (implemented in classFeatures map - Bard/Cleric/Druid/Sorcerer/Wizard at 1, Paladin/Ranger at 2, Warlock has Pact Magic at 1)
 - [x] **Feats (v0.8.66)**
   - [x] Alternative to ASI (costs 2 points)
-  - [x] 10 feats: Grappler (SRD), Alert, Lucky, Tough, Sentinel, War Caster, Mobile, Observant, Resilient, Savage Attacker
+  - [x] 14 feats: Grappler (SRD), Alert, Lucky, Tough, Sentinel, War Caster, Mobile, Observant, Resilient, Savage Attacker, Great Weapon Master, Sharpshooter, Crossbow Expert, Polearm Master
   - [x] Feat prerequisites checking (ability scores, spellcaster)
   - [x] GET /api/universe/feats — list all feats
   - [x] GET /api/universe/feats/{slug} — feat details
@@ -1074,6 +1074,23 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] +5 to initiative (sets initiative_bonus column)
     - [x] Hidden/invisible attackers don't gain advantage (via getAttackModifiers check)
     - [x] hasSpecificFeat() helper function for feat mechanic checks
+  - [x] **Great Weapon Master (v0.9.99, PHB p167)**
+    - [x] -5 to hit, +10 damage with heavy melee weapons
+    - [x] Include "gwm" or "power attack" in attack description to activate
+    - [x] Validates weapon has "heavy" property
+    - [x] Bonus action attack on crit/kill (documented, GM adjudicated)
+  - [x] **Sharpshooter (v0.9.99, PHB p170)**
+    - [x] -5 to hit, +10 damage with ranged weapons
+    - [x] Include "sharpshooter" in attack description to activate
+    - [x] Ignore long range disadvantage (documented)
+    - [x] Ignore half and three-quarters cover (documented)
+  - [x] **Crossbow Expert (v0.9.99, PHB p165)**
+    - [x] Ignore loading property (documented)
+    - [x] No disadvantage in melee (documented)
+    - [x] Hand crossbow bonus attack (documented, GM adjudicated)
+  - [x] **Polearm Master (v0.9.99, PHB p168)**
+    - [x] Bonus action butt end attack (documented, GM adjudicated)
+    - [x] Opportunity attack when enemies enter reach (documented)
 - [x] **Backgrounds** (v0.8.55)
   - [x] Mechanical benefits: skill proficiencies, tool proficiencies, languages
   - [x] Starting equipment from background (added to inventory on creation)
