@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 0.9.90
+// @version 0.9.94
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.93"
+const version = "0.9.94"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -8796,6 +8796,11 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 				invocationsResponse["spells_used_today"] = invocationSpellsUsed
 				invocationsResponse["note"] = "Once-per-rest invocation spells reset on long rest."
 			}
+			// v0.9.94: Include at-will spells from invocations
+			atWillSpells := getCharacterAtWillSpells(charID)
+			if len(atWillSpells) > 0 {
+				invocationsResponse["at_will_spells"] = atWillSpells
+			}
 			response["eldritch_invocations"] = invocationsResponse
 		} else if maxInvocations > 0 {
 			response["invocations_pending"] = fmt.Sprintf("You can learn %d Eldritch Invocations! GET /api/characters/invocations?character_id=%d to see options.", maxInvocations, charID)
@@ -10670,6 +10675,12 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			// v0.9.80: Include once-per-rest usage info
 			if len(invocationSpellsUsed) > 0 {
 				invocationsResponse["spells_used_today"] = invocationSpellsUsed
+			}
+			// v0.9.94: Include at-will spells from invocations
+			atWillSpells := getCharacterAtWillSpells(charID)
+			if len(atWillSpells) > 0 {
+				invocationsResponse["at_will_spells"] = atWillSpells
+				invocationsResponse["at_will_note"] = "These spells can be cast without using spell slots. For self-only spells, include 'on self' in description."
 			}
 			response["eldritch_invocations"] = invocationsResponse
 		} else {
@@ -23990,6 +24001,33 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// v0.9.94: Check for at-will invocation spells
+			// Invocations like Armor of Shadows grant casting spells at will without spell slots
+			atWillInvocationNote := ""
+			if slotLevel > 0 && strings.ToLower(class) == "warlock" {
+				if invSlug, isSelfOnly, hasInv := getAtWillInvocationForSpell(charID, spellKey); hasInv {
+					inv := game.AvailableInvocations[invSlug]
+					
+					// For self-only spells, validate the target
+					if isSelfOnly {
+						// Parse target from description
+						descLower := strings.ToLower(description)
+						targetsSelf := strings.Contains(descLower, "self") || 
+							strings.Contains(descLower, "myself") ||
+							strings.Contains(descLower, "on me") ||
+							!strings.Contains(descLower, " on ") // If no explicit target, assume self
+						
+						if !targetsSelf {
+							return fmt.Sprintf("%s (%s) can only target yourself. Cast as: '%s on self'", inv.Name, spell.Name, spell.Name)
+						}
+					}
+					
+					// At-will invocation found - no spell slot needed
+					atWillInvocationNote = fmt.Sprintf(" [%s: cast at will]", inv.Name)
+					slotLevel = 0 // No slot consumption
+				}
+			}
+			
 			// v0.9.93: Check for Mystic Arcanum casting (Warlock level 11+)
 			// Keywords: "arcanum", "mystic arcanum", "using arcanum"
 			useMysticArcanum := strings.Contains(descLower, "arcanum") || 
@@ -24222,7 +24260,7 @@ func resolveAction(action, description string, charID int) string {
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, atWillInvocationNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -24295,9 +24333,9 @@ func resolveAction(action, description string, charID int) string {
 					}
 				}
 				
-				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, invocationUsedNote, blessedHealerInfo, spell.Description)
+				return fmt.Sprintf("Cast %s%s! Heals %d HP%s.%s%s%s%s%s %s", spell.Name, upcastInfo, heal, bonusInfo, metamagicNote, materialConsumedNote, invocationUsedNote, atWillInvocationNote, blessedHealerInfo, spell.Description)
 			}
-			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, spell.Description)
+			return fmt.Sprintf("Cast %s%s! (DC %d)%s%s%s%s%s %s", spell.Name, upcastInfo, saveDC, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, atWillInvocationNote, spell.Description)
 		}
 		return fmt.Sprintf("Cast spell: %s (Save DC: %d)", description, saveDC)
 	
@@ -33061,6 +33099,58 @@ func getOncePerRestInvocationForSpell(charID int, spellSlug string) (string, boo
 		}
 	}
 	return "", false
+}
+
+// v0.9.94: At-will invocation spells that can only target self
+var atWillSelfOnlySpells = map[string]bool{
+	"mage-armor": true,  // armor-of-shadows
+	"false-life": true,  // fiendish-vigor
+	"levitate":   true,  // ascendant-step
+	"jump":       true,  // otherworldly-leap
+}
+
+// getAtWillInvocationForSpell returns the invocation slug if the character can cast this spell at will (v0.9.94)
+// Returns (invocationSlug, isSelfOnly) if found
+func getAtWillInvocationForSpell(charID int, spellSlug string) (string, bool, bool) {
+	invocations := getCharacterInvocations(charID)
+	for _, invSlug := range invocations {
+		if inv, ok := game.AvailableInvocations[invSlug]; ok {
+			if spell, hasSpell := inv.Mechanics["at_will_spell"]; hasSpell {
+				if spell == spellSlug {
+					isSelfOnly := atWillSelfOnlySpells[spellSlug]
+					return invSlug, isSelfOnly, true
+				}
+			}
+		}
+	}
+	return "", false, false
+}
+
+// getCharacterAtWillSpells returns all at-will spells available to a character from invocations (v0.9.94)
+func getCharacterAtWillSpells(charID int) []map[string]interface{} {
+	invocations := getCharacterInvocations(charID)
+	atWillSpells := []map[string]interface{}{}
+	
+	for _, invSlug := range invocations {
+		if inv, ok := game.AvailableInvocations[invSlug]; ok {
+			if spellSlug, hasSpell := inv.Mechanics["at_will_spell"]; hasSpell {
+				spellInfo := map[string]interface{}{
+					"spell":           spellSlug,
+					"invocation":      inv.Name,
+					"invocation_slug": invSlug,
+					"self_only":       atWillSelfOnlySpells[spellSlug],
+				}
+				// Add spell details if available
+				if spell, found := srdSpellsMemory[spellSlug]; found {
+					spellInfo["spell_name"] = spell.Name
+					spellInfo["level"] = spell.Level
+					spellInfo["school"] = spell.School
+				}
+				atWillSpells = append(atWillSpells, spellInfo)
+			}
+		}
+	}
+	return atWillSpells
 }
 
 // meetsInvocationPrerequisites checks if a character meets the prereqs for an invocation

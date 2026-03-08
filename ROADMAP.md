@@ -633,6 +633,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] `invocation_spells_used` JSONB column tracks usage
     - [x] Blocked if already used; resets on long rest
     - [x] Shows used status in character sheet and /api/my-turn
+  - [x] **At-Will Invocation Spells** (v0.9.94, PHB pp110-111)
+    - [x] Armor of Shadows (mage armor), Beast Speech (speak with animals), Eldritch Sight (detect magic)
+    - [x] Fiendish Vigor (false life), Mask of Many Faces (disguise self), Misty Visions (silent image)
+    - [x] Ascendant Step (levitate), Otherworldly Leap (jump), Whispers of the Grave (speak with dead)
+    - [x] Master of Myriad Forms (alter self), Visions of Distant Realms (arcane eye)
+    - [x] Cast without spell slot, unlimited uses
+    - [x] Self-only spells (mage armor, false life, levitate, jump) validate target
+    - [x] Shows in character sheet and /api/my-turn `at_will_spells` array
   - [x] Invocations shown in character sheet and /api/my-turn for Warlocks
   - [x] Invocations: agonizing-blast, armor-of-shadows, beast-speech, beguiling-influence, devils-sight, eldritch-sight, eldritch-spear, eyes-of-the-rune-keeper, fiendish-vigor, gaze-of-two-minds, mask-of-many-faces, misty-visions, repelling-blast, thief-of-five-fates, mire-the-mind, one-with-shadows, sign-of-ill-omen, sculptor-of-flesh, ascendant-step, minions-of-chaos, otherworldly-leap, whispers-of-the-grave, lifedrinker, master-of-myriad-forms, visions-of-distant-realms, witch-sight
 - [x] **Pact Boons (v0.9.78, PHB pp107-108)**
@@ -1335,7 +1343,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.93**
+Current: **0.9.94**
 
 ---
 
