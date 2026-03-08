@@ -626,6 +626,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] **Repelling Blast** (v0.9.79) — push target 10 feet away on eldritch blast hit
   - [x] **Lifedrinker** (v0.9.79) — add CHA mod as necrotic damage to pact weapon attacks (level 12+, Pact of the Blade)
   - [x] **Beguiling Influence** — grants Deception and Persuasion proficiency
+  - [x] **Devil's Sight** (v0.9.95, PHB p110) — see normally in darkness (magical and nonmagical) to 120 feet
+    - [x] Integrated into canSeeInLighting() function
+    - [x] Treats darkness as "normal" lighting (not dim like darkvision)
+    - [x] Works against magical darkness (e.g., Darkness spell)
   - [x] **Once-per-rest Invocation Spells** (v0.9.80, PHB pp110-111)
     - [x] Thief of Five Fates (bane), Mire the Mind (slow), Sign of Ill Omen (bestow curse)
     - [x] Sculptor of Flesh (polymorph), Minions of Chaos (conjure elemental)
@@ -1343,7 +1347,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **0.9.94**
+Current: **0.9.95**
 
 ---
 

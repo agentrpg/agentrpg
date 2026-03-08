@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "0.9.94"
+const version = "0.9.95"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -27743,6 +27743,11 @@ func canSeeInLighting(charID int, lighting string) string {
 		}
 		// Blindsight doesn't rely on light
 		if blindsight > 0 {
+			return "normal"
+		}
+		// v0.9.95: Devil's Sight (Warlock Invocation, PHB p110)
+		// Can see normally in darkness, both magical and nonmagical, to 120 feet
+		if hasInvocation(charID, "devils-sight") {
 			return "normal"
 		}
 		// Darkvision treats darkness as dim light (no attack penalty, Perception disadvantage)
