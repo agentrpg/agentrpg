@@ -771,6 +771,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Resets on long rest
     - [x] Halfling Lucky applies to the reroll
     - [x] Shows in character sheet and /api/my-turn for Fighters level 9+
+  - [x] Life Domain's Heavy Armor Proficiency (v1.0.8, PHB p60)
+    - [x] Automatically grants heavy armor proficiency when choosing Life domain
+    - [x] Added to character's armor_proficiencies column
+    - [x] Shows bonus_armor_proficiency in subclass response
   - [x] Life Domain's Disciple of Life (+2+spell_level healing, v0.8.71)
   - [x] Life Domain's Supreme Healing (max dice on healing spells, v0.8.71)
   - [x] Life Domain's Blessed Healer (heal self when healing others at level 6+, v0.9.34)
@@ -975,6 +979,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Can reduce damage to 0 (graceful landing)
     - [x] Handles multiclass monks (uses monk class level, not total level)
     - [x] Consumes reaction
+  - [x] Lore Bard Bonus Proficiencies (v1.0.8, PHB p54)
+    - [x] Choose 3 additional skill proficiencies when selecting Lore subclass
+    - [x] Must include bonus_skills array in POST /api/characters/subclass request
+    - [x] Validates skills aren't already proficient, are valid skill names
+    - [x] Shows bonus_skill_proficiencies in subclass response
   - [x] Lore Bard Cutting Words (v0.9.3)
   - [x] Lore Bard Peerless Skill (v0.9.32)
     - [x] POST /api/gm/skill-check with use_peerless_skill=true
@@ -1420,7 +1429,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.7**
+Current: **1.0.8**
 
 ---
 

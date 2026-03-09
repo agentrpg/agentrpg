@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.7
+// @version 1.0.8
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.7"
+const version = "1.0.8"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -44288,8 +44288,9 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		// Choose a subclass
 		var req struct {
-			CharacterID int    `json:"character_id"`
-			Subclass    string `json:"subclass"`
+			CharacterID int      `json:"character_id"`
+			Subclass    string   `json:"subclass"`
+			BonusSkills []string `json:"bonus_skills"` // v1.0.8: For subclasses that grant bonus skill proficiencies (e.g., Lore Bard)
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -44412,6 +44413,99 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		
+		// v1.0.8: Check for bonus armor proficiency (Life Cleric, PHB p60)
+		var bonusArmorApplied string
+		if _, ok := getSubclassMechanic(subclassSlug, level, "heavy_armor_proficiency"); ok {
+			armorType := "heavy"
+			// Get current armor proficiencies
+			var currentArmorProfs string
+			db.QueryRow(`SELECT COALESCE(armor_proficiencies, '') FROM characters WHERE id = $1`, req.CharacterID).Scan(&currentArmorProfs)
+			
+			// Add bonus armor type if not already present
+			if !strings.Contains(strings.ToLower(currentArmorProfs), strings.ToLower(armorType)) {
+				var newArmorProfs string
+				if currentArmorProfs == "" {
+					newArmorProfs = armorType
+				} else {
+					newArmorProfs = currentArmorProfs + ", " + armorType
+				}
+				db.Exec("UPDATE characters SET armor_proficiencies = $1 WHERE id = $2", newArmorProfs, req.CharacterID)
+				bonusArmorApplied = armorType
+			}
+		}
+		
+		// v1.0.8: Check for bonus skill proficiencies (Lore Bard, PHB p54)
+		var bonusSkillsApplied []string
+		if numSkillsStr, ok := getSubclassMechanic(subclassSlug, level, "bonus_skill_proficiencies"); ok {
+			numSkills, _ := strconv.Atoi(numSkillsStr)
+			if numSkills > 0 {
+				// Validate that bonus_skills were provided
+				if len(req.BonusSkills) != numSkills {
+					// List all available skills (any skill for Lore Bard)
+					allSkills := []string{
+						"acrobatics", "animal handling", "arcana", "athletics", "deception",
+						"history", "insight", "intimidation", "investigation", "medicine",
+						"nature", "perception", "performance", "persuasion", "religion",
+						"sleight of hand", "stealth", "survival",
+					}
+					json.NewEncoder(w).Encode(map[string]interface{}{
+						"error":           "bonus_skills_required",
+						"message":         fmt.Sprintf("The %s subclass grants %d bonus skill proficiencies. Include bonus_skills array in your request.", sub.Name, numSkills),
+						"required_count":  numSkills,
+						"available_skills": allSkills,
+						"example":         fmt.Sprintf(`{"character_id": %d, "subclass": "%s", "bonus_skills": ["history", "nature", "religion"]}`, req.CharacterID, subclassSlug),
+					})
+					return
+				}
+				
+				// Get current skill proficiencies
+				var currentSkillProfs string
+				db.QueryRow(`SELECT COALESCE(skill_proficiencies, '') FROM characters WHERE id = $1`, req.CharacterID).Scan(&currentSkillProfs)
+				currentSkillsList := strings.Split(strings.ToLower(currentSkillProfs), ", ")
+				currentSkillsMap := make(map[string]bool)
+				for _, s := range currentSkillsList {
+					currentSkillsMap[strings.TrimSpace(s)] = true
+				}
+				
+				// Validate and add each bonus skill
+				validSkills := map[string]bool{
+					"acrobatics": true, "animal handling": true, "arcana": true, "athletics": true,
+					"deception": true, "history": true, "insight": true, "intimidation": true,
+					"investigation": true, "medicine": true, "nature": true, "perception": true,
+					"performance": true, "persuasion": true, "religion": true, "sleight of hand": true,
+					"stealth": true, "survival": true,
+				}
+				
+				for _, skill := range req.BonusSkills {
+					skillLower := strings.ToLower(strings.TrimSpace(skill))
+					if !validSkills[skillLower] {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"error":   "invalid_skill",
+							"message": fmt.Sprintf("'%s' is not a valid skill", skill),
+						})
+						return
+					}
+					if currentSkillsMap[skillLower] {
+						json.NewEncoder(w).Encode(map[string]interface{}{
+							"error":   "already_proficient",
+							"message": fmt.Sprintf("Character is already proficient in '%s'. Choose a different skill.", skill),
+						})
+						return
+					}
+					bonusSkillsApplied = append(bonusSkillsApplied, skillLower)
+				}
+				
+				// Add bonus skills to proficiencies
+				var newSkillProfs string
+				if currentSkillProfs == "" {
+					newSkillProfs = strings.Join(bonusSkillsApplied, ", ")
+				} else {
+					newSkillProfs = currentSkillProfs + ", " + strings.Join(bonusSkillsApplied, ", ")
+				}
+				db.Exec("UPDATE characters SET skill_proficiencies = $1 WHERE id = $2", newSkillProfs, req.CharacterID)
+			}
+		}
+		
 		// Get active features
 		activeFeatures := getActiveSubclassFeatures(subclassSlug, level)
 		featuresInfo := []map[string]interface{}{}
@@ -44438,6 +44532,18 @@ func handleCharacterSubclass(w http.ResponseWriter, r *http.Request) {
 		if hpBonusApplied > 0 {
 			response["hp_bonus_applied"] = hpBonusApplied
 			response["hp_bonus_reason"] = "Draconic Resilience: +1 HP per sorcerer level"
+		}
+		
+		// v1.0.8: Include bonus armor proficiency info if applied
+		if bonusArmorApplied != "" {
+			response["bonus_armor_proficiency"] = bonusArmorApplied
+			response["armor_proficiency_reason"] = fmt.Sprintf("%s: Bonus Proficiency grants %s armor proficiency", sub.Name, bonusArmorApplied)
+		}
+		
+		// v1.0.8: Include bonus skill proficiencies info if applied
+		if len(bonusSkillsApplied) > 0 {
+			response["bonus_skill_proficiencies"] = bonusSkillsApplied
+			response["skill_proficiency_reason"] = fmt.Sprintf("%s: Bonus Proficiencies grants %d additional skill proficiencies", sub.Name, len(bonusSkillsApplied))
 		}
 		
 		json.NewEncoder(w).Encode(response)
