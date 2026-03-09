@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.2"
+const version = "1.0.3"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -406,6 +406,7 @@ func main() {
 	http.HandleFunc("/api/gm/suffocation", handleGMSuffocation)
 	http.HandleFunc("/api/gm/underwater", handleGMUnderwater)
 	http.HandleFunc("/api/gm/set-lighting", handleGMSetLighting)
+	http.HandleFunc("/api/gm/witch-sight", handleGMWitchSight) // v1.0.3
 	http.HandleFunc("/api/gm/morale-check", handleGMMoraleCheck)
 	http.HandleFunc("/api/gm/turn-undead", handleGMTurnUndead)
 	http.HandleFunc("/api/gm/turn-unholy", handleGMTurnUnholy)
@@ -8912,6 +8913,13 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 						invInfo["modifies"] = "eldritch-blast"
 						invInfo["effect"] = "Range extended to 300 feet (normally 120 feet)"
 					}
+					// v1.0.3: Show Witch Sight info (PHB p111)
+					if _, hasWitchSightMech := inv.Mechanics["witch_sight"]; hasWitchSightMech {
+						invInfo["passive"] = true
+						invInfo["range"] = "30 feet"
+						invInfo["effect"] = "See the true form of any shapechanger or creature concealed by illusion or transmutation magic"
+						invInfo["use_endpoint"] = "POST /api/gm/witch-sight"
+					}
 					invocationsInfo = append(invocationsInfo, invInfo)
 				}
 			}
@@ -10796,6 +10804,13 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 					if _, hasEldritchSpear := inv.Mechanics["eldritch_spear"]; hasEldritchSpear {
 						invInfo["modifies"] = "eldritch-blast"
 						invInfo["effect"] = "Range extended to 300 feet (normally 120 feet)"
+					}
+					// v1.0.3: Show Witch Sight info (PHB p111)
+					if _, hasWitchSightMech := inv.Mechanics["witch_sight"]; hasWitchSightMech {
+						invInfo["passive"] = true
+						invInfo["range"] = "30 feet"
+						invInfo["effect"] = "See the true form of any shapechanger or creature concealed by illusion or transmutation magic"
+						invInfo["tip"] = "Use POST /api/gm/witch-sight to reveal hidden creatures"
 					}
 					invocationsInfo = append(invocationsInfo, invInfo)
 				}
@@ -28377,6 +28392,177 @@ func handleGMSetLighting(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGMWitchSight godoc
+// @Summary Use Witch Sight to reveal shapechangers and illusions (v1.0.3, PHB p111)
+// @Description Warlock Eldritch Invocation (level 15+): Reveals the true form of any shapechanger or creature concealed by illusion or transmutation magic within 30 feet. Returns all creatures in combat that would be affected.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{campaign_id=integer,character_id=integer} true "character_id is the Warlock with Witch Sight"
+// @Success 200 {object} map[string]interface{} "Revealed creatures with true forms"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM or not your character"
+// @Failure 400 {object} map[string]interface{} "Invalid request or no Witch Sight"
+// @Router /gm/witch-sight [post]
+func handleGMWitchSight(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	
+	var req struct {
+		CampaignID  int `json:"campaign_id"`
+		CharacterID int `json:"character_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	if req.CampaignID == 0 || req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "campaign_id and character_id required",
+		})
+		return
+	}
+	
+	// Verify ownership or GM status
+	var charAgentID, dmID int
+	var charName, class string
+	var level int
+	err = db.QueryRow(`SELECT c.agent_id, c.name, c.class, c.level, COALESCE(l.dm_id, 0)
+		FROM characters c 
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1 AND c.lobby_id = $2`, req.CharacterID, req.CampaignID).Scan(
+		&charAgentID, &charName, &class, &level, &dmID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": "Character not found in this campaign",
+		})
+		return
+	}
+	
+	// Must be GM or own the character
+	if agentID != dmID && agentID != charAgentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "forbidden",
+			"message": "You must be the GM or own this character",
+		})
+		return
+	}
+	
+	// Check for Witch Sight invocation
+	if !hasInvocation(req.CharacterID, "witch-sight") {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "no_witch_sight",
+			"message":         fmt.Sprintf("%s does not have the Witch Sight invocation", charName),
+			"invocation_info": "Witch Sight is an Eldritch Invocation available at Warlock level 15+",
+		})
+		return
+	}
+	
+	// Find shapechangers in combat (monsters with shapechanger in their type)
+	revealedCreatures := []map[string]interface{}{}
+	
+	// Check turn_order for monsters that are shapechangers
+	var turnOrderJSON []byte
+	db.QueryRow("SELECT COALESCE(turn_order, '[]') FROM combat_state WHERE lobby_id = $1", req.CampaignID).Scan(&turnOrderJSON)
+	
+	var turnOrder []map[string]interface{}
+	json.Unmarshal(turnOrderJSON, &turnOrder)
+	
+	for _, combatant := range turnOrder {
+		if combatant["is_monster"] == true {
+			monsterSlug, _ := combatant["slug"].(string)
+			combatantName, _ := combatant["name"].(string)
+			
+			// Look up monster type from monsters table
+			var monsterType string
+			db.QueryRow("SELECT COALESCE(type, '') FROM monsters WHERE slug = $1", monsterSlug).Scan(&monsterType)
+			
+			// Check if shapechanger (e.g., "monstrosity (shapechanger)", "fiend (shapechanger)")
+			if strings.Contains(strings.ToLower(monsterType), "shapechanger") {
+				revealedCreatures = append(revealedCreatures, map[string]interface{}{
+					"name":            combatantName,
+					"slug":            monsterSlug,
+					"creature_type":   monsterType,
+					"revealed_as":     "shapechanger",
+					"true_form_known": true,
+					"note":            fmt.Sprintf("%s's true form is revealed by Witch Sight", combatantName),
+				})
+			}
+		}
+	}
+	
+	// Check party members for illusion/transmutation conditions
+	// These conditions would be set by spells like Disguise Self, Polymorph, Alter Self
+	illusionConditions := []string{"disguised", "polymorphed", "alter_self", "disguise_self"}
+	
+	rows, _ := db.Query(`SELECT id, name, COALESCE(conditions, '[]') 
+		FROM characters WHERE lobby_id = $1 AND id != $2`, req.CampaignID, req.CharacterID)
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var id int
+			var name string
+			var conditionsJSON []byte
+			rows.Scan(&id, &name, &conditionsJSON)
+			
+			var conditions []string
+			json.Unmarshal(conditionsJSON, &conditions)
+			
+			for _, cond := range conditions {
+				condLower := strings.ToLower(cond)
+				for _, illusionCond := range illusionConditions {
+					if strings.Contains(condLower, illusionCond) {
+						revealedCreatures = append(revealedCreatures, map[string]interface{}{
+							"name":            name,
+							"character_id":    id,
+							"condition":       cond,
+							"revealed_as":     "illusion/transmutation",
+							"true_form_known": true,
+							"note":            fmt.Sprintf("%s is concealed by %s - Witch Sight reveals their true form", name, cond),
+						})
+						break
+					}
+				}
+			}
+		}
+	}
+	
+	response := map[string]interface{}{
+		"success":            true,
+		"character":          charName,
+		"ability":            "Witch Sight",
+		"range":              "30 feet",
+		"description":        "See the true form of any shapechanger or creature concealed by illusion or transmutation magic",
+		"revealed_creatures": revealedCreatures,
+	}
+	
+	if len(revealedCreatures) == 0 {
+		response["note"] = "No shapechangers or illusion-concealed creatures detected within 30 feet"
+	} else {
+		response["note"] = fmt.Sprintf("Witch Sight reveals %d creature(s)", len(revealedCreatures))
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
 // handleGMMoraleCheck godoc
 // @Summary Check if a monster/NPC attempts to flee (optional morale rule)
 // @Description Optional morale rule: When a creature takes significant damage, it may attempt to flee. Makes a WIS saving throw vs DC (default 10). Below 50% HP = disadvantage, below 25% HP = DC+5. Constructs and undead typically don't make morale checks.
@@ -33418,6 +33604,13 @@ func hasInvocation(charID int, slug string) bool {
 		}
 	}
 	return false
+}
+
+// hasWitchSight is a convenience helper for Witch Sight invocation (v1.0.3, PHB p111)
+// Witch Sight: See the true form of any shapechanger or creature concealed by
+// illusion or transmutation magic within 30 feet
+func hasWitchSight(charID int) bool {
+	return hasInvocation(charID, "witch-sight")
 }
 
 // getInvocationSpellsUsed returns the list of once-per-rest invocation spells that have been used (v0.9.80)

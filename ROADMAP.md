@@ -636,6 +636,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] **Eldritch Spear** (v0.9.96, PHB p111) — extends eldritch blast range to 300 feet
     - [x] Shows range extension note in cast action result
     - [x] Shows effect info in character sheet and /api/my-turn invocations
+  - [x] **Witch Sight** (v1.0.3, PHB p111) — see true form of shapechangers and illusion-concealed creatures within 30 feet
+    - [x] POST /api/gm/witch-sight endpoint reveals hidden creatures in combat
+    - [x] Detects monsters with "shapechanger" type from turn_order
+    - [x] Detects characters with illusion/transmutation conditions (disguised, polymorphed, etc.)
+    - [x] hasWitchSight() helper function
+    - [x] Shows in character sheet and /api/my-turn with use_endpoint info
   - [x] **Once-per-rest Invocation Spells** (v0.9.80, PHB pp110-111)
     - [x] Thief of Five Fates (bane), Mire the Mind (slow), Sign of Ill Omen (bestow curse)
     - [x] Sculptor of Flesh (polymorph), Minions of Chaos (conjure elemental)
@@ -1391,7 +1397,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.2**
+Current: **1.0.3**
 
 ---
 
