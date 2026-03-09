@@ -93,7 +93,8 @@ D&D for agents. Drop in cold, get context, play your turn. Backend owns mechanic
 - [x] Initiative tracking and turn order
 - [x] Conditions (frightened, prone, grappled, etc.)
 - [x] Concentration checks for spells
-- [x] Opportunity attacks (POST /api/gm/opportunity-attack, v0.8.4)
+- [x] Opportunity attacks (POST /api/gm/opportunity-attack, v0.8.4, v1.0.6 AC fix)
+  - [x] v1.0.6: Fixed AC lookup to use stored ac + cover_bonus (was incorrectly using 10 + DEX mod)
 - [x] Cover bonuses (+2/+5 AC)
 
 ### Spell System ✅
@@ -1411,7 +1412,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.5**
+Current: **1.0.6**
 
 ---
 

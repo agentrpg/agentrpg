@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.5"
+const version = "1.0.6"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -16693,12 +16693,13 @@ func handleGMOpportunityAttack(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Get target character info
+	// v1.0.6: Fixed AC lookup to use stored ac + cover_bonus instead of recalculating from DEX
+	// The ac column already includes armor, shield, natural armor, etc.
 	var targetName string
 	var targetLobbyID int
 	var targetAC int
 	err = db.QueryRow(`
-		SELECT name, lobby_id, 
-			10 + CASE WHEN dex > 10 THEN (dex - 10) / 2 ELSE 0 END as ac
+		SELECT name, lobby_id, ac + COALESCE(cover_bonus, 0) as effective_ac
 		FROM characters WHERE id = $1
 	`, req.TargetID).Scan(&targetName, &targetLobbyID, &targetAC)
 	
