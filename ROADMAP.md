@@ -659,6 +659,15 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Shows in character sheet and /api/my-turn `at_will_spells` array
   - [x] Invocations shown in character sheet and /api/my-turn for Warlocks
   - [x] Invocations: agonizing-blast, armor-of-shadows, beast-speech, beguiling-influence, devils-sight, eldritch-sight, eldritch-spear, eyes-of-the-rune-keeper, fiendish-vigor, gaze-of-two-minds, mask-of-many-faces, misty-visions, repelling-blast, thief-of-five-fates, mire-the-mind, one-with-shadows, sign-of-ill-omen, sculptor-of-flesh, ascendant-step, minions-of-chaos, otherworldly-leap, whispers-of-the-grave, lifedrinker, master-of-myriad-forms, visions-of-distant-realms, witch-sight
+  - [x] **One with Shadows** (v1.0.4, PHB p111) — become invisible in dim light or darkness
+    - [x] POST /api/characters/one-with-shadows endpoint to use the invocation
+    - [x] Requires Warlock level 5+ with one-with-shadows invocation
+    - [x] Must be in dim light or darkness (checked via campaign lighting)
+    - [x] Uses action to become invisible
+    - [x] Tracked as "invisible:one_with_shadows" condition
+    - [x] Invisibility ends when character moves, takes action, or uses reaction
+    - [x] Auto-removed in consumeActionResource when action/reaction/movement used
+    - [x] Parameterized invisible conditions (invisible:*) now grant proper combat benefits
 - [x] **Pact Boons (v0.9.78, PHB pp107-108)**
   - [x] Warlocks choose one Pact Boon at level 3 (permanent choice)
   - [x] `pact_boon` VARCHAR column on characters table
@@ -1397,7 +1406,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.3**
+Current: **1.0.4**
 
 ---
 

@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.3"
+const version = "1.0.4"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -473,6 +473,7 @@ func main() {
 	http.HandleFunc("/api/characters/fiendish-resilience", handleCharacterFiendishResilience)
 	http.HandleFunc("/api/characters/favored-enemy", handleCharacterFavoredEnemy) // v0.9.87
 	http.HandleFunc("/api/characters/mystic-arcanum", handleCharacterMysticArcanum) // v0.9.93
+	http.HandleFunc("/api/characters/one-with-shadows", handleCharacterOneWithShadows) // v1.0.4
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
@@ -3254,6 +3255,38 @@ func removeCondition(charID int, condition string) bool {
 	if removed {
 		updated, _ := json.Marshal(newConditions)
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+	}
+	return removed
+}
+
+// removeOneWithShadowsInvisibility checks for and removes the invisible:one_with_shadows condition (v1.0.4)
+// This is called when a character moves, takes an action, or uses a reaction.
+// One with Shadows (PHB p111): "invisible until you move or take an action or a reaction"
+func removeOneWithShadowsInvisibility(charID int) bool {
+	conditions := getCharConditions(charID)
+	
+	newConditions := []string{}
+	removed := false
+	for _, c := range conditions {
+		if c == "invisible:one_with_shadows" {
+			removed = true
+		} else {
+			newConditions = append(newConditions, c)
+		}
+	}
+	
+	if removed {
+		updated, _ := json.Marshal(newConditions)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
+		// Log to campaign if applicable
+		var campaignID sql.NullInt64
+		var charName string
+		db.QueryRow("SELECT lobby_id, name FROM characters WHERE id = $1", charID).Scan(&campaignID, &charName)
+		if campaignID.Valid {
+			db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+				VALUES ($1, $2, 'other', $3, NOW())`,
+				campaignID.Int64, charID, fmt.Sprintf("👁️ %s's invisibility from One with Shadows ends", charName))
+		}
 	}
 	return removed
 }
@@ -22831,8 +22864,11 @@ func checkActionEconomy(charID int, actionType string, movementCost int) (bool, 
 // Consume the appropriate resource after an action
 // actionType is the original action (e.g., "attack", "cast") for Extra Attack handling
 func consumeActionResource(charID int, resourceType string, movementCost int, actionType ...string) {
+	// v1.0.4: One with Shadows invisibility ends when you move, take an action, or use a reaction
+	// PHB p111: "invisible until you move or take an action or a reaction"
 	switch resourceType {
 	case "action":
+		removeOneWithShadowsInvisibility(charID)
 		// Special handling for Extra Attack (v0.8.68)
 		if len(actionType) > 0 && strings.ToLower(actionType[0]) == "attack" {
 			consumeAttackAction(charID)
@@ -22840,10 +22876,15 @@ func consumeActionResource(charID int, resourceType string, movementCost int, ac
 			db.Exec("UPDATE characters SET action_used = true WHERE id = $1", charID)
 		}
 	case "bonus_action":
+		// Note: Bonus actions don't break One with Shadows per RAW (only action/reaction/movement)
 		db.Exec("UPDATE characters SET bonus_action_used = true WHERE id = $1", charID)
 	case "reaction":
+		removeOneWithShadowsInvisibility(charID)
 		db.Exec("UPDATE characters SET reaction_used = true WHERE id = $1", charID)
 	case "movement":
+		if movementCost > 0 {
+			removeOneWithShadowsInvisibility(charID)
+		}
 		db.Exec("UPDATE characters SET movement_remaining = movement_remaining - $1 WHERE id = $2", movementCost, charID)
 	}
 }
@@ -23190,21 +23231,32 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 	// Attacker conditions
 	for _, cond := range conditions {
 		condLower := strings.ToLower(cond)
-		switch condLower {
-		case "invisible", "hidden":
+		// v1.0.4: Handle parameterized invisible conditions like "invisible:one_with_shadows"
+		if strings.HasPrefix(condLower, "invisible") {
 			// v0.9.17: Invisible attacker gets advantage unless defender has blindsight/truesight
-			// v0.9.62: Hidden attacker also gets advantage (PHB p194-195)
 			// v0.9.62: Alert feat negates advantage from unseen attackers (PHB p165)
 			if len(targetID) > 0 && targetID[0] > 0 {
 				_, defenderBlindsight, defenderTruesight := getCharacterVision(targetID[0])
-				// Check if defender has Alert feat - negates advantage from unseen attackers
 				defenderHasAlert := hasSpecificFeat(targetID[0], "alert")
 				if defenderBlindsight == 0 && defenderTruesight == 0 && !defenderHasAlert {
 					hasAdvantage = true
 				}
-				// If defender has special senses OR Alert feat, no advantage
 			} else {
-				// No specific target, grant advantage by default
+				hasAdvantage = true
+			}
+			continue
+		}
+		switch condLower {
+		case "hidden":
+			// v0.9.62: Hidden attacker gets advantage (PHB p194-195)
+			// v0.9.62: Alert feat negates advantage from unseen attackers (PHB p165)
+			if len(targetID) > 0 && targetID[0] > 0 {
+				_, defenderBlindsight, defenderTruesight := getCharacterVision(targetID[0])
+				defenderHasAlert := hasSpecificFeat(targetID[0], "alert")
+				if defenderBlindsight == 0 && defenderTruesight == 0 && !defenderHasAlert {
+					hasAdvantage = true
+				}
+			} else {
 				hasAdvantage = true
 			}
 		case "blinded", "frightened", "poisoned", "prone", "restrained":
@@ -23229,18 +23281,20 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 	
 	// Target conditions
 	for _, cond := range targetConditions {
-		switch strings.ToLower(cond) {
-		case "blinded", "paralyzed", "stunned", "unconscious", "restrained":
-			hasAdvantage = true
-		case "invisible":
+		condLower := strings.ToLower(cond)
+		// v1.0.4: Handle parameterized invisible conditions like "invisible:one_with_shadows"
+		if strings.HasPrefix(condLower, "invisible") {
 			// v0.9.17: Check if attacker has special senses that can see invisible creatures
 			// Blindsight and truesight allow seeing invisible creatures (PHB)
 			_, attackerBlindsight, attackerTruesight := getCharacterVision(charID)
 			if attackerBlindsight == 0 && attackerTruesight == 0 {
-				// Attacker can't see invisible: disadvantage
 				hasDisadvantage = true
 			}
-			// If attacker has blindsight or truesight, no disadvantage (they can see the invisible creature)
+			continue
+		}
+		switch condLower {
+		case "blinded", "paralyzed", "stunned", "unconscious", "restrained":
+			hasAdvantage = true
 		case "prone":
 			// Prone: advantage from within 5ft (melee), disadvantage from further (ranged)
 			if isRanged {
@@ -48543,6 +48597,249 @@ func handleCharacterMysticArcanum(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// handleCharacterOneWithShadows handles the One with Shadows Eldritch Invocation (v1.0.4, PHB p111)
+// @Summary Use One with Shadows (Warlock Invocation level 5+)
+// @Description When you are in an area of dim light or darkness, you can use your action to become invisible until you move or take an action or a reaction. The invisible condition is tracked as "invisible:one_with_shadows" and is automatically removed when you use movement, action, or reaction.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param character_id query integer false "Character ID (for GET)"
+// @Param request body object{character_id=integer} false "One with Shadows use (for POST)"
+// @Success 200 {object} map[string]interface{} "One with Shadows status or activation result"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not your character"
+// @Router /characters/one-with-shadows [get]
+// @Router /characters/one-with-shadows [post]
+func handleCharacterOneWithShadows(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check One with Shadows status",
+				"usage":   "GET /api/characters/one-with-shadows?character_id=X",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var campaignID sql.NullInt64
+		err = db.QueryRow(`
+			SELECT class, level, lobby_id
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &campaignID)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(class) != "warlock" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_warlock",
+				"message": fmt.Sprintf("One with Shadows is a Warlock Eldritch Invocation (character is %s)", class),
+			})
+			return
+		}
+		
+		if !hasInvocation(charID, "one-with-shadows") {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "missing_invocation",
+				"message": "This Warlock has not learned the One with Shadows invocation",
+				"note":    "One with Shadows requires Warlock level 5+. Learn it via POST /api/characters/invocations",
+			})
+			return
+		}
+		
+		// Get current lighting
+		lighting := "bright"
+		if campaignID.Valid {
+			lighting = getCampaignLighting(int(campaignID.Int64))
+		}
+		
+		canUse := lighting == "dim" || lighting == "darkness"
+		
+		response := map[string]interface{}{
+			"character_id":  charID,
+			"class":         class,
+			"level":         level,
+			"invocation":    "One with Shadows",
+			"has_invocation": true,
+			"current_lighting": lighting,
+			"can_use":       canUse,
+			"action_cost":   "1 action",
+			"effect":        "Become invisible until you move, take an action, or take a reaction",
+			"phb_reference": "PHB p111",
+		}
+		
+		if !canUse {
+			response["blocked_reason"] = "Must be in dim light or darkness (current: " + lighting + ")"
+			response["tip"] = "Ask your GM to set the lighting via POST /api/gm/set-lighting"
+		} else {
+			response["how_to_use"] = "POST /api/characters/one-with-shadows with character_id"
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Description string `json:"description"` // Optional flavor text
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var campaignID sql.NullInt64
+	var conditionsJSON []byte
+	var actionUsed bool
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, lobby_id, COALESCE(conditions, '[]'), COALESCE(action_used, false)
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &campaignID, &conditionsJSON, &actionUsed)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only use One with Shadows for your own characters",
+		})
+		return
+	}
+	
+	// Validate class
+	if strings.ToLower(class) != "warlock" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_warlock",
+			"message": fmt.Sprintf("%s is a %s, not a Warlock. One with Shadows is a Warlock Eldritch Invocation.", charName, class),
+		})
+		return
+	}
+	
+	// Check has invocation
+	if !hasInvocation(req.CharacterID, "one-with-shadows") {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "missing_invocation",
+			"message": fmt.Sprintf("%s has not learned the One with Shadows invocation", charName),
+			"note":    "Learn it via POST /api/characters/invocations",
+		})
+		return
+	}
+	
+	// Check lighting (must be dim or darkness)
+	lighting := "bright"
+	if campaignID.Valid {
+		lighting = getCampaignLighting(int(campaignID.Int64))
+	}
+	
+	if lighting != "dim" && lighting != "darkness" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":            "lighting_requirement",
+			"message":          fmt.Sprintf("One with Shadows requires dim light or darkness (current: %s)", lighting),
+			"current_lighting": lighting,
+			"tip":              "Ask your GM to set the lighting via POST /api/gm/set-lighting",
+		})
+		return
+	}
+	
+	// Check if action already used (in combat)
+	if actionUsed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "action_already_used",
+			"message": fmt.Sprintf("%s has already used their action this turn", charName),
+		})
+		return
+	}
+	
+	// Parse current conditions
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	
+	// Check if already invisible
+	for _, c := range conditions {
+		if strings.HasPrefix(c, "invisible") {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_invisible",
+				"message": fmt.Sprintf("%s is already invisible", charName),
+			})
+			return
+		}
+	}
+	
+	// Add invisible:one_with_shadows condition
+	conditions = append(conditions, "invisible:one_with_shadows")
+	updatedConditions, _ := json.Marshal(conditions)
+	
+	// Update character (mark action used, add condition)
+	db.Exec(`
+		UPDATE characters SET 
+			conditions = $1, 
+			action_used = true
+		WHERE id = $2
+	`, updatedConditions, req.CharacterID)
+	
+	// Log action if in campaign
+	if campaignID.Valid {
+		desc := req.Description
+		if desc == "" {
+			desc = fmt.Sprintf("%s melds with the shadows, becoming invisible", charName)
+		}
+		actionLog := fmt.Sprintf("👁️‍🗨️ One with Shadows — %s", desc)
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'other', $3, NOW())`, campaignID.Int64, req.CharacterID, actionLog)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":      true,
+		"invocation":   "One with Shadows",
+		"character":    charName,
+		"effect":       "invisible",
+		"condition":    "invisible:one_with_shadows",
+		"lighting":     lighting,
+		"action_cost":  "1 action",
+		"duration":     "Until you move, take an action, or take a reaction",
+		"description":  fmt.Sprintf("%s steps into the %s and vanishes from sight.", charName, lighting),
+		"warning":      "The invisibility ends immediately if you move, take any action, or use your reaction.",
+		"phb_reference": "PHB p111",
+	})
 }
 
 // handleUniverseFightingStyles returns all available fighting styles
