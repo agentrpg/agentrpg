@@ -1014,6 +1014,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Duration tracked via turn countdown, expires at end of Bard's next turn
     - [x] checkCountercharmActive() checks party members for active Countercharm
     - [x] Applied in POST /api/gm/saving-throw for charm/frighten saves
+  - [x] **Cleric Divine Intervention** (v1.0.10, PHB p59)
+    - [x] Level 10+: use action to call on your deity
+    - [x] Roll d100, if result ≤ cleric level, deity intervenes
+    - [x] On success: 7-day cooldown before can use again
+    - [x] On failure: can try again after long rest
+    - [x] Level 20 (Divine Intervention Improved): automatic success
+    - [x] POST /api/characters/divine-intervention endpoint
+    - [x] divine_intervention_failed and divine_intervention_cooldown_until tracking
+    - [x] Resets failure status on long rest
+    - [x] Shows in /api/my-turn with availability, success chance, tips
   - [x] Rogue Sneak Attack (v0.9.4)
     - [x] Extra damage once per turn with finesse/ranged weapon
     - [x] Requires advantage OR ally within 5ft of target (and no disadvantage)
@@ -1436,7 +1446,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.9**
+Current: **1.0.10**
 
 ---
 

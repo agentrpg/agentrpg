@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.9
+// @version 1.0.10
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.9"
+const version = "1.0.10"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -470,6 +470,7 @@ func main() {
 	http.HandleFunc("/api/characters/breath-weapon", handleCharacterBreathWeapon)
 	http.HandleFunc("/api/characters/infernal-legacy", handleCharacterInfernalLegacy)
 	http.HandleFunc("/api/characters/wholeness-of-body", handleCharacterWholenessOfBody)
+	http.HandleFunc("/api/characters/divine-intervention", handleCharacterDivineIntervention)
 	http.HandleFunc("/api/characters/fiendish-resilience", handleCharacterFiendishResilience)
 	http.HandleFunc("/api/characters/favored-enemy", handleCharacterFavoredEnemy) // v0.9.87
 	http.HandleFunc("/api/characters/mystic-arcanum", handleCharacterMysticArcanum) // v0.9.93
@@ -1072,6 +1073,16 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mystic_arcanum_used JSONB DEFAULT '[]';
 		-- v1.0.2: Magical Secrets spells for Bards (spells learned from other class lists)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS magical_secrets JSONB DEFAULT '[]';
+		
+		-- v1.0.10: Cleric Divine Intervention (PHB p59)
+		-- Level 10+: Use action to call on deity. Roll d100, if ≤ cleric level, deity intervenes.
+		-- On success: Cannot use again for 7 days (tracked via cooldown_until timestamp)
+		-- On failure: Can try again after long rest
+		-- Level 20: Automatically succeeds (no roll needed)
+		-- divine_intervention_failed = whether it failed since last long rest
+		-- divine_intervention_cooldown_until = timestamp when it can be used again after success
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS divine_intervention_failed BOOLEAN DEFAULT FALSE;
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS divine_intervention_cooldown_until TIMESTAMP;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -10775,6 +10786,65 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 						if actions, ok := opts["actions"].([]string); ok {
 							opts["actions"] = append(actions, fmt.Sprintf("wholeness_of_body (heal %d HP, Way of the Open Hand, once per long rest)", healingAmount))
 						}
+					}
+				}
+			}
+		}
+	}
+	
+	// v1.0.10: Cleric Divine Intervention (level 10+)
+	if strings.ToLower(class) == "cleric" && level >= 10 {
+		var divineInterventionFailed bool
+		var cooldownUntil sql.NullTime
+		db.QueryRow("SELECT COALESCE(divine_intervention_failed, false), divine_intervention_cooldown_until FROM characters WHERE id = $1", charID).Scan(&divineInterventionFailed, &cooldownUntil)
+		
+		now := time.Now()
+		available := true
+		unavailableReason := ""
+		
+		if cooldownUntil.Valid && now.Before(cooldownUntil.Time) {
+			available = false
+			unavailableReason = fmt.Sprintf("On 7-day cooldown until %s after successful intervention", cooldownUntil.Time.Format("2006-01-02 15:04 MST"))
+		} else if divineInterventionFailed {
+			available = false
+			unavailableReason = "Already failed since last long rest. Take a long rest to try again."
+		}
+		
+		autoSuccess := level >= 20
+		
+		divineInterventionInfo := map[string]interface{}{
+			"available":          available,
+			"unavailable_reason": unavailableReason,
+			"auto_success":       autoSuccess,
+			"success_chance":     fmt.Sprintf("%d%% (roll d100 ≤ %d)", level, level),
+			"action_cost":        "1 action",
+			"recovery":           "7 days after success, long rest after failure",
+			"how_to_use":         "POST /api/characters/divine-intervention with character_id",
+			"phb_reference":      "PHB p59",
+		}
+		
+		if autoSuccess {
+			divineInterventionInfo["note"] = "Divine Intervention Improved (Level 20): Your call automatically succeeds!"
+		}
+		
+		if available && !actionUsed {
+			if autoSuccess {
+				divineInterventionInfo["tip"] = "🌟 Divine Intervention ready! At level 20, your deity will automatically answer your call!"
+			} else {
+				divineInterventionInfo["tip"] = fmt.Sprintf("🙏 Divine Intervention ready! Roll d100 ≤ %d (%d%% chance) to call on your deity for aid.", level, level)
+			}
+		}
+		
+		response["divine_intervention"] = divineInterventionInfo
+		
+		// Add to available actions if available and action not spent
+		if available && !actionUsed {
+			if opts, ok := response["your_options"].(map[string]interface{}); ok {
+				if actions, ok := opts["actions"].([]string); ok {
+					if autoSuccess {
+						opts["actions"] = append(actions, "divine_intervention (call on your deity - automatic success at level 20, 7-day cooldown)")
+					} else {
+						opts["actions"] = append(actions, fmt.Sprintf("divine_intervention (call on your deity - %d%% chance, 7-day cooldown on success)", level))
 					}
 				}
 			}
@@ -39785,6 +39855,7 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			hellish_rebuke_used = false,
 			darkness_racial_used = false,
 			wholeness_of_body_used = false,
+			divine_intervention_failed = false,
 			dark_ones_luck_used = false,
 			hurl_through_hell_used = false,
 			invocation_spells_used = '[]',
@@ -47945,6 +48016,279 @@ func handleCharacterWholenessOfBody(w http.ResponseWriter, r *http.Request) {
 		"description":    fmt.Sprintf("%s channels their inner ki, healing %d hit points.", charName, actualHealing),
 		"recovery":       "Take a long rest to regain this feature",
 	})
+}
+
+// handleCharacterDivineIntervention handles the Cleric's Divine Intervention feature (v1.0.10 PHB p59)
+// @Summary Use Divine Intervention (Cleric level 10+)
+// @Description Cleric level 10+ feature: Use your action to call on your deity to intervene. Roll d100, and if the result is equal to or lower than your cleric level, your deity intervenes. If successful, you cannot use this feature again for 7 days. If failed, you can try again after a long rest. At level 20, the roll automatically succeeds.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param character_id query integer false "Character ID (for GET)"
+// @Param request body object{character_id=integer,plea=string} false "Divine Intervention request (for POST)"
+// @Success 200 {object} map[string]interface{} "Divine Intervention status or result"
+// @Failure 400 {object} map[string]interface{} "Invalid request"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Router /characters/divine-intervention [get]
+// @Router /characters/divine-intervention [post]
+func handleCharacterDivineIntervention(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check Divine Intervention status",
+				"usage":   "GET /api/characters/divine-intervention?character_id=X",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var interventionFailed bool
+		var cooldownUntil sql.NullTime
+		err = db.QueryRow(`
+			SELECT class, level, COALESCE(divine_intervention_failed, false), divine_intervention_cooldown_until
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &interventionFailed, &cooldownUntil)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(class) != "cleric" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_cleric",
+				"message": fmt.Sprintf("Only Clerics have Divine Intervention (character is %s)", class),
+			})
+			return
+		}
+		
+		if level < 10 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":      "level_requirement",
+				"message":    fmt.Sprintf("Divine Intervention requires Cleric level 10+ (currently level %d)", level),
+				"unlocks_at": 10,
+			})
+			return
+		}
+		
+		// Check availability
+		now := time.Now()
+		available := true
+		reason := ""
+		
+		if cooldownUntil.Valid && now.Before(cooldownUntil.Time) {
+			available = false
+			reason = fmt.Sprintf("On cooldown until %s (7 days after successful intervention)", cooldownUntil.Time.Format("2006-01-02 15:04 MST"))
+		} else if interventionFailed {
+			available = false
+			reason = "Already failed since last long rest. Take a long rest to try again."
+		}
+		
+		autoSuccess := level >= 20
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":       charID,
+			"class":              class,
+			"level":              level,
+			"feature":            "Divine Intervention",
+			"available":          available,
+			"unavailable_reason": reason,
+			"auto_success":       autoSuccess,
+			"success_chance":     fmt.Sprintf("%d%% (roll d100 ≤ %d)", level, level),
+			"on_success":         "Your deity intervenes. The DM chooses the nature of the intervention. Cannot use again for 7 days.",
+			"on_failure":         "Your call was not answered. Can try again after a long rest.",
+			"action_cost":        "1 action",
+			"how_to_use":         "POST /api/characters/divine-intervention with character_id and optional plea",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Plea        string `json:"plea"` // Optional: description of what help you seek
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Verify ownership and get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var interventionFailed bool
+	var cooldownUntil sql.NullTime
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, COALESCE(divine_intervention_failed, false), 
+		       divine_intervention_cooldown_until, campaign_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &interventionFailed, &cooldownUntil, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only use Divine Intervention for your own characters",
+		})
+		return
+	}
+	
+	// Validate class
+	if strings.ToLower(class) != "cleric" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_cleric",
+			"message": fmt.Sprintf("%s is a %s, not a Cleric. Divine Intervention is a Cleric class feature.", charName, class),
+		})
+		return
+	}
+	
+	if level < 10 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "level_requirement",
+			"message": fmt.Sprintf("%s is level %d. Divine Intervention requires Cleric level 10+.", charName, level),
+		})
+		return
+	}
+	
+	// Check availability
+	now := time.Now()
+	if cooldownUntil.Valid && now.Before(cooldownUntil.Time) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "on_cooldown",
+			"message":       fmt.Sprintf("%s used Divine Intervention successfully and cannot call on their deity again until %s", charName, cooldownUntil.Time.Format("2006-01-02 15:04 MST")),
+			"cooldown_ends": cooldownUntil.Time.Format(time.RFC3339),
+		})
+		return
+	}
+	
+	if interventionFailed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":    "already_failed",
+			"message":  fmt.Sprintf("%s has already called on their deity since the last long rest. Take a long rest before trying again.", charName),
+			"recovery": "long rest",
+		})
+		return
+	}
+	
+	// Level 20: automatic success
+	autoSuccess := level >= 20
+	
+	var roll int
+	var success bool
+	var resultDesc string
+	
+	if autoSuccess {
+		success = true
+		resultDesc = fmt.Sprintf("🌟 Divine Intervention Improved: At level 20, %s's deity automatically answers their call!", charName)
+	} else {
+		// Roll d100
+		roll = game.RollDie(100)
+		success = roll <= level
+		if success {
+			resultDesc = fmt.Sprintf("✨ Divine Intervention succeeds! %s rolls %d (needed ≤ %d). Their deity intervenes!", charName, roll, level)
+		} else {
+			resultDesc = fmt.Sprintf("The heavens are silent. %s rolls %d (needed ≤ %d). The plea goes unanswered... for now.", charName, roll, level)
+		}
+	}
+	
+	// Update database
+	if success {
+		// Set 7-day cooldown
+		cooldownEnd := now.Add(7 * 24 * time.Hour)
+		db.Exec(`
+			UPDATE characters SET 
+				divine_intervention_cooldown_until = $1,
+				divine_intervention_failed = false,
+				action_used = true
+			WHERE id = $2
+		`, cooldownEnd, req.CharacterID)
+	} else {
+		// Mark as failed until long rest
+		db.Exec(`
+			UPDATE characters SET 
+				divine_intervention_failed = true,
+				action_used = true
+			WHERE id = $1
+		`, req.CharacterID)
+	}
+	
+	// Log action if in campaign
+	pleaText := req.Plea
+	if pleaText == "" {
+		pleaText = "aid in their time of need"
+	}
+	if campaignID.Valid {
+		var actionLog string
+		if success {
+			actionLog = fmt.Sprintf("🙏 %s calls upon their deity for %s... %s", charName, pleaText, resultDesc)
+		} else {
+			actionLog = fmt.Sprintf("🙏 %s calls upon their deity for %s... %s", charName, pleaText, resultDesc)
+		}
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'other', $3, NOW())`, campaignID.Int64, req.CharacterID, actionLog)
+	}
+	
+	response := map[string]interface{}{
+		"success":            success,
+		"feature":            "Divine Intervention",
+		"character":          charName,
+		"level":              level,
+		"plea":               pleaText,
+		"result_description": resultDesc,
+		"action_cost":        "1 action",
+	}
+	
+	if autoSuccess {
+		response["auto_success"] = true
+		response["note"] = "Divine Intervention Improved (Level 20): Your call automatically succeeds."
+	} else {
+		response["roll"] = roll
+		response["target"] = level
+		response["roll_description"] = fmt.Sprintf("d100 = %d (needed ≤ %d)", roll, level)
+	}
+	
+	if success {
+		cooldownEnd := now.Add(7 * 24 * time.Hour)
+		response["next_available"] = cooldownEnd.Format(time.RFC3339)
+		response["cooldown"] = "7 days"
+		response["gm_guidance"] = "The DM chooses the nature of the intervention. A Cleric spell or domain spell effect is appropriate. The effect may replicate any Cleric spell of 5th level or lower. The deity may intervene in other ways at DM discretion."
+	} else {
+		response["recovery"] = "Take a long rest to try again"
+	}
+	
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleCharacterFiendishResilience handles choosing damage resistance for Fiend Warlocks level 10+ (v0.9.84 PHB p109)
