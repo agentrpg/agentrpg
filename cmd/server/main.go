@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.8
+// @version 1.0.9
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.8"
+const version = "1.0.9"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -14282,6 +14282,16 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		steelWillActive = true
 	}
 	
+	// v1.0.9: Bard's Countercharm (PHB p54)
+	// Advantage on saves vs charm/frighten when a party Bard is performing Countercharm
+	countercharmActive := false
+	countercharmBard := ""
+	if ccActive, ccBard := checkCountercharmActive(campaignID, req.CharacterID, req.Description); ccActive {
+		req.Advantage = true
+		countercharmActive = true
+		countercharmBard = ccBard
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -14321,6 +14331,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Halfling Brave)"
 		} else if steelWillActive {
 			rollType = "advantage (Steel Will)"
+		} else if countercharmActive {
+			rollType = fmt.Sprintf("advantage (🎵 Countercharm from %s)", countercharmBard)
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = game.RollWithDisadvantage()
@@ -26813,6 +26825,51 @@ func resolveAction(action, description string, charID int) string {
 			searchSkillTitle, searchAbilityName, searchProfNote, searchTotal, searchRoll, searchReliableTalentNote, 
 			searchAbilityMod, searchAbilityName, searchProfBonus, description)
 	
+	case "countercharm":
+		// v1.0.9: Bard's Countercharm (PHB p54)
+		// As an action, start a performance that lasts until end of your next turn.
+		// You and friendly creatures within 30 feet have advantage on saves vs charm/frighten.
+		
+		if strings.ToLower(class) != "bard" {
+			// Check multiclass
+			var classLevelsJSON []byte
+			db.QueryRow("SELECT COALESCE(class_levels, '{}') FROM characters WHERE id = $1", charID).Scan(&classLevelsJSON)
+			var classLevels map[string]int
+			json.Unmarshal(classLevelsJSON, &classLevels)
+			bardLevel := 0
+			for cn, lv := range classLevels {
+				if strings.ToLower(cn) == "bard" {
+					bardLevel = lv
+					break
+				}
+			}
+			if bardLevel < 6 {
+				return "Only Bards level 6+ can use Countercharm!"
+			}
+		} else if level < 6 {
+			return "Countercharm requires Bard level 6+!"
+		}
+		
+		// Check if already performing countercharm
+		var existingCCConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingCCConds)
+		var ccConds []string
+		json.Unmarshal(existingCCConds, &ccConds)
+		for _, c := range ccConds {
+			if strings.HasPrefix(c, "performing_countercharm") {
+				return "You are already performing Countercharm!"
+			}
+		}
+		
+		// Add performing_countercharm:1 condition (1 turn remaining after this one ends)
+		// At end of current turn, we don't decrement (effect is active)
+		// At end of NEXT turn, effect expires
+		ccConds = append(ccConds, "performing_countercharm:1")
+		updatedCCConds, _ := json.Marshal(ccConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedCCConds, charID)
+		
+		return "🎵 Countercharm! You begin a performance of protection. Until the end of your next turn, you and friendly creatures within 30 feet have advantage on saving throws against being frightened or charmed. (Uses your action)"
+	
 	default:
 		return fmt.Sprintf("Action: %s", description)
 	}
@@ -34493,6 +34550,70 @@ func getSongOfRestBonus(campaignID int64, excludeCharID int) (dieSize int, bardN
 	return dieSize, bestBardName, true
 }
 
+// checkCountercharmActive checks if a Bard in the party is performing Countercharm (v1.0.9 PHB p54)
+// Countercharm: Bard level 6+ can use action to grant advantage on saves vs charm/frighten
+// to themselves and allies within 30ft until end of their next turn.
+// Note: Since we don't track positions, we assume party members are within range.
+func checkCountercharmActive(campaignID int, characterID int, description string) (bool, string) {
+	// First check if this save is against charm or frighten effects
+	descLower := strings.ToLower(description)
+	charmKeywords := []string{"charm", "charmed", "charming", "enchant", "beguile", "beguiled", "dominate", "dominated", "hypnot", "entrance", "entranced", "captivate"}
+	frightenKeywords := []string{"frighten", "frightened", "frightening", "fear", "feared", "fearful", "terrify", "terrified", "terror", "scare", "scared", "dread", "panic"}
+	
+	isCharmOrFrighten := false
+	for _, kw := range charmKeywords {
+		if strings.Contains(descLower, kw) {
+			isCharmOrFrighten = true
+			break
+		}
+	}
+	if !isCharmOrFrighten {
+		for _, kw := range frightenKeywords {
+			if strings.Contains(descLower, kw) {
+				isCharmOrFrighten = true
+				break
+			}
+		}
+	}
+	
+	if !isCharmOrFrighten {
+		return false, ""
+	}
+	
+	// Find any Bard in the campaign with "performing_countercharm" condition
+	rows, err := db.Query(`
+		SELECT c.name, c.conditions
+		FROM characters c
+		WHERE c.lobby_id = $1
+		  AND (LOWER(c.class) = 'bard' OR c.class_levels::text ILIKE '%bard%')
+	`, campaignID)
+	if err != nil {
+		return false, ""
+	}
+	defer rows.Close()
+	
+	for rows.Next() {
+		var name string
+		var conditionsJSON []byte
+		if err := rows.Scan(&name, &conditionsJSON); err != nil {
+			continue
+		}
+		
+		var conditions []string
+		if err := json.Unmarshal(conditionsJSON, &conditions); err != nil {
+			continue
+		}
+		
+		for _, cond := range conditions {
+			if strings.HasPrefix(cond, "performing_countercharm") {
+				return true, name
+			}
+		}
+	}
+	
+	return false, ""
+}
+
 // hasEvasion checks if a character has the Evasion feature (Monk 7+, Rogue 7+, or Hunter Ranger 15+ with evasion choice)
 // v0.9.6: Evasion - on DEX save for half damage: success = no damage, fail = half damage
 // v0.9.61: Also check Hunter Ranger's Superior Hunter's Defense choice
@@ -37744,15 +37865,32 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	currentID := entries[turnIndex].ID
 	
 	// Remove "dodging" and "reckless" conditions at end of turn (v0.9.14: added reckless)
+	// v1.0.9: Decrement countercharm duration
 	var condJSON []byte
 	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", currentID).Scan(&condJSON)
 	var conds []string
 	json.Unmarshal(condJSON, &conds)
 	newConds := []string{}
 	for _, c := range conds {
-		if c != "dodging" && c != "reckless" {
-			newConds = append(newConds, c)
+		if c == "dodging" || c == "reckless" {
+			continue // Remove these conditions
 		}
+		// v1.0.9: Handle countercharm duration (performing_countercharm:N)
+		if strings.HasPrefix(c, "performing_countercharm:") {
+			parts := strings.Split(c, ":")
+			if len(parts) == 2 {
+				remaining, err := strconv.Atoi(parts[1])
+				if err == nil {
+					if remaining > 0 {
+						// Decrement and keep
+						newConds = append(newConds, fmt.Sprintf("performing_countercharm:%d", remaining-1))
+					}
+					// If remaining == 0, don't add (effect expires)
+					continue
+				}
+			}
+		}
+		newConds = append(newConds, c)
 	}
 	updatedConds, _ := json.Marshal(newConds)
 	db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, currentID)

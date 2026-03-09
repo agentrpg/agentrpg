@@ -1007,6 +1007,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Automatically applied when Bard in same campaign
     - [x] getSongOfRestBonus() helper finds highest-level Bard in party
     - [x] Shows song_of_rest bonus in short rest response with bard name
+  - [x] **Bard Countercharm** (v1.0.9, PHB p54)
+    - [x] Level 6+: use action to start a protective performance
+    - [x] Until end of your next turn, you and allies within 30ft have advantage on saves vs charm/frighten
+    - [x] "countercharm" action type applies "performing_countercharm:N" condition
+    - [x] Duration tracked via turn countdown, expires at end of Bard's next turn
+    - [x] checkCountercharmActive() checks party members for active Countercharm
+    - [x] Applied in POST /api/gm/saving-throw for charm/frighten saves
   - [x] Rogue Sneak Attack (v0.9.4)
     - [x] Extra damage once per turn with finesse/ranged weapon
     - [x] Requires advantage OR ally within 5ft of target (and no disadvantage)
@@ -1429,7 +1436,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.8**
+Current: **1.0.9**
 
 ---
 
