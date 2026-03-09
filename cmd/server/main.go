@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.1"
+const version = "1.0.2"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1068,6 +1068,8 @@ func initDB() {
 		-- Used tracking stores which levels have been cast: [6, 7]
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mystic_arcanum JSONB DEFAULT '{}';
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS mystic_arcanum_used JSONB DEFAULT '[]';
+		-- v1.0.2: Magical Secrets spells for Bards (spells learned from other class lists)
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS magical_secrets JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2879,6 +2881,49 @@ func recoverClassResources(charID int, isLongRest bool) map[string]int {
 // v0.9.75: now delegates to game.BardicInspirationDie
 func getBardicInspirationDie(level int) int {
 	return game.BardicInspirationDie(level)
+}
+
+// getMagicalSecretsSlots returns the number of Magical Secrets spells available to a Bard (v1.0.2, PHB p54)
+// Lore Bards get Additional Magical Secrets at level 6
+// All Bards get Magical Secrets at levels 10, 14, 18 (2 spells each)
+func getMagicalSecretsSlots(class string, subclass string, level int) int {
+	if strings.ToLower(class) != "bard" {
+		return 0
+	}
+	
+	slots := 0
+	
+	// Lore Bard Additional Magical Secrets (level 6)
+	if strings.ToLower(subclass) == "lore" && level >= 6 {
+		slots += 2
+	}
+	
+	// All Bard Magical Secrets (levels 10, 14, 18)
+	if level >= 10 {
+		slots += 2
+	}
+	if level >= 14 {
+		slots += 2
+	}
+	if level >= 18 {
+		slots += 2
+	}
+	
+	return slots
+}
+
+// isSpellOnClassList checks if a spell is on the given class's spell list
+func isSpellOnClassList(spellSlug, class string) bool {
+	classSpellList := getClassSpellList(class)
+	if classSpellList == nil || len(classSpellList) == 0 {
+		return true // No spell list = no restrictions
+	}
+	for _, cs := range classSpellList {
+		if cs == spellSlug {
+			return true
+		}
+	}
+	return false
 }
 
 // ArmorInfo holds armor data for AC calculation
@@ -39837,12 +39882,14 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	// Verify ownership
 	var ownerID int
 	var knownSpellsJSON []byte
+	var magicalSecretsJSON []byte
 	var class string
+	var subclass sql.NullString
 	var level int
 	err = db.QueryRow(`
-		SELECT agent_id, COALESCE(known_spells, '[]'), class, level
+		SELECT agent_id, COALESCE(known_spells, '[]'), COALESCE(magical_secrets, '[]'), class, subclass, level
 		FROM characters WHERE id = $1
-	`, charID).Scan(&ownerID, &knownSpellsJSON, &class, &level)
+	`, charID).Scan(&ownerID, &knownSpellsJSON, &magicalSecretsJSON, &class, &subclass, &level)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -39857,6 +39904,21 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 	
 	var knownSpells []string
 	json.Unmarshal(knownSpellsJSON, &knownSpells)
+	
+	var magicalSecrets []string
+	json.Unmarshal(magicalSecretsJSON, &magicalSecrets)
+	
+	// Calculate Magical Secrets slots for Bards (v1.0.2)
+	subclassStr := ""
+	if subclass.Valid {
+		subclassStr = subclass.String
+	}
+	magicalSecretsSlots := getMagicalSecretsSlots(class, subclassStr, level)
+	magicalSecretsUsed := len(magicalSecrets)
+	magicalSecretsAvailable := magicalSecretsSlots - magicalSecretsUsed
+	if magicalSecretsAvailable < 0 {
+		magicalSecretsAvailable = 0
+	}
 	
 	if r.Method == "GET" {
 		// Return current known spells with enriched info
@@ -39879,13 +39941,42 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 				})
 			}
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			"character_id": charID,
 			"class":        class,
 			"level":        level,
 			"known_spells": spellsInfo,
 			"count":        len(spellsInfo),
-		})
+		}
+		
+		// v1.0.2: Add Magical Secrets info for Bards
+		if magicalSecretsSlots > 0 {
+			// Enrich magical secrets spells with info
+			magicalSecretsInfo := []map[string]interface{}{}
+			for _, slug := range magicalSecrets {
+				if spell, ok := srdSpellsMemory[slug]; ok {
+					magicalSecretsInfo = append(magicalSecretsInfo, map[string]interface{}{
+						"slug":  slug,
+						"name":  spell.Name,
+						"level": spell.Level,
+					})
+				} else {
+					magicalSecretsInfo = append(magicalSecretsInfo, map[string]interface{}{
+						"slug": slug,
+						"name": slug,
+					})
+				}
+			}
+			response["magical_secrets"] = magicalSecretsInfo
+			response["magical_secrets_slots"] = magicalSecretsSlots
+			response["magical_secrets_used"] = magicalSecretsUsed
+			response["magical_secrets_available"] = magicalSecretsAvailable
+			if magicalSecretsAvailable > 0 {
+				response["magical_secrets_tip"] = fmt.Sprintf("You can learn %d more spell(s) from ANY class via Magical Secrets. Use add=[\"spell-slug\"] to add spells not on the bard list.", magicalSecretsAvailable)
+			}
+		}
+		
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 	
@@ -39901,106 +39992,86 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 		}
 		
 		var newSpells []string
+		var newMagicalSecrets []string
+		magicalSecretsRemaining := magicalSecretsAvailable
+		
+		// Helper to validate and categorize a spell (v1.0.2)
+		validateSpell := func(spellSlug string) (validSlug string, isMagicalSecret bool, errResp map[string]interface{}) {
+			slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
+			
+			// Find the spell in SRD
+			if _, ok := srdSpellsMemory[slugLower]; ok {
+				validSlug = slugLower
+			} else {
+				slugDashed := strings.ReplaceAll(slugLower, " ", "-")
+				if _, ok := srdSpellsMemory[slugDashed]; ok {
+					validSlug = slugDashed
+				} else {
+					return "", false, map[string]interface{}{
+						"error":   "unknown_spell",
+						"message": fmt.Sprintf("Spell '%s' not found in SRD. Check /api/universe/spells for valid spell slugs.", spellSlug),
+					}
+				}
+			}
+			
+			// Check if on class spell list
+			if isSpellOnClassList(validSlug, class) {
+				return validSlug, false, nil
+			}
+			
+			// Not on class list - check Magical Secrets (v1.0.2)
+			if magicalSecretsSlots > 0 {
+				// Check if this spell is already in magical secrets
+				for _, ms := range magicalSecrets {
+					if ms == validSlug {
+						return validSlug, true, nil // Already a magical secret
+					}
+				}
+				// Can we add a new magical secret?
+				if magicalSecretsRemaining > 0 {
+					magicalSecretsRemaining--
+					return validSlug, true, nil
+				}
+				return "", false, map[string]interface{}{
+					"error":   "magical_secrets_full",
+					"message": fmt.Sprintf("'%s' is not on the %s spell list. You have used all %d Magical Secrets slots.", srdSpellsMemory[validSlug].Name, class, magicalSecretsSlots),
+				}
+			}
+			
+			return "", false, map[string]interface{}{
+				"error":   "not_on_class_list",
+				"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[validSlug].Name, class, strings.ToLower(class)),
+			}
+		}
 		
 		if len(req.Spells) > 0 {
 			// Replace entire spell list
 			newSpells = []string{}
+			newMagicalSecrets = []string{}
+			magicalSecretsRemaining = magicalSecretsSlots // Reset for full replacement
+			
 			for _, spellSlug := range req.Spells {
-				slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
-				// Try to find the spell in SRD
-				if _, ok := srdSpellsMemory[slugLower]; ok {
-					// Check class spell list before adding
-					classSpellList := getClassSpellList(class)
-					if classSpellList != nil && len(classSpellList) > 0 {
-						isOnList := false
-						for _, cs := range classSpellList {
-							if cs == slugLower {
-								isOnList = true
-								break
-							}
-						}
-						if !isOnList {
-							json.NewEncoder(w).Encode(map[string]interface{}{
-								"error":   "not_on_class_list",
-								"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[slugLower].Name, class, strings.ToLower(class)),
-							})
-							return
-						}
-					}
-					newSpells = append(newSpells, slugLower)
-				} else {
-					// Try with dashes
-					slugDashed := strings.ReplaceAll(slugLower, " ", "-")
-					if _, ok := srdSpellsMemory[slugDashed]; ok {
-						// Check class spell list before adding
-						classSpellList := getClassSpellList(class)
-						if classSpellList != nil && len(classSpellList) > 0 {
-							isOnList := false
-							for _, cs := range classSpellList {
-								if cs == slugDashed {
-									isOnList = true
-									break
-								}
-							}
-							if !isOnList {
-								json.NewEncoder(w).Encode(map[string]interface{}{
-									"error":   "not_on_class_list",
-									"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[slugDashed].Name, class, strings.ToLower(class)),
-								})
-								return
-							}
-						}
-						newSpells = append(newSpells, slugDashed)
-					} else {
-						json.NewEncoder(w).Encode(map[string]interface{}{
-							"error":   "unknown_spell",
-							"message": fmt.Sprintf("Spell '%s' not found in SRD. Check /api/universe/spells for valid spell slugs.", spellSlug),
-						})
-						return
-					}
+				validSlug, isMagicalSecret, errResp := validateSpell(spellSlug)
+				if errResp != nil {
+					json.NewEncoder(w).Encode(errResp)
+					return
+				}
+				newSpells = append(newSpells, validSlug)
+				if isMagicalSecret {
+					newMagicalSecrets = append(newMagicalSecrets, validSlug)
 				}
 			}
 		} else {
 			// Incremental add/remove
 			newSpells = append([]string{}, knownSpells...) // Copy existing
+			newMagicalSecrets = append([]string{}, magicalSecrets...) // Copy existing magical secrets
 			
 			// Add new spells
 			for _, spellSlug := range req.Add {
-				slugLower := strings.ToLower(strings.TrimSpace(spellSlug))
-				// Try to find the spell in SRD
-				validSlug := ""
-				if _, ok := srdSpellsMemory[slugLower]; ok {
-					validSlug = slugLower
-				} else {
-					slugDashed := strings.ReplaceAll(slugLower, " ", "-")
-					if _, ok := srdSpellsMemory[slugDashed]; ok {
-						validSlug = slugDashed
-					}
-				}
-				if validSlug == "" {
-					json.NewEncoder(w).Encode(map[string]interface{}{
-						"error":   "unknown_spell",
-						"message": fmt.Sprintf("Spell '%s' not found in SRD.", spellSlug),
-					})
+				validSlug, isMagicalSecret, errResp := validateSpell(spellSlug)
+				if errResp != nil {
+					json.NewEncoder(w).Encode(errResp)
 					return
-				}
-				// Check class spell list
-				classSpellList := getClassSpellList(class)
-				if classSpellList != nil && len(classSpellList) > 0 {
-					isOnList := false
-					for _, cs := range classSpellList {
-						if cs == validSlug {
-							isOnList = true
-							break
-						}
-					}
-					if !isOnList {
-						json.NewEncoder(w).Encode(map[string]interface{}{
-							"error":   "not_on_class_list",
-							"message": fmt.Sprintf("'%s' is not on the %s spell list. Check /api/universe/class-spells/%s for available spells.", srdSpellsMemory[validSlug].Name, class, strings.ToLower(class)),
-						})
-						return
-					}
 				}
 				// Check if already known
 				alreadyKnown := false
@@ -40012,6 +40083,19 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 				}
 				if !alreadyKnown {
 					newSpells = append(newSpells, validSlug)
+					if isMagicalSecret {
+						// Check if not already tracked as magical secret
+						alreadyMS := false
+						for _, ms := range newMagicalSecrets {
+							if ms == validSlug {
+								alreadyMS = true
+								break
+							}
+						}
+						if !alreadyMS {
+							newMagicalSecrets = append(newMagicalSecrets, validSlug)
+						}
+					}
 				}
 			}
 			
@@ -40026,12 +40110,22 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 					}
 				}
 				newSpells = filtered
+				
+				// Also remove from magical secrets if present (v1.0.2)
+				filteredMS := []string{}
+				for _, ms := range newMagicalSecrets {
+					if ms != slugLower && ms != slugDashed {
+						filteredMS = append(filteredMS, ms)
+					}
+				}
+				newMagicalSecrets = filteredMS
 			}
 		}
 		
-		// Save to database
+		// Save to database (v1.0.2: also save magical_secrets)
 		newSpellsJSON, _ := json.Marshal(newSpells)
-		_, err = db.Exec(`UPDATE characters SET known_spells = $1 WHERE id = $2`, newSpellsJSON, charID)
+		newMagicalSecretsJSON, _ := json.Marshal(newMagicalSecrets)
+		_, err = db.Exec(`UPDATE characters SET known_spells = $1, magical_secrets = $2 WHERE id = $3`, newSpellsJSON, newMagicalSecretsJSON, charID)
 		if err != nil {
 			json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error"})
 			return
@@ -40050,12 +40144,32 @@ func handleCharacterSpells(w http.ResponseWriter, r *http.Request, charID int) {
 			}
 		}
 		
-		json.NewEncoder(w).Encode(map[string]interface{}{
+		response := map[string]interface{}{
 			"success":      true,
 			"known_spells": spellsInfo,
 			"count":        len(spellsInfo),
 			"message":      fmt.Sprintf("Updated known spells. You now know %d spells.", len(spellsInfo)),
-		})
+		}
+		
+		// v1.0.2: Include magical secrets info for Bards
+		if magicalSecretsSlots > 0 {
+			magicalSecretsInfo := []map[string]interface{}{}
+			for _, slug := range newMagicalSecrets {
+				if spell, ok := srdSpellsMemory[slug]; ok {
+					magicalSecretsInfo = append(magicalSecretsInfo, map[string]interface{}{
+						"slug":  slug,
+						"name":  spell.Name,
+						"level": spell.Level,
+					})
+				}
+			}
+			response["magical_secrets"] = magicalSecretsInfo
+			response["magical_secrets_slots"] = magicalSecretsSlots
+			response["magical_secrets_used"] = len(newMagicalSecrets)
+			response["magical_secrets_available"] = magicalSecretsSlots - len(newMagicalSecrets)
+		}
+		
+		json.NewEncoder(w).Encode(response)
 		return
 	}
 	

@@ -679,6 +679,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Cleric Life domain, Paladin Devotion oath, Warlock Fiend patron
   - [x] `getDomainSpells()` and `getDomainSpellsWithInfo()` helpers
   - [x] Shown in character sheet and `/api/my-turn`
+- [x] **Magical Secrets (Bard)** (v1.0.2, PHB p54)
+  - [x] Bards can learn spells from ANY class spell list
+  - [x] All Bards: 2 spells at level 10, 2 more at 14, 2 more at 18
+  - [x] Lore Bards: Additional 2 spells at level 6
+  - [x] `magical_secrets` JSONB column tracks which spells are from other classes
+  - [x] `getMagicalSecretsSlots()` helper calculates available slots
+  - [x] PUT /api/characters/{id}/spells now allows non-bard spells if slots available
+  - [x] GET shows magical_secrets info with slots used/available
 - [x] **Upcasting (v0.8.28)**
   - [x] Use higher slot for increased effect ("cast fireball at level 5", "at 5th level", etc.)
   - [x] Damage scaling from SRD data (damage_at_slot_level)

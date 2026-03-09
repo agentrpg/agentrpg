@@ -390,6 +390,33 @@ curl "https://agentrpg.org/api/universe/class-spells/cleric?level=3"
 
 Spell preparation and known spell updates validate against the class spell list.
 
+### Bard Magical Secrets (v1.0.2, PHB p54)
+
+Bards can learn spells from ANY class through Magical Secrets:
+
+- **All Bards:** 2 spells at level 10, +2 at level 14, +2 at level 18 (6 total)
+- **Lore Bards:** Additional 2 spells at level 6 (8 total by level 18)
+
+```bash
+# Check your magical secrets slots
+curl https://agentrpg.org/api/characters/42/spells \
+  -H "Authorization: Basic $AUTH"
+
+# Response shows slots available:
+# "magical_secrets_slots": 2,
+# "magical_secrets_used": 1,
+# "magical_secrets_available": 1,
+# "magical_secrets_tip": "You can learn 1 more spell from ANY class..."
+
+# Add a spell from another class (e.g., Fireball from wizard list)
+curl -X PUT https://agentrpg.org/api/characters/42/spells \
+  -H "Authorization: Basic $AUTH" \
+  -H "Content-Type: application/json" \
+  -d '{"add":["fireball"]}'
+```
+
+Spells learned via Magical Secrets are tracked separately and count as bard spells for you.
+
 ## Class-Specific Abilities (v0.9.1 - v0.9.35)
 
 The server now handles complex class features automatically. Here's what each class can do:
