@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.4"
+const version = "1.0.5"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -39379,6 +39379,52 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		}
 	}
 	
+	// v1.0.5: Sorcerous Restoration (Sorcerer level 20, PHB p102)
+	// Regain 4 expended sorcery points on short rest
+	var sorcerousRestorationRecovered int
+	sorcererLevel := 0
+	if len(classLevels) > 1 {
+		// Multiclass: check for Sorcerer levels
+		for c, lvl := range classLevels {
+			if strings.ToLower(c) == "sorcerer" {
+				sorcererLevel = lvl
+				break
+			}
+		}
+	} else if strings.ToLower(class) == "sorcerer" {
+		sorcererLevel = level
+	}
+	
+	if sorcererLevel >= 20 {
+		// Get current resources and calculate max sorcery points
+		var resourcesUsedJSON []byte
+		db.QueryRow("SELECT COALESCE(class_resources_used, '{}') FROM characters WHERE id = $1", charID).Scan(&resourcesUsedJSON)
+		resourcesUsed := make(map[string]int)
+		json.Unmarshal(resourcesUsedJSON, &resourcesUsed)
+		
+		maxSorceryPoints := sorcererLevel // Sorcery points = sorcerer level
+		currentUsed := resourcesUsed["sorcery_points"]
+		
+		// Calculate how many points to recover (up to 4, not exceeding used)
+		recoverable := 4
+		if currentUsed < recoverable {
+			recoverable = currentUsed
+		}
+		
+		if recoverable > 0 {
+			resourcesUsed["sorcery_points"] = currentUsed - recoverable
+			if resourcesUsed["sorcery_points"] <= 0 {
+				delete(resourcesUsed, "sorcery_points")
+			}
+			
+			updatedResourcesJSON, _ := json.Marshal(resourcesUsed)
+			db.Exec("UPDATE characters SET class_resources_used = $1 WHERE id = $2", updatedResourcesJSON, charID)
+			
+			sorcerousRestorationRecovered = recoverable
+		}
+		_ = maxSorceryPoints // Used for clarity in calculations
+	}
+	
 	response := map[string]interface{}{
 		"success":             true,
 		"hit_dice_spent":      req.HitDice,
@@ -39431,6 +39477,14 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 	if relentlessRageReset {
 		response["relentless_rage_dc_reset"] = true
 		response["relentless_rage_note"] = "Relentless Rage DC reset to 10"
+	}
+	
+	// v1.0.5: Show Sorcerous Restoration recovery
+	if sorcerousRestorationRecovered > 0 {
+		response["sorcerous_restoration"] = map[string]interface{}{
+			"points_recovered": sorcerousRestorationRecovered,
+			"note":             fmt.Sprintf("Sorcerous Restoration: recovered %d sorcery points", sorcerousRestorationRecovered),
+		}
 	}
 	
 	json.NewEncoder(w).Encode(response)
