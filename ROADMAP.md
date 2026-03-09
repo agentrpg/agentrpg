@@ -1039,8 +1039,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Extra turn automatically added in combat/start
     - [x] Extra turn removed when advancing to round 2
     - [x] Includes class_feature_notes in combat/start response
-  - [x] Level 20 Capstone Features (v0.9.44, v1.0.5)
+  - [x] Level 20 Capstone Features (v0.9.44, v1.0.5, v1.0.7)
     - [x] Feral Instinct (Barbarian 7+): Advantage on initiative rolls
+    - [x] **Primal Champion (Barbarian 20, v1.0.7, PHB p49)**: +4 to STR and CON, max 24
+      - [x] hasPrimalChampion() helper function checks class/level/multiclass
+      - [x] getEffectiveAbilityScore() applies +4 bonus for STR/CON
+      - [x] getAbilityScoreMax() returns 24 for STR/CON, 20 otherwise
+      - [x] Character sheet (GET /api/characters/{id}) shows effective scores
+      - [x] /api/my-turn shows effective scores
+      - [x] ASI handler allows max 24 for STR/CON with Primal Champion
+      - [x] Supports multiclass (checks Barbarian level, not total level)
     - [x] Superior Inspiration (Bard 20): Regain 1 Bardic Inspiration when rolling initiative with 0
     - [x] Perfect Self (Monk 20): Regain 4 Ki when rolling initiative with 0
     - [x] **Sorcerous Restoration (Sorcerer 20, v1.0.5, PHB p102)**: Regain 4 sorcery points on short rest
@@ -1412,7 +1420,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.6**
+Current: **1.0.7**
 
 ---
 

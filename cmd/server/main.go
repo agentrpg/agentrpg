@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.6
+// @version 1.0.7
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.6"
+const version = "1.0.7"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2268,6 +2268,56 @@ func checkRelentlessRage(characterID int, currentHP int, damage int, maxHP int) 
 	msg := fmt.Sprintf("🔥 %s's Relentless Rage triggers! CON save DC %d: rolled %d + %d = %d - FAILED. Drops to 0 HP.", 
 		charName, dc, roll, conMod, total)
 	return 0, false, msg
+}
+
+// v1.0.7: Primal Champion (Barbarian 20, PHB p49)
+// At 20th level, Barbarians embody the power of the wilds. STR and CON increase by 4, max becomes 24.
+// hasPrimalChampion checks if a character has the Primal Champion feature
+func hasPrimalChampion(class string, level int, classLevels map[string]int) bool {
+	// Check multiclass first
+	if len(classLevels) > 0 {
+		for c, lvl := range classLevels {
+			if strings.ToLower(c) == "barbarian" && lvl >= 20 {
+				return true
+			}
+		}
+		return false
+	}
+	// Single class check
+	return strings.ToLower(class) == "barbarian" && level >= 20
+}
+
+// hasPrimalChampionByID checks Primal Champion by character ID
+func hasPrimalChampionByID(characterID int) bool {
+	var class string
+	var level int
+	var classLevelsJSON []byte
+	err := db.QueryRow("SELECT class, level, COALESCE(class_levels, '{}') FROM characters WHERE id = $1", characterID).Scan(&class, &level, &classLevelsJSON)
+	if err != nil {
+		return false
+	}
+	var classLevels map[string]int
+	json.Unmarshal(classLevelsJSON, &classLevels)
+	return hasPrimalChampion(class, level, classLevels)
+}
+
+// getEffectiveAbilityScore returns the ability score with Primal Champion bonus applied if applicable
+// Primal Champion adds +4 to STR and CON for level 20 Barbarians
+func getEffectiveAbilityScore(baseScore int, ability string, class string, level int, classLevels map[string]int) int {
+	ability = strings.ToLower(ability)
+	if (ability == "str" || ability == "strength" || ability == "con" || ability == "constitution") && hasPrimalChampion(class, level, classLevels) {
+		return baseScore + 4
+	}
+	return baseScore
+}
+
+// getAbilityScoreMax returns the maximum allowed ability score (normally 20, but 24 for STR/CON with Primal Champion)
+func getAbilityScoreMax(ability string, class string, level int, classLevels map[string]int) int {
+	ability = strings.ToLower(ability)
+	if (ability == "str" || ability == "strength" || ability == "con" || ability == "constitution") && hasPrimalChampion(class, level, classLevels) {
+		return 24
+	}
+	return 20
 }
 
 // isDwarf checks if a character is a dwarf (v0.9.51 - Dwarven Resilience)
@@ -8600,6 +8650,10 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	
+	// v1.0.7: Calculate effective STR/CON with Primal Champion bonus
+	effectiveStr := getEffectiveAbilityScore(str, "str", class, level, classLevels)
+	effectiveCon := getEffectiveAbilityScore(con, "con", class, level, classLevels)
+	
 	response := map[string]interface{}{
 		"id": charID, "name": name, "class": class, "race": race,
 		"subclass": subclassInfo,
@@ -8608,11 +8662,11 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		"hp": hp, "max_hp": maxHP, "temp_hp": tempHP, 
 		"ac": ac, "effective_ac": effectiveAC,
 		"stats": map[string]int{
-			"str": str, "dex": dex, "con": con,
+			"str": effectiveStr, "dex": dex, "con": effectiveCon,
 			"int": intl, "wis": wis, "cha": cha,
 		},
 		"modifiers": map[string]int{
-			"str": game.Modifier(str), "dex": game.Modifier(dex), "con": game.Modifier(con),
+			"str": game.Modifier(effectiveStr), "dex": game.Modifier(dex), "con": game.Modifier(effectiveCon),
 			"int": game.Modifier(intl), "wis": game.Modifier(wis), "cha": game.Modifier(cha),
 		},
 		"conditions":          conditions,
@@ -9573,6 +9627,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	var wildShapeForm sql.NullString
 	var wildShapeHP, wildShapeMaxHP sql.NullInt64
 	var pactBoonMyTurn sql.NullString // v0.9.78: Warlock Pact Boon
+	var classLevelsJSONMyTurn []byte // v1.0.7: For Primal Champion
 	err = db.QueryRow(`
 		SELECT c.id, c.name, c.class, c.race, COALESCE(c.subclass, ''), c.level, c.hp, c.max_hp, c.ac,
 			c.str, c.dex, c.con, c.intl, c.wis, c.cha,
@@ -9588,7 +9643,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			c.mounted_on_creature, c.mount_is_controlled,
 			c.attacks_remaining,
 			COALESCE(c.subclass_choices, '{}'), COALESCE(c.horde_breaker_used, false),
-			c.wild_shape_form, c.wild_shape_hp, c.wild_shape_max_hp, c.pact_boon
+			c.wild_shape_form, c.wild_shape_hp, c.wild_shape_max_hp, c.pact_boon,
+			COALESCE(c.class_levels, '{}')
 		FROM characters c
 		JOIN lobbies l ON c.lobby_id = l.id
 		WHERE c.agent_id = $1 AND l.status = 'active'
@@ -9601,7 +9657,7 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		&charElectrum, &charPlatinum, &pendingASI,
 		&actionUsed, &bonusActionUsed, &movementRemaining, &bonusActionSpellCast, &campaignDocRaw,
 		&mountedOnCreature, &mountIsControlled, &attacksRemaining, &subclassChoicesJSON, &hordeUsed,
-		&wildShapeForm, &wildShapeHP, &wildShapeMaxHP, &pactBoonMyTurn)
+		&wildShapeForm, &wildShapeHP, &wildShapeMaxHP, &pactBoonMyTurn, &classLevelsJSONMyTurn)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -9901,14 +9957,28 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		},
 		"gold":              charGold, // Keep for backwards compatibility
 		"pending_asi":       pendingASI,
-		"stats": map[string]int{
-			"str": str, "dex": dex, "con": con,
-			"int": intl, "wis": wis, "cha": cha,
-		},
-		"modifiers": map[string]int{
-			"str": game.Modifier(str), "dex": game.Modifier(dex), "con": game.Modifier(con),
-			"int": game.Modifier(intl), "wis": game.Modifier(wis), "cha": game.Modifier(cha),
-		},
+		"stats": func() map[string]int {
+			// v1.0.7: Apply Primal Champion bonus to STR/CON for level 20 Barbarians
+			var classLevelsMyTurn map[string]int
+			json.Unmarshal(classLevelsJSONMyTurn, &classLevelsMyTurn)
+			effectiveStr := getEffectiveAbilityScore(str, "str", class, level, classLevelsMyTurn)
+			effectiveCon := getEffectiveAbilityScore(con, "con", class, level, classLevelsMyTurn)
+			return map[string]int{
+				"str": effectiveStr, "dex": dex, "con": effectiveCon,
+				"int": intl, "wis": wis, "cha": cha,
+			}
+		}(),
+		"modifiers": func() map[string]int {
+			// v1.0.7: Apply Primal Champion bonus to STR/CON modifiers
+			var classLevelsMyTurn map[string]int
+			json.Unmarshal(classLevelsJSONMyTurn, &classLevelsMyTurn)
+			effectiveStr := getEffectiveAbilityScore(str, "str", class, level, classLevelsMyTurn)
+			effectiveCon := getEffectiveAbilityScore(con, "con", class, level, classLevelsMyTurn)
+			return map[string]int{
+				"str": game.Modifier(effectiveStr), "dex": game.Modifier(dex), "con": game.Modifier(effectiveCon),
+				"int": game.Modifier(intl), "wis": game.Modifier(wis), "cha": game.Modifier(cha),
+			}
+		}(),
 	}
 	
 	// v0.9.41: Add equipped weapons to character info
@@ -39750,10 +39820,15 @@ func handleCharacterASI(w http.ResponseWriter, r *http.Request, charID int) {
 	// Verify ownership
 	var ownerID, pendingASI int
 	var str, dex, con, intl, wis, cha int
+	var asiClass string
+	var asiLevel int
+	var asiClassLevelsJSON []byte
 	err = db.QueryRow(`
-		SELECT agent_id, COALESCE(pending_asi, 0), str, dex, con, intl, wis, cha 
+		SELECT agent_id, COALESCE(pending_asi, 0), str, dex, con, intl, wis, cha,
+			class, level, COALESCE(class_levels, '{}')
 		FROM characters WHERE id = $1
-	`, charID).Scan(&ownerID, &pendingASI, &str, &dex, &con, &intl, &wis, &cha)
+	`, charID).Scan(&ownerID, &pendingASI, &str, &dex, &con, &intl, &wis, &cha,
+		&asiClass, &asiLevel, &asiClassLevelsJSON)
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
@@ -39822,12 +39897,15 @@ func handleCharacterASI(w http.ResponseWriter, r *http.Request, charID int) {
 		return
 	}
 	
-	// Check max (20)
+	// v1.0.7: Check max (20, or 24 for STR/CON with Primal Champion)
+	var asiClassLevels map[string]int
+	json.Unmarshal(asiClassLevelsJSON, &asiClassLevels)
+	abilityMax := getAbilityScoreMax(ability, asiClass, asiLevel, asiClassLevels)
 	newVal := currentVal + req.Points
-	if newVal > 20 {
+	if newVal > abilityMax {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":   "exceeds_maximum",
-			"message": fmt.Sprintf("Cannot increase %s above 20. Current: %d, Requested increase: %d", ability, currentVal, req.Points),
+			"message": fmt.Sprintf("Cannot increase %s above %d. Current: %d, Requested increase: %d", ability, abilityMax, currentVal, req.Points),
 		})
 		return
 	}
