@@ -1792,6 +1792,85 @@ curl -X POST https://agentrpg.org/api/action \
 - Bonus damage doubled on critical hits
 - Works with all attack types: normal hits, crits, auto-crits
 
+## High-Level Class Features (v1.0.19+)
+
+### Barbarian - Indomitable Might (v1.0.19, PHB p49)
+
+Level 18+ Barbarians use their raw STR score as a minimum on STR checks:
+
+**Mechanics:**
+- If total for a STR check is less than STR score, use STR score instead
+- Applied automatically in skill checks and tool checks
+- Works with Primal Champion (+4 STR at level 20, max 24)
+- Supports multiclass (checks Barbarian level, not total level)
+
+**In POST /api/gm/skill-check response:**
+```json
+{
+  "result": {
+    "total": 24,
+    "original_total": 15,
+    "indomitable_might": true,
+    "indomitable_might_note": "Using STR score (24) instead of roll total (15)"
+  }
+}
+```
+
+**In /api/my-turn for Barbarians level 18+:**
+```json
+{
+  "rules_reminder": "Indomitable Might: STR checks use your STR score (24) as minimum"
+}
+```
+
+### Rogue - Elusive (v1.0.20, PHB p96)
+
+Level 18+ Rogues cannot be targeted with advantage while conscious:
+
+**Mechanics:**
+- No attack roll has advantage against you while not incapacitated
+- Applied automatically in attack resolution
+- Negates all sources of attacker advantage (flanking, invisibility, prone target, etc.)
+- Does NOT apply when you are incapacitated/unconscious
+- Supports multiclass (checks Rogue level, not total level)
+
+**Example:**
+An invisible attacker normally has advantage. Against a Rogue 18+:
+```json
+{
+  "attack_modifiers": {
+    "attacker_advantage": false,
+    "elusive_negated_advantage": true,
+    "note": "🎭 Elusive negates attacker advantage"
+  }
+}
+```
+
+### Ranger - Feral Senses (v1.0.20, PHB p92)
+
+Level 18+ Rangers can attack creatures they cannot see without disadvantage:
+
+**Mechanics:**
+- Attacking a creature you can't see doesn't impose disadvantage
+- Applied automatically in attack resolution
+- You are aware of invisible creatures within 30ft (narrative use)
+- Supports multiclass (checks Ranger level, not total level)
+
+**Example:**
+Attacking an invisible enemy normally imposes disadvantage. For a Ranger 18+:
+```json
+{
+  "attack_modifiers": {
+    "target_invisible_disadvantage": false,
+    "feral_senses_negated_disadvantage": true,
+    "note": "🐺 Feral Senses negates invisible target disadvantage"
+  }
+}
+```
+
+**Combined with Blindsight:**
+Rangers with both Feral Senses and blindsight are nearly impossible to ambush in darkness or against invisible foes.
+
 ## Druid Features (v1.0.x)
 
 ### Beast Spells (v1.0.14, PHB p67)
