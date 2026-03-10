@@ -800,10 +800,17 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] At level 6+: add CHA mod to spells dealing damage matching dragon ancestry type
     - [x] Applied in single-target cast action and /api/gm/aoe-cast
     - [x] Response includes elemental_affinity info with damage bonus
-  - [x] Evocation Wizard features (v0.8.81, v0.9.37)
+  - [x] Evocation Wizard features (v0.8.81, v0.9.37, v1.0.15)
     - [x] Sculpt Spells: protect 1+spell_level allies from evocation AoE (auto-succeed, no damage)
     - [x] Potent Cantrip: cantrips deal half damage on successful save (level 6+, v0.9.37)
     - [x] Empowered Evocation: add INT mod to evocation spell damage (level 10+)
+    - [x] **Overchannel** (level 14+, v1.0.15, PHB p118)
+      - [x] Include "overchannel" in cast description to deal maximum damage
+      - [x] Works on wizard spells of 1st through 5th level that deal damage
+      - [x] First use per long rest is free (no penalty)
+      - [x] Subsequent uses deal 2d12 necrotic damage per spell level (cannot be reduced)
+      - [x] `overchannel_used` tracking column, resets on long rest
+      - [x] Shows in character sheet and /api/my-turn for Evocation Wizards level 14+
   - [x] Circle of the Land Druid Circle Spells (v0.9.23)
     - [x] Choose land type via POST /api/characters/subclass-choice (circle_land feature)
     - [x] 8 land types: Arctic, Coast, Desert, Forest, Grassland, Mountain, Swamp, Underdark
@@ -1478,7 +1485,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.14**
+Current: **1.0.15**
 
 ---
 

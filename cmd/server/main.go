@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.14"
+const version = "1.0.15"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -1103,6 +1103,11 @@ func initDB() {
 		-- Cast each once at 3rd level without expending a spell slot. Resets on long rest.
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS signature_spells JSONB DEFAULT '[]';
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS signature_spells_used JSONB DEFAULT '[]';
+		
+		-- v1.0.15: Evocation Wizard Overchannel (PHB p118)
+		-- Level 14: Deal maximum damage with wizard spell of 1st-5th level.
+		-- First use per long rest is free. Subsequent uses: 2d12 necrotic per spell level.
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS overchannel_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -9717,6 +9722,28 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v1.0.15: Evocation Wizard Overchannel (level 14+)
+	if wizardLevel >= 14 {
+		var wizSubclass sql.NullString
+		db.QueryRow("SELECT subclass FROM characters WHERE id = $1", charID).Scan(&wizSubclass)
+		if wizSubclass.Valid && wizSubclass.String == "evocation" {
+			var overchannelUsed bool
+			db.QueryRow("SELECT COALESCE(overchannel_used, false) FROM characters WHERE id = $1", charID).Scan(&overchannelUsed)
+			
+			response["overchannel"] = map[string]interface{}{
+				"available":       true,
+				"used":            overchannelUsed,
+				"first_use_free":  !overchannelUsed,
+				"penalty_warning": "Subsequent uses deal 2d12 necrotic per spell level (cannot be reduced)",
+				"valid_spells":    "Wizard spells of 1st through 5th level that deal damage",
+				"how_to_use":      "Include 'overchannel' in cast description (e.g., 'overchannel fireball')",
+				"recovers_on":     "long rest",
+				"description":     "Deal maximum damage with a wizard spell. First use is free; subsequent uses inflict necrotic backlash.",
+				"phb_reference":   "PHB p118 - Evocation Wizard",
+			}
+		}
+	}
+	
 	// v0.9.87: Ranger Favored Enemy info
 	if strings.ToLower(class) == "ranger" {
 		favoredEnemies := getFavoredEnemies(charID)
@@ -11381,6 +11408,36 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		response["signature_spells"] = sigSpellsInfo
+	}
+	
+	// v1.0.15: Evocation Wizard Overchannel (level 14+)
+	if wizardLevelMyTurn >= 14 {
+		var wizSubclass sql.NullString
+		db.QueryRow("SELECT subclass FROM characters WHERE id = $1", charID).Scan(&wizSubclass)
+		if wizSubclass.Valid && wizSubclass.String == "evocation" {
+			var overchannelUsed bool
+			db.QueryRow("SELECT COALESCE(overchannel_used, false) FROM characters WHERE id = $1", charID).Scan(&overchannelUsed)
+			
+			overchannelInfo := map[string]interface{}{
+				"available":       true,
+				"used":            overchannelUsed,
+				"first_use_free":  !overchannelUsed,
+				"penalty_warning": "Subsequent uses deal 2d12 necrotic per spell level (cannot be reduced)",
+				"valid_spells":    "Wizard spells of 1st through 5th level that deal damage",
+				"how_to_use":      "Include 'overchannel' in cast description (e.g., 'overchannel fireball')",
+				"recovers_on":     "long rest",
+				"description":     "Deal maximum damage with a wizard spell. First use is free; subsequent uses inflict necrotic backlash.",
+				"phb_reference":   "PHB p118 - Evocation Wizard",
+			}
+			
+			if !overchannelUsed {
+				overchannelInfo["tip"] = "💥 Overchannel is ready! Your first use this rest deals max damage for free."
+			} else {
+				overchannelInfo["tip"] = "⚠️ You've used Overchannel. Further uses will deal necrotic damage to you (2d12 per spell level)."
+			}
+			
+			response["overchannel"] = overchannelInfo
+		}
 	}
 	
 	// v0.9.88: Fighter Indomitable (level 9+)
@@ -25104,7 +25161,65 @@ func resolveAction(action, description string, charID int) string {
 					damageDice = game.ScaledCantripDamage(spell.DamageAtCharLevel, level)
 				}
 				
-				dmg := game.RollDamage(damageDice, false)
+				// v1.0.15: Overchannel (Evocation Wizard level 14+, PHB p118)
+				// Deal maximum damage with wizard spell of 1st-5th level
+				// First use per long rest is free. Subsequent uses: 2d12 necrotic per spell level
+				useOverchannel := strings.Contains(descLower, "overchannel") || strings.Contains(descLower, "over channel")
+				overchannelNote := ""
+				overchannelPenaltyNote := ""
+				
+				if useOverchannel {
+					// Check wizard level
+					wizardLevel := getWizardLevel(charID)
+					
+					// Check subclass
+					var wizSubclass sql.NullString
+					db.QueryRow("SELECT subclass FROM characters WHERE id = $1", charID).Scan(&wizSubclass)
+					isEvocationWizard := wizSubclass.Valid && wizSubclass.String == "evocation"
+					
+					if wizardLevel < 14 || !isEvocationWizard {
+						return "Overchannel requires Evocation Wizard level 14+ (PHB p118)"
+					}
+					
+					if spell.Level < 1 || spell.Level > 5 {
+						return fmt.Sprintf("Overchannel only works on wizard spells of 1st through 5th level. %s is level %d.", spell.Name, spell.Level)
+					}
+					
+					// Check if first use this long rest (free) or subsequent (necrotic penalty)
+					var overchannelUsed bool
+					db.QueryRow("SELECT COALESCE(overchannel_used, false) FROM characters WHERE id = $1", charID).Scan(&overchannelUsed)
+					
+					if overchannelUsed {
+						// Subsequent use - take 2d12 necrotic damage per spell level
+						necroticDamage := 0
+						for i := 0; i < slotLevel; i++ {
+							necroticDamage += game.RollDie(12) + game.RollDie(12)
+						}
+						
+						// Apply necrotic damage to caster (ignores resistance and immunity per PHB)
+						var currentHP, maxHP int
+						db.QueryRow("SELECT hp, max_hp FROM characters WHERE id = $1", charID).Scan(&currentHP, &maxHP)
+						newHP := currentHP - necroticDamage
+						if newHP < 0 {
+							newHP = 0
+						}
+						db.Exec("UPDATE characters SET hp = $1 WHERE id = $2", newHP, charID)
+						
+						overchannelPenaltyNote = fmt.Sprintf(" ⚠️ Overchannel penalty: took %d necrotic damage (cannot be reduced)!", necroticDamage)
+					} else {
+						// Mark first use
+						db.Exec("UPDATE characters SET overchannel_used = true WHERE id = $1", charID)
+					}
+					
+					overchannelNote = " (Overchannel: maximum damage)"
+				}
+				
+				var dmg int
+				if useOverchannel {
+					dmg = game.RollDamageMax(damageDice)
+				} else {
+					dmg = game.RollDamage(damageDice, false)
+				}
 				
 				// v0.9.38: Elemental Affinity (Draconic Sorcerer level 6+)
 				// Add CHA mod to damage when spell damage type matches dragon ancestry
@@ -25149,7 +25264,7 @@ func resolveAction(action, description string, charID int) string {
 				if spell.SavingThrow != "" {
 					saveInfo = fmt.Sprintf(" (DC %d %s save for half)", saveDC, spell.SavingThrow)
 				}
-				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, eldritchSpearNote, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, atWillInvocationNote, spell.Description)
+				return fmt.Sprintf("Cast %s%s! %d %s damage%s.%s%s%s%s%s%s%s%s%s%s%s %s", spell.Name, upcastInfo, dmg, spell.DamageType, saveInfo, overchannelNote, overchannelPenaltyNote, elementalAffinityNote, agonizingBlastNote, repellingBlastNote, eldritchSpearNote, metamagicNote, materialConsumedNote, invocationUsedNote, mysticArcanumNote, atWillInvocationNote, spell.Description)
 			} else if spell.Healing != "" {
 				// Check for upcast healing
 				healDice := spell.Healing
@@ -40418,7 +40533,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			mystic_arcanum_used = '[]',
 			stroke_of_luck_used = false,
 			eldritch_master_used = false,
-			signature_spells_used = '[]'
+			signature_spells_used = '[]',
+			overchannel_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
