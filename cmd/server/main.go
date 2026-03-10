@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.20
+// @version 1.0.21
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.20"
+const version = "1.0.21"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2668,6 +2668,57 @@ func checkSteelWill(characterID int, description string) bool {
 	descLower := strings.ToLower(description)
 	frightenedKeywords := []string{"frighten", "frightened", "frightening", "fear", "feared", "fearful", "terrify", "terrified", "terror", "scare", "scared", "dread", "panic"}
 	for _, keyword := range frightenedKeywords {
+		if strings.Contains(descLower, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasLandsStride returns true if character has Land's Stride feature (v1.0.21)
+// Rangers get it at level 8 (PHB p91), Circle of the Land Druids get it at level 6 (PHB p68)
+func hasLandsStride(characterID int) bool {
+	var class, subclass string
+	var level int
+	err := db.QueryRow(`
+		SELECT COALESCE(class, ''), COALESCE(subclass, ''), level 
+		FROM characters WHERE id = $1
+	`, characterID).Scan(&class, &subclass, &level)
+	if err != nil {
+		return false
+	}
+	classLower := strings.ToLower(class)
+	subclassLower := strings.ToLower(subclass)
+	
+	// Ranger gets Land's Stride at level 8
+	if classLower == "ranger" && level >= 8 {
+		return true
+	}
+	
+	// Circle of the Land Druid gets Land's Stride at level 6
+	if classLower == "druid" && subclassLower == "land" && level >= 6 {
+		return true
+	}
+	
+	return false
+}
+
+// checkLandsStride returns true if Land's Stride grants advantage on this save (v1.0.21)
+// Advantage on saving throws against plants that are magically created or manipulated
+// to impede movement, such as those created by the entangle spell (PHB p68, p91)
+func checkLandsStride(characterID int, description string) bool {
+	if !hasLandsStride(characterID) {
+		return false
+	}
+	// Check if the save is against plant magic that impedes movement
+	// Key spells: Entangle, Spike Growth, Wall of Thorns, Plant Growth, Grasping Vine
+	descLower := strings.ToLower(description)
+	plantMagicKeywords := []string{
+		"entangle", "spike growth", "wall of thorns", "plant growth", "grasping vine",
+		"thorn", "vine", "bramble", "root", "plants impede", "plant creature",
+		"magical plant", "magical vegetation", "vegetation impede",
+	}
+	for _, keyword := range plantMagicKeywords {
 		if strings.Contains(descLower, keyword) {
 			return true
 		}
@@ -14900,6 +14951,16 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		steelWillActive = true
 	}
 	
+	// v1.0.21: Land's Stride (PHB p68, p91)
+	// Advantage on saving throws against plants that are magically created or manipulated
+	// to impede movement (entangle, spike growth, wall of thorns, etc.)
+	// Rangers get at level 8, Circle of the Land Druids get at level 6
+	landsStrideActive := false
+	if checkLandsStride(req.CharacterID, req.Description) {
+		req.Advantage = true
+		landsStrideActive = true
+	}
+	
 	// v1.0.9: Bard's Countercharm (PHB p54)
 	// Advantage on saves vs charm/frighten when a party Bard is performing Countercharm
 	countercharmActive := false
@@ -14957,6 +15018,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Halfling Brave)"
 		} else if steelWillActive {
 			rollType = "advantage (Steel Will)"
+		} else if landsStrideActive {
+			rollType = "advantage (🌿 Land's Stride)"
 		} else if countercharmActive {
 			rollType = fmt.Sprintf("advantage (🎵 Countercharm from %s)", countercharmBard)
 		} else if holyNimbusActive {
@@ -35676,7 +35739,7 @@ var classFeatures = map[string][]ClassFeature{
 		{Name: "Extra Attack", Level: 5, Description: "You can attack twice, instead of once, whenever you take the Attack action on your turn.", Mechanics: map[string]string{"extra_attack": "1"}},
 		{Name: "Favored Enemy (Additional)", Level: 6, Description: "Choose an additional favored enemy, as well as another language.", Mechanics: map[string]string{"favored_enemy": "2"}},
 		{Name: "Natural Explorer (Additional)", Level: 6, Description: "Choose an additional favored terrain.", Mechanics: map[string]string{"natural_explorer": "2"}},
-		{Name: "Land's Stride", Level: 8, Description: "Moving through nonmagical difficult terrain costs you no extra movement. You can also pass through nonmagical plants without being slowed by them and without taking damage from them.", Mechanics: map[string]string{"lands_stride": "true"}},
+		{Name: "Land's Stride", Level: 8, Description: "Moving through nonmagical difficult terrain costs you no extra movement. You can also pass through nonmagical plants without being slowed by them and without taking damage from them. In addition, you have advantage on saving throws against plants that are magically created or manipulated to impede movement, such as those created by the entangle spell.", Mechanics: map[string]string{"lands_stride": "true"}},
 		{Name: "Hide in Plain Sight", Level: 10, Description: "You can spend 1 minute creating camouflage for yourself. You must have access to fresh mud, dirt, plants, soot, and other naturally occurring materials. Once you are camouflaged, you can try to hide by pressing yourself up against a solid surface that is at least as tall and wide as you are.", Mechanics: map[string]string{"hide_in_plain_sight": "true"}},
 		{Name: "Natural Explorer (Additional)", Level: 10, Description: "Choose an additional favored terrain.", Mechanics: map[string]string{"natural_explorer": "3"}},
 		{Name: "Vanish", Level: 14, Description: "You can use the Hide action as a bonus action on your turn. Also, you can't be tracked by nonmagical means, unless you choose to leave a trail.", Mechanics: map[string]string{"vanish": "true"}},

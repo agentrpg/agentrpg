@@ -817,6 +817,15 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Circle spells always prepared, don't count against prepared spell limit
     - [x] Unlock at druid levels 3, 5, 7, 9 (for 2nd, 3rd, 4th, 5th level spells)
     - [x] Shows in character sheet, /api/my-turn, and spell preparation endpoints
+  - [x] **Land's Stride** (v1.0.21, PHB p68 for Druids, PHB p91 for Rangers)
+    - [x] Circle of the Land Druids get at level 6
+    - [x] Rangers get at level 8
+    - [x] Advantage on saving throws against plants magically created/manipulated to impede movement
+    - [x] Works for spells like Entangle, Spike Growth, Wall of Thorns, Grasping Vine
+    - [x] hasLandsStride() helper checks class/subclass/level requirements
+    - [x] checkLandsStride() detects plant magic keywords in save description
+    - [x] Applied in POST /api/gm/saving-throw
+    - [x] Shows "🌿 Land's Stride" in advantage notation
   - [x] Fiend Warlock features (v0.8.86, v0.9.66, v0.9.84)
     - [x] Dark One's Blessing: gain temp HP (CHA mod + warlock level, min 1) when reducing hostile creature to 0 HP
     - [x] Dark One's Own Luck (v0.9.66, PHB p109)
@@ -1526,7 +1535,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.20**
+Current: **1.0.21**
 
 ---
 

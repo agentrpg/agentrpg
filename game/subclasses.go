@@ -396,7 +396,7 @@ var AvailableSubclasses = map[string]Subclass{
 			{
 				Name:        "Land's Stride",
 				Level:       6,
-				Description: "Moving through nonmagical difficult terrain costs you no extra movement. You can also pass through nonmagical plants without being slowed by them and without taking damage from them if they have thorns, spines, or a similar hazard.",
+				Description: "Moving through nonmagical difficult terrain costs you no extra movement. You can also pass through nonmagical plants without being slowed by them and without taking damage from them if they have thorns, spines, or a similar hazard. In addition, you have advantage on saving throws against plants that are magically created or manipulated to impede movement, such as those created by the entangle spell.",
 				Mechanics: map[string]string{
 					"lands_stride": "true",
 				},
