@@ -1002,6 +1002,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Can reduce damage to 0 (graceful landing)
     - [x] Handles multiclass monks (uses monk class level, not total level)
     - [x] Consumes reaction
+  - [x] **Diamond Soul** (Monk level 14+, v1.0.17, PHB p79)
+    - [x] Proficiency in ALL saving throws (passive, applied in POST /api/gm/saving-throw)
+    - [x] POST /api/gm/diamond-soul — spend 1 ki to reroll a failed saving throw
+    - [x] Must use the new roll result
+    - [x] Halfling Lucky applies to the reroll
+    - [x] Handles multiclass monks (uses monk class level, not total level)
+    - [x] Shows in rules_reminder for Monks level 14+
   - [x] Lore Bard Bonus Proficiencies (v1.0.8, PHB p54)
     - [x] Choose 3 additional skill proficiencies when selecting Lore subclass
     - [x] Must include bonus_skills array in POST /api/characters/subclass request
@@ -1495,7 +1502,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.16**
+Current: **1.0.17**
 
 ---
 

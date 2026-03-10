@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.16"
+const version = "1.0.17"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -416,6 +416,7 @@ func main() {
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dark-ones-luck", handleGMDarkOnesLuck)
 	http.HandleFunc("/api/gm/indomitable", handleGMIndomitable)
+	http.HandleFunc("/api/gm/diamond-soul", handleGMDiamondSoul)
 	http.HandleFunc("/api/gm/stroke-of-luck", handleGMStrokeOfLuck)
 	http.HandleFunc("/api/gm/hurl-through-hell", handleGMHurlThroughHell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
@@ -10076,6 +10077,10 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		rulesReminder["reckless_attack"] = "You can attack recklessly (include 'reckless' in attack description) for advantage on STR melee attacks, but attacks against you also have advantage until your next turn."
 		rulesReminder["danger_sense"] = "You have advantage on DEX saving throws against effects you can see (traps, spells). Disabled if blinded, deafened, or incapacitated."
 	}
+	// v1.0.17: Diamond Soul reminder for Monks level 14+
+	if classKey == "monk" && level >= 14 {
+		rulesReminder["diamond_soul"] = "💎 You have proficiency in ALL saving throws. If you fail a save, you can spend 1 ki to reroll (must use new result). Use POST /api/gm/diamond-soul."
+	}
 	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
 		spellMod := 0
 		switch c.Spellcasting {
@@ -14590,6 +14595,23 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v1.0.17: Diamond Soul (Monk level 14+, PHB p79)
+	// Gain proficiency in all saving throws
+	diamondSoulActive := false
+	var classLevelsJSON []byte
+	_ = db.QueryRow(`SELECT COALESCE(class_levels, '{}')::jsonb FROM characters WHERE id = $1`, req.CharacterID).Scan(&classLevelsJSON)
+	var characterClassLevels map[string]int
+	monkLevel := 0
+	if err := json.Unmarshal(classLevelsJSON, &characterClassLevels); err == nil && len(characterClassLevels) > 0 {
+		monkLevel = characterClassLevels["monk"]
+	} else if strings.ToLower(className) == "monk" {
+		monkLevel = level
+	}
+	if monkLevel >= 14 && !proficient {
+		proficient = true
+		diamondSoulActive = true
+	}
+	
 	// Calculate total modifier
 	totalMod := abilityMod
 	if proficient {
@@ -14945,6 +14967,12 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	if halflingBraveActive {
 		response["halfling_brave"] = true
 		response["racial_feature_note"] = fmt.Sprintf("💪 %s's Halfling Brave grants advantage on saves against frightened", charName)
+	}
+	// v1.0.17: Add Diamond Soul note
+	if diamondSoulActive {
+		response["diamond_soul"] = true
+		response["diamond_soul_monk_level"] = monkLevel
+		response["class_feature_note"] = fmt.Sprintf("💎 %s's Diamond Soul grants proficiency in all saving throws (Monk level %d)", charName, monkLevel)
 	}
 	// v0.9.98: Add Paladin's Aura of Protection note
 	if auraBonus > 0 {
@@ -31807,6 +31835,271 @@ func handleGMIndomitable(w http.ResponseWriter, r *http.Request) {
 		"indomitable_max":    maxUses,
 		"indomitable_remaining": maxUses - newUsedCount,
 		"feature_note":       "Indomitable (Fighter): You must use the new roll result.",
+	}
+	
+	if halflingLuckyUsed {
+		response["halfling_lucky"] = true
+		response["halfling_lucky_original"] = halflingLuckyOriginal
+		response["halfling_lucky_note"] = "🍀 Halfling Lucky rerolled the 1"
+	}
+	
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleGMDiamondSoul godoc
+// @Summary Monk's Diamond Soul ki reroll (PHB p79)
+// @Description Level 14+ Monks with Diamond Soul can spend 1 ki point to reroll a failed saving throw and must take the second result. Use this endpoint after a saving throw fails.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,ability=string,dc=integer} true "character_id (Monk level 14+), ability (str/dex/con/int/wis/cha), dc"
+// @Success 200 {object} map[string]interface{} "Diamond Soul reroll result"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or feature unavailable"
+// @Router /gm/diamond-soul [post]
+func handleGMDiamondSoul(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Ability     string `json:"ability"` // str, dex, con, int, wis, cha
+		DC          int    `json:"dc"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	if req.Ability == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "ability required (str, dex, con, int, wis, cha)",
+		})
+		return
+	}
+	
+	if req.DC == 0 {
+		req.DC = 10 // Default DC
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info
+	var charName, class string
+	var level, kiUsed int
+	var str, dex, con, intl, wis, cha int
+	var classLevelsJSON []byte
+	err = db.QueryRow(`
+		SELECT name, class, level, COALESCE(ki_points_used, 0), str, dex, con, intl, wis, cha, COALESCE(class_levels, '{}')::jsonb
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &class, &level, &kiUsed, &str, &dex, &con, &intl, &wis, &cha, &classLevelsJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Calculate monk level (supports multiclass)
+	monkLevel := 0
+	var classLevels map[string]int
+	if err := json.Unmarshal(classLevelsJSON, &classLevels); err == nil && len(classLevels) > 0 {
+		monkLevel = classLevels["monk"]
+	} else if strings.ToLower(class) == "monk" {
+		monkLevel = level
+	}
+	
+	// Verify character is a Monk level 14+
+	if monkLevel < 14 {
+		w.WriteHeader(http.StatusBadRequest)
+		if monkLevel == 0 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "feature_unavailable",
+				"message": fmt.Sprintf("%s is not a Monk. Diamond Soul is a Monk level 14+ feature.", charName),
+			})
+		} else {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "level_requirement",
+				"message": fmt.Sprintf("%s is a Monk level %d. Diamond Soul requires Monk level 14+.", charName, monkLevel),
+			})
+		}
+		return
+	}
+	
+	// Check if ki is available (1 ki point required)
+	kiMax := monkLevel // Ki points = monk level
+	kiAvailable := kiMax - kiUsed
+	if kiAvailable < 1 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":      "no_ki",
+			"message":    fmt.Sprintf("%s has no ki points remaining (%d/%d)", charName, kiMax-kiUsed, kiMax),
+			"ki_used":    kiUsed,
+			"ki_max":     kiMax,
+			"recovery":   "short rest",
+		})
+		return
+	}
+	
+	// Parse the ability and calculate modifier
+	abilityLower := strings.ToLower(req.Ability)
+	var abilityMod int
+	var abilityName string
+	
+	switch abilityLower {
+	case "str", "strength":
+		abilityMod = game.Modifier(str)
+		abilityName = "Strength"
+	case "dex", "dexterity":
+		abilityMod = game.Modifier(dex)
+		abilityName = "Dexterity"
+	case "con", "constitution":
+		abilityMod = game.Modifier(con)
+		abilityName = "Constitution"
+	case "int", "intelligence":
+		abilityMod = game.Modifier(intl)
+		abilityName = "Intelligence"
+	case "wis", "wisdom":
+		abilityMod = game.Modifier(wis)
+		abilityName = "Wisdom"
+	case "cha", "charisma":
+		abilityMod = game.Modifier(cha)
+		abilityName = "Charisma"
+	default:
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid ability - use str, dex, con, int, wis, or cha"})
+		return
+	}
+	
+	// Diamond Soul grants proficiency in ALL saves
+	// Calculate total modifier (always proficient due to Diamond Soul)
+	profBonus := game.ProficiencyBonus(level)
+	totalMod := abilityMod + profBonus
+	
+	// Roll the new saving throw (Diamond Soul reroll)
+	newRoll := game.RollDie(20)
+	
+	// v0.9.47: Halfling Lucky - reroll 1s
+	halflingLuckyUsed := false
+	halflingLuckyOriginal := 0
+	if newRoll == 1 {
+		rerolledValue, rerolled, origRoll := applyHalflingLucky(newRoll, req.CharacterID)
+		if rerolled {
+			halflingLuckyUsed = true
+			halflingLuckyOriginal = origRoll
+			newRoll = rerolledValue
+		}
+	}
+	
+	newTotal := newRoll + totalMod
+	success := newTotal >= req.DC
+	
+	// Natural 20 always succeeds, natural 1 always fails
+	outcomeStr := "FAILURE"
+	if success {
+		outcomeStr = "SUCCESS"
+	}
+	if newRoll == 20 {
+		success = true
+		outcomeStr = "CRITICAL SUCCESS"
+	} else if newRoll == 1 && !halflingLuckyUsed {
+		success = false
+		outcomeStr = "CRITICAL FAILURE"
+	}
+	
+	// Spend 1 ki point
+	db.Exec("UPDATE characters SET ki_points_used = ki_points_used + 1 WHERE id = $1", req.CharacterID)
+	newKiUsed := kiUsed + 1
+	
+	// Build result string
+	rollStr := fmt.Sprintf("d20(%d)", newRoll)
+	if halflingLuckyUsed {
+		rollStr = fmt.Sprintf("d20(%d→%d Lucky)", halflingLuckyOriginal, newRoll)
+	}
+	
+	modStr := ""
+	if totalMod >= 0 {
+		modStr = fmt.Sprintf("+%d", totalMod)
+	} else {
+		modStr = fmt.Sprintf("%d", totalMod)
+	}
+	
+	fullResult := fmt.Sprintf("💎 Diamond Soul reroll: %s saving throw (proficient): %s%s = %d vs DC %d → %s",
+		abilityName, rollStr, modStr, newTotal, req.DC, outcomeStr)
+	
+	// Log the action
+	actionDesc := fmt.Sprintf("%s spends 1 ki to reroll failed %s save (Diamond Soul)", charName, abilityName)
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "diamond_soul", actionDesc, fullResult)
+	
+	response := map[string]interface{}{
+		"success":          success,
+		"character":        charName,
+		"ability":          abilityName,
+		"proficient":       true, // Diamond Soul grants proficiency in all saves
+		"roll":             newRoll,
+		"ability_mod":      abilityMod,
+		"proficiency_bonus": profBonus,
+		"total_mod":        totalMod,
+		"total":            newTotal,
+		"dc":               req.DC,
+		"outcome":          outcomeStr,
+		"result":           fullResult,
+		"ki_spent":         1,
+		"ki_used":          newKiUsed,
+		"ki_max":           kiMax,
+		"ki_remaining":     kiMax - newKiUsed,
+		"monk_level":       monkLevel,
+		"feature_note":     "💎 Diamond Soul (Monk 14+): Spend 1 ki to reroll a failed saving throw. Must use the new roll.",
 	}
 	
 	if halflingLuckyUsed {
