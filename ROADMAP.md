@@ -1148,6 +1148,10 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] `revert_wild_shape` action to return to normal form (bonus action)
       - [x] Beast stats shown in /api/my-turn when transformed
       - [x] Handles Archdruid (level 20) unlimited uses
+    - [x] **Beast Spells** (Druid level 18+, v1.0.14, PHB p67)
+      - [x] Cannot cast spells while in Wild Shape unless Druid level 18+
+      - [x] isInWildShape() and hasBeastSpells() helper functions
+      - [x] Check added to cast action
     - [x] Arcane Recovery (Wizard) — 1 use per day, recovers spell slots on short rest (v0.8.91)
     - [x] Natural Recovery (Circle of the Land Druid) — 1 use per day, recovers spell slots on short rest (v0.8.91)
     - [x] POST /api/characters/{id}/use-resource endpoint
@@ -1474,7 +1478,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.13**
+Current: **1.0.14**
 
 ---
 

@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.13"
+const version = "1.0.14"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -24644,6 +24644,11 @@ func resolveAction(action, description string, charID int) string {
 		// v0.9.22: Non-proficient armor blocks spellcasting entirely (PHB p144)
 		if isWearingNonProficientArmor(charID) {
 			return "Cannot cast spells while wearing armor you are not proficient with (PHB p144)"
+		}
+		
+		// v1.0.14: Wild Shape blocks spellcasting unless Druid has Beast Spells (level 18+, PHB p67)
+		if isInWildShape(charID) && !hasBeastSpells(charID) {
+			return "Cannot cast spells while in Wild Shape form. Druids gain Beast Spells at level 18 (PHB p67)"
 		}
 		
 		// Parse spell from description
@@ -50688,6 +50693,42 @@ func getWarlockLevel(charID int) int {
 		return level
 	}
 	return 0
+}
+
+// getDruidLevel returns the Druid class level for a character (handles multiclass)
+func getDruidLevel(charID int) int {
+	var classLevelsJSON []byte
+	var class string
+	var level int
+	db.QueryRow(`SELECT class, level, COALESCE(class_levels, '{}') FROM characters WHERE id = $1`, charID).Scan(&class, &level, &classLevelsJSON)
+	
+	// Check multiclass first
+	var classLevels map[string]int
+	if err := json.Unmarshal(classLevelsJSON, &classLevels); err == nil && len(classLevels) > 0 {
+		if druidLevel, ok := classLevels["druid"]; ok {
+			return druidLevel
+		}
+		return 0
+	}
+	
+	// Single class
+	if strings.ToLower(class) == "druid" {
+		return level
+	}
+	return 0
+}
+
+// hasBeastSpells returns true if the character has the Beast Spells feature (Druid level 18+)
+// Beast Spells allows casting druid spells while in Wild Shape form (PHB p67)
+func hasBeastSpells(charID int) bool {
+	return getDruidLevel(charID) >= 18
+}
+
+// isInWildShape returns true if the character is currently in Wild Shape form
+func isInWildShape(charID int) bool {
+	var wildShapeForm sql.NullString
+	db.QueryRow(`SELECT wild_shape_form FROM characters WHERE id = $1`, charID).Scan(&wildShapeForm)
+	return wildShapeForm.Valid && wildShapeForm.String != ""
 }
 
 // getWarlockPactSlots returns the number of Pact Magic spell slots for a Warlock at given level
