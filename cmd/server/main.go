@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.14
+// @version 1.0.16
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.15"
+const version = "1.0.16"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -478,6 +478,7 @@ func main() {
 	http.HandleFunc("/api/characters/one-with-shadows", handleCharacterOneWithShadows) // v1.0.4
 	http.HandleFunc("/api/characters/eldritch-master", handleCharacterEldritchMaster) // v1.0.12
 	http.HandleFunc("/api/characters/signature-spells", handleCharacterSignatureSpells) // v1.0.12
+	http.HandleFunc("/api/characters/holy-nimbus", handleCharacterHolyNimbus) // v1.0.16
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
@@ -1108,6 +1109,12 @@ func initDB() {
 		-- Level 14: Deal maximum damage with wizard spell of 1st-5th level.
 		-- First use per long rest is free. Subsequent uses: 2d12 necrotic per spell level.
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS overchannel_used BOOLEAN DEFAULT FALSE;
+		
+		-- v1.0.16: Devotion Paladin Holy Nimbus (PHB p86)
+		-- Level 20 capstone: Emanate aura of sunlight for 1 minute.
+		-- Enemies starting turn in bright light (30ft) take 10 radiant damage.
+		-- Advantage on saves vs spells from fiends/undead. Once per long rest.
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS holy_nimbus_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -14475,12 +14482,13 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CharacterID    int    `json:"character_id"`
 		Ability        string `json:"ability"`         // str, dex, con, int, wis, cha
-		DC             int    `json:"dc"`              // Difficulty Class
-		Advantage      bool   `json:"advantage"`
-		Disadvantage   bool   `json:"disadvantage"`
-		Description    string `json:"description"`     // Optional context (e.g., "Fireball", "Dragon's Breath")
-		UseInspiration bool   `json:"use_inspiration"` // Spend inspiration for advantage
-		FromMagic      bool   `json:"from_magic"`      // v0.9.49: Gnome Cunning (save vs magic)
+		DC                 int    `json:"dc"`                   // Difficulty Class
+		Advantage          bool   `json:"advantage"`
+		Disadvantage       bool   `json:"disadvantage"`
+		Description        string `json:"description"`          // Optional context (e.g., "Fireball", "Dragon's Breath")
+		UseInspiration     bool   `json:"use_inspiration"`      // Spend inspiration for advantage
+		FromMagic          bool   `json:"from_magic"`           // v0.9.49: Gnome Cunning (save vs magic)
+		FromFiendOrUndead  bool   `json:"from_fiend_or_undead"` // v1.0.16: Holy Nimbus (advantage on saves vs fiend/undead spells)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -14744,6 +14752,14 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 		countercharmBard = ccBard
 	}
 	
+	// v1.0.16: Holy Nimbus (PHB p86)
+	// Advantage on saving throws against spells cast by fiends or undead
+	holyNimbusActive := false
+	if req.FromFiendOrUndead && hasHolyNimbusActive(req.CharacterID) {
+		req.Advantage = true
+		holyNimbusActive = true
+	}
+	
 	// Handle inspiration: spend it for advantage
 	usedInspiration := false
 	if req.UseInspiration {
@@ -14785,6 +14801,8 @@ func handleGMSavingThrow(w http.ResponseWriter, r *http.Request) {
 			rollType = "advantage (Steel Will)"
 		} else if countercharmActive {
 			rollType = fmt.Sprintf("advantage (🎵 Countercharm from %s)", countercharmBard)
+		} else if holyNimbusActive {
+			rollType = "advantage (☀️ Holy Nimbus)"
 		}
 	} else if req.Disadvantage && !req.Advantage {
 		roll1, roll2, finalRoll = game.RollWithDisadvantage()
@@ -34905,6 +34923,68 @@ func decrementSacredWeapon(charID int) bool {
 	return expired
 }
 
+// decrementHolyNimbus decrements the Holy Nimbus duration at end of turn (v1.0.16)
+// Returns true if the condition expired and was removed
+func decrementHolyNimbus(charID int) bool {
+	var condsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&condsJSON)
+	if err != nil {
+		return false
+	}
+	
+	var conds []string
+	if err := json.Unmarshal(condsJSON, &conds); err != nil {
+		return false
+	}
+	
+	newConds := []string{}
+	expired := false
+	for _, c := range conds {
+		if strings.HasPrefix(c, "holy_nimbus:") {
+			parts := strings.Split(c, ":")
+			if len(parts) >= 2 {
+				rounds, _ := strconv.Atoi(parts[1])
+				rounds--
+				if rounds > 0 {
+					newConds = append(newConds, fmt.Sprintf("holy_nimbus:%d", rounds))
+				} else {
+					expired = true // Don't add back - it expired
+				}
+			}
+		} else {
+			newConds = append(newConds, c)
+		}
+	}
+	
+	if expired {
+		newCondsJSON, _ := json.Marshal(newConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", newCondsJSON, charID)
+	}
+	
+	return expired
+}
+
+// hasHolyNimbusActive returns true if the character has Holy Nimbus active (v1.0.16)
+func hasHolyNimbusActive(charID int) bool {
+	var condsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&condsJSON)
+	if err != nil {
+		return false
+	}
+	
+	var conds []string
+	if err := json.Unmarshal(condsJSON, &conds); err != nil {
+		return false
+	}
+	
+	for _, c := range conds {
+		if strings.HasPrefix(c, "holy_nimbus:") {
+			return true
+		}
+	}
+	return false
+}
+
 func hasFightingStyle(charID int, slug string) bool {
 	styles := getFightingStyles(charID)
 	for _, s := range styles {
@@ -38610,6 +38690,9 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 	// v0.9.65: Decrement Sacred Weapon duration at end of turn (if active)
 	decrementSacredWeapon(currentID)
 	
+	// v1.0.16: Decrement Holy Nimbus duration at end of turn (if active)
+	decrementHolyNimbus(currentID)
+	
 	// Advance turn
 	turnIndex++
 	if turnIndex >= len(entries) {
@@ -40534,7 +40617,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			stroke_of_luck_used = false,
 			eldritch_master_used = false,
 			signature_spells_used = '[]',
-			overchannel_used = false
+			overchannel_used = false,
+			holy_nimbus_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -50763,6 +50847,283 @@ func handleCharacterSignatureSpells(w http.ResponseWriter, r *http.Request) {
 			"message": fmt.Sprintf("Unknown action '%s'. Use 'choose' or 'cast'", req.Action),
 		})
 	}
+}
+
+// handleCharacterHolyNimbus godoc
+// @Summary Devotion Paladin's Holy Nimbus capstone (PHB p86)
+// @Description Level 20: As an action, emanate an aura of sunlight for 1 minute. Enemies starting turn in bright light (30ft) take 10 radiant damage. Advantage on saves vs spells from fiends/undead. Once per long rest.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (GET)"
+// @Param request body object false "Character ID (POST)"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Router /api/characters/holy-nimbus [get]
+// @Router /api/characters/holy-nimbus [post]
+func handleCharacterHolyNimbus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check Holy Nimbus status",
+				"usage":   "GET /api/characters/holy-nimbus?character_id=X",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var subclass sql.NullString
+		var holyNimbusUsed bool
+		var conditions []byte
+		err = db.QueryRow(`
+			SELECT class, level, subclass, COALESCE(holy_nimbus_used, false), COALESCE(conditions, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &subclass, &holyNimbusUsed, &conditions)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		// Check Paladin level (multiclass support)
+		paladinLevel := getPaladinLevel(charID)
+		if paladinLevel < 20 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":         "level_requirement",
+				"message":       fmt.Sprintf("Holy Nimbus requires Paladin level 20 (current: %d)", paladinLevel),
+				"paladin_level": paladinLevel,
+				"class_feature": "Holy Nimbus",
+				"phb_reference": "PHB p86",
+			})
+			return
+		}
+		
+		// Check for Devotion oath
+		if !subclass.Valid || strings.ToLower(subclass.String) != "devotion" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":         "oath_requirement",
+				"message":       "Holy Nimbus requires Oath of Devotion subclass",
+				"current_oath":  subclass.String,
+				"class_feature": "Holy Nimbus",
+				"phb_reference": "PHB p86",
+			})
+			return
+		}
+		
+		// Check if currently active
+		var conditionsList []string
+		json.Unmarshal(conditions, &conditionsList)
+		isActive := false
+		roundsRemaining := 0
+		for _, cond := range conditionsList {
+			if strings.HasPrefix(cond, "holy_nimbus:") {
+				isActive = true
+				parts := strings.Split(cond, ":")
+				if len(parts) >= 2 {
+					roundsRemaining, _ = strconv.Atoi(parts[1])
+				}
+				break
+			}
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":   charID,
+			"class":          class,
+			"paladin_level":  paladinLevel,
+			"oath":           "Devotion",
+			"class_feature":  "Holy Nimbus",
+			"available":      !holyNimbusUsed,
+			"used":           holyNimbusUsed,
+			"active":         isActive,
+			"rounds_remaining": roundsRemaining,
+			"duration":       "1 minute (10 rounds)",
+			"effect": map[string]interface{}{
+				"bright_light":   "30 feet",
+				"dim_light":      "30 feet beyond",
+				"enemy_damage":   "10 radiant damage when enemy starts turn in bright light",
+				"save_advantage": "Advantage on saving throws vs spells cast by fiends or undead",
+			},
+			"recharge":      "Long rest",
+			"use_endpoint":  "POST /api/characters/holy-nimbus with character_id",
+			"phb_reference": "PHB p86",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int `json:"character_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_id_required",
+			"message": "Provide character_id to activate Holy Nimbus",
+		})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var subclass sql.NullString
+	var campaignID sql.NullInt64
+	var holyNimbusUsed bool
+	var conditionsJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, subclass, lobby_id, COALESCE(holy_nimbus_used, false), COALESCE(conditions, '[]')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &subclass, &campaignID, &holyNimbusUsed, &conditionsJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only use Holy Nimbus for your own characters",
+		})
+		return
+	}
+	
+	// Check Paladin level (multiclass support)
+	paladinLevel := getPaladinLevel(req.CharacterID)
+	if paladinLevel < 20 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":        "level_requirement",
+			"message":      fmt.Sprintf("%s needs Paladin level 20 for Holy Nimbus (current: %d)", charName, paladinLevel),
+			"paladin_level": paladinLevel,
+		})
+		return
+	}
+	
+	// Check for Devotion oath
+	if !subclass.Valid || strings.ToLower(subclass.String) != "devotion" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":        "oath_requirement",
+			"message":      fmt.Sprintf("%s must be an Oath of Devotion Paladin to use Holy Nimbus (current: %s)", charName, subclass.String),
+			"current_oath": subclass.String,
+		})
+		return
+	}
+	
+	// Check if already used since last long rest
+	if holyNimbusUsed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "already_used",
+			"message": fmt.Sprintf("%s has already used Holy Nimbus since their last long rest", charName),
+			"tip":     "Holy Nimbus recovers on long rest",
+		})
+		return
+	}
+	
+	// Check if already active
+	var conditions []string
+	json.Unmarshal(conditionsJSON, &conditions)
+	for _, cond := range conditions {
+		if strings.HasPrefix(cond, "holy_nimbus:") {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_active",
+				"message": fmt.Sprintf("%s already has Holy Nimbus active", charName),
+			})
+			return
+		}
+	}
+	
+	// Activate Holy Nimbus: add condition and mark as used
+	// Format: "holy_nimbus:ROUNDS_REMAINING"
+	conditions = append(conditions, "holy_nimbus:10")
+	updatedConditions, _ := json.Marshal(conditions)
+	
+	db.Exec(`UPDATE characters SET holy_nimbus_used = true, conditions = $1, action_used = true WHERE id = $2`,
+		updatedConditions, req.CharacterID)
+	
+	// Log action if in campaign
+	if campaignID.Valid {
+		actionDesc := fmt.Sprintf("☀️ Holy Nimbus — %s channels divine radiance! An aura of brilliant sunlight erupts from them, bathing a 30-foot radius in searing light. Fiends and undead cower as the holy power floods the area.", charName)
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'holy_nimbus', $3, NOW())`, campaignID.Int64, req.CharacterID, actionDesc)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"character":     charName,
+		"class_feature": "Holy Nimbus",
+		"action_cost":   "1 action",
+		"message":       fmt.Sprintf("☀️ %s invokes their sacred oath, becoming a beacon of divine radiance!", charName),
+		"duration":      "1 minute (10 rounds)",
+		"rounds_remaining": 10,
+		"effects": map[string]interface{}{
+			"bright_light":   "30-foot radius of bright light",
+			"dim_light":      "30 feet of dim light beyond that",
+			"enemy_damage":   "Enemies starting turn in bright light take 10 radiant damage (automatic, no save)",
+			"save_advantage": "Advantage on saving throws against spells cast by fiends and undead",
+		},
+		"mechanics": map[string]interface{}{
+			"damage_timing":    "When enemy starts their turn (GM applies via narration)",
+			"damage_type":      "radiant",
+			"damage_amount":    10,
+			"condition_added":  "holy_nimbus:10",
+			"duration_tracked": "Decrements at end of turn, auto-expires at 0",
+		},
+		"gm_note":       "Apply 10 radiant damage to hostile creatures that start their turn within 30ft. Grant advantage on saves vs fiend/undead spells.",
+		"phb_reference": "PHB p86",
+	})
+}
+
+// getPaladinLevel returns the Paladin class level for a character (handles multiclass)
+func getPaladinLevel(charID int) int {
+	var classLevelsJSON []byte
+	var class string
+	var level int
+	db.QueryRow(`SELECT class, level, COALESCE(class_levels, '{}') FROM characters WHERE id = $1`, charID).Scan(&class, &level, &classLevelsJSON)
+	
+	// Check multiclass first
+	var classLevels map[string]int
+	if err := json.Unmarshal(classLevelsJSON, &classLevels); err == nil && len(classLevels) > 0 {
+		if paladinLevel, ok := classLevels["paladin"]; ok {
+			return paladinLevel
+		}
+		return 0
+	}
+	
+	// Single class
+	if strings.ToLower(class) == "paladin" {
+		return level
+	}
+	return 0
 }
 
 // getWizardLevel returns the Wizard class level for a character (handles multiclass)

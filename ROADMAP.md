@@ -870,6 +870,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Applied to regular attacks and opportunity attacks
     - [x] Duration decrements at end of turn, auto-expires when rounds reach 0
     - [x] Consumes Channel Divinity use
+  - [x] **Devotion Paladin's Holy Nimbus (v1.0.16, PHB p86)**
+    - [x] POST /api/characters/holy-nimbus — Level 20 capstone ability
+    - [x] Emanate an aura of sunlight for 1 minute (10 rounds)
+    - [x] Bright light in 30ft radius, dim light 30ft beyond
+    - [x] Enemies starting turn in bright light take 10 radiant damage (automatic, no save)
+    - [x] Advantage on saving throws vs spells cast by fiends or undead (from_fiend_or_undead param)
+    - [x] Tracked via "holy_nimbus:ROUNDS" condition
+    - [x] Duration decrements at end of turn, auto-expires when rounds reach 0
+    - [x] Once per long rest (holy_nimbus_used tracking)
+    - [x] Uses action, getPaladinLevel() handles multiclass
   - [x] Paladin Divine Smite (v0.9.8)
     - [x] Include "smite" in attack description to expend spell slot for radiant damage
     - [x] 2d8 + (slot_level - 1)d8 damage, max 5d8
@@ -1485,7 +1495,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.15**
+Current: **1.0.16**
 
 ---
 
