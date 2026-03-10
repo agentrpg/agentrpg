@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.12
+// @version 1.0.13
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.12"
+const version = "1.0.13"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2092,6 +2092,86 @@ func isHalfOrc(characterID int) bool {
 // one additional time and add it to the extra damage of the critical hit.
 func hasSavageAttacks(characterID int) bool {
 	return isHalfOrc(characterID)
+}
+
+// v1.0.13: Hunter's Mark and Hex spell tracking (PHB p251, p251)
+// These concentration spells add +1d6 damage to attacks against the marked target.
+// Stored as "hunter's-mark:TARGET_ID" or "hex:TARGET_ID" in concentrating_on column.
+
+// parseMarkSpell checks if concentrating_on contains a mark spell and returns the target ID
+// Returns: spellSlug ("hunters-mark" or "hex"), targetID (or 0 if not a mark spell)
+func parseMarkSpell(concentratingOn string) (spellSlug string, targetID int) {
+	lower := strings.ToLower(concentratingOn)
+	
+	// Check for Hunter's Mark format: "hunter's-mark:123" or "hunters-mark:123" or "hunter's mark:123"
+	if strings.HasPrefix(lower, "hunter") && strings.Contains(lower, "mark") {
+		parts := strings.Split(concentratingOn, ":")
+		if len(parts) >= 2 {
+			if id, err := strconv.Atoi(strings.TrimSpace(parts[len(parts)-1])); err == nil {
+				return "hunters-mark", id
+			}
+		}
+	}
+	
+	// Check for Hex format: "hex:123"
+	if strings.HasPrefix(lower, "hex:") {
+		parts := strings.Split(concentratingOn, ":")
+		if len(parts) >= 2 {
+			if id, err := strconv.Atoi(strings.TrimSpace(parts[1])); err == nil {
+				return "hex", id
+			}
+		}
+	}
+	
+	return "", 0
+}
+
+// getMarkBonusDamage calculates bonus damage from Hunter's Mark or Hex spells
+// Returns damage amount and a note string for the attack result
+func getMarkBonusDamage(attackerID, targetID int, isCrit bool) (int, string) {
+	if targetID <= 0 {
+		return 0, ""
+	}
+	
+	var concentratingOn string
+	err := db.QueryRow("SELECT COALESCE(concentrating_on, '') FROM characters WHERE id = $1", attackerID).Scan(&concentratingOn)
+	if err != nil || concentratingOn == "" {
+		return 0, ""
+	}
+	
+	spellSlug, markedTarget := parseMarkSpell(concentratingOn)
+	if spellSlug == "" || markedTarget != targetID {
+		return 0, ""
+	}
+	
+	// Roll 1d6 (doubled on crit)
+	var dmg int
+	if isCrit {
+		dmg = game.RollDie(6) + game.RollDie(6)
+	} else {
+		dmg = game.RollDie(6)
+	}
+	
+	// Build note based on spell type
+	diceStr := "1d6"
+	if isCrit {
+		diceStr = "2d6"
+	}
+	
+	switch spellSlug {
+	case "hunters-mark":
+		return dmg, fmt.Sprintf(" (+%d Hunter's Mark, %s)", dmg, diceStr)
+	case "hex":
+		return dmg, fmt.Sprintf(" (+%d Hex, %s necrotic)", dmg, diceStr)
+	}
+	
+	return 0, ""
+}
+
+// isMarkSpell returns true if the spell slug is Hunter's Mark or Hex
+func isMarkSpell(spellSlug string) bool {
+	lower := strings.ToLower(spellSlug)
+	return lower == "hunters-mark" || lower == "hunter's-mark" || lower == "hex"
 }
 
 // v0.9.88: Fighter Indomitable (PHB p72)
@@ -24196,8 +24276,13 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
-			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s (doubled dice)", 
-				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, autoCritLifedrinkerNote)
+			// v1.0.13: Hunter's Mark / Hex bonus damage on auto-crit (PHB p251)
+			// +1d6 damage (doubled on crit) to attacks against marked target
+			autoCritMarkDmg, autoCritMarkNote := getMarkBonusDamage(charID, targetID, true)
+			dmg += autoCritMarkDmg
+			
+			return fmt.Sprintf("Attack with %s: %d (AUTO-CRIT - target is %s!)%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s%s (doubled dice)", 
+				weaponName, totalAttack, autoCritReason, archeryNote, rollInfo, dmg, autoCritGWFNote, autoCritDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, autoCritLifedrinkerNote, autoCritMarkNote)
 		}
 		
 		// Get crit range for this character (Champion subclass can lower it)
@@ -24366,12 +24451,17 @@ func resolveAction(action, description string, charID int) string {
 				}
 			}
 			
+			// v1.0.13: Hunter's Mark / Hex bonus damage on crit (PHB p251)
+			// +1d6 damage (doubled on crit) to attacks against marked target
+			critMarkDmg, critMarkNote := getMarkBonusDamage(charID, targetID, true)
+			dmg += critMarkDmg
+			
 			critLabel := "nat 20 CRITICAL!"
 			if critRange < 20 && attackRoll < 20 {
 				critLabel = fmt.Sprintf("nat %d CRITICAL! (Improved Critical)", attackRoll)
 			}
 			// v0.9.99: Include power attack note in crit result
-			return fmt.Sprintf("Attack with %s: %d (%s)%s%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, powerAttackNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, critLifedrinkerNote)
+			return fmt.Sprintf("Attack with %s: %d (%s)%s%s%s Damage: %d%s%s%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, critLabel, archeryNote, powerAttackNote, rollInfo, dmg, critGWFNote, critDuelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, brutalCritNote, savageAttacksNote, critLifedrinkerNote, critMarkNote)
 		} else if attackRoll == 1 && !attackHalflingLuckyUsed {
 			// Critical miss (nat 1) - but not if Halfling Lucky was used (they already rerolled)
 			return fmt.Sprintf("Attack roll: %d (nat 1 - Critical miss!)%s", totalAttack, rollInfo)
@@ -24542,8 +24632,13 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
+		// v1.0.13: Hunter's Mark / Hex bonus damage on normal hit (PHB p251)
+		// +1d6 damage to attacks against marked target
+		markDmg, markNote := getMarkBonusDamage(charID, targetID, false)
+		dmg += markDmg
+		
 		// v0.9.99: Include power attack note in normal hit result
-		return fmt.Sprintf("Attack with %s: %d to hit%s%s%s. Damage: %d%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, powerAttackNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, lifedrinkerNote, foeSlayerNote)
+		return fmt.Sprintf("Attack with %s: %d to hit%s%s%s. Damage: %d%s%s%s%s%s%s%s%s%s%s", weaponName, totalAttack, archeryNote, powerAttackNote, rollInfo, dmg, gwfNote, duelingNote, colossusSlayerNote, divineStrikeNote, sneakAttackNote, divineSmiteNote, improvedSmiteNote, lifedrinkerNote, foeSlayerNote, markNote)
 		
 	case "cast":
 		// v0.9.22: Non-proficient armor blocks spellcasting entirely (PHB p144)
@@ -24951,8 +25046,18 @@ func resolveAction(action, description string, charID int) string {
 			
 			// Handle concentration
 			if strings.Contains(strings.ToLower(spell.Duration), "concentration") {
+				// v1.0.13: For Hunter's Mark and Hex, store target ID with concentration
+				// This enables tracking bonus damage on attacks against marked target
+				concentrationValue := spell.Name
+				if isMarkSpell(spellKey) {
+					// Parse target from description (e.g., "cast hex on goblin" or "hunter's mark the orc")
+					castTargetID := parseTargetFromDescription(description, charID)
+					if castTargetID > 0 {
+						concentrationValue = fmt.Sprintf("%s:%d", spell.Name, castTargetID)
+					}
+				}
 				// Drop current concentration
-				db.Exec("UPDATE characters SET concentrating_on = $1 WHERE id = $2", spell.Name, charID)
+				db.Exec("UPDATE characters SET concentrating_on = $1 WHERE id = $2", concentrationValue, charID)
 			}
 			
 			// v0.9.27: Consume material component if spell requires it

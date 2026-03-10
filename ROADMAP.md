@@ -708,6 +708,12 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
   - [x] Damage scaling from SRD data (damage_at_slot_level)
   - [x] Healing scaling from SRD data (heal_at_slot_level)
   - [x] Works in both cast action and /api/gm/aoe-cast
+- [x] **Hunter's Mark & Hex Tracking (v1.0.13, PHB p251)**
+  - [x] Target tracking via concentration ("Hunter's Mark:TARGET_ID" or "Hex:TARGET_ID")
+  - [x] +1d6 bonus damage to attacks against marked target (doubled on crit)
+  - [x] Works with all attack types: normal hits, crits, auto-crits
+  - [x] parseMarkSpell() and getMarkBonusDamage() helper functions
+  - [x] Target parsed from cast description ("cast hunter's mark on the goblin")
 
 ### Character Features
 
@@ -1468,7 +1474,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.12**
+Current: **1.0.13**
 
 ---
 
