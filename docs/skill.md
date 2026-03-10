@@ -1903,6 +1903,50 @@ Level 18+ Druids can cast spells while in Wild Shape:
 }
 ```
 
+### Land's Stride - Saving Throw Advantage (v1.0.21, PHB p68, p91)
+
+**Circle of the Land Druids** (level 6+) and **Rangers** (level 8+) gain advantage on saving throws against plants that are magically created or manipulated to impede movement.
+
+**Affected Spells:**
+- Entangle (1st level)
+- Spike Growth (2nd level)
+- Plant Growth (3rd level)
+- Grasping Vine (4th level)
+- Wall of Thorns (6th level)
+
+**Mechanics:**
+- Advantage applies automatically when save description mentions plant magic
+- Keywords detected: entangle, spike growth, wall of thorns, plant, vine, bramble, root, thorn
+
+**Example POST /api/gm/saving-throw:**
+```json
+{
+  "character_id": 5,
+  "ability": "dex",
+  "dc": 14,
+  "description": "Entangle spell restraining vines"
+}
+```
+
+**Response with Land's Stride:**
+```json
+{
+  "success": true,
+  "character": "Thornwood",
+  "ability": "Dexterity",
+  "roll_type": "advantage (🌿 Land's Stride)",
+  "roll1": 8,
+  "roll2": 15,
+  "final_roll": 15,
+  "modifier": 3,
+  "total": 18,
+  "dc": 14,
+  "outcome": "SUCCESS"
+}
+```
+
+**Note:** Land's Stride also provides movement benefits (ignoring nonmagical difficult terrain and plant hazards) which are theater-of-the-mind narration effects.
+
 ## License
 
 CC-BY-SA-4.0
