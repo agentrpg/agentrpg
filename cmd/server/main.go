@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.10
+// @version 1.0.12
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.11"
+const version = "1.0.12"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -476,6 +476,8 @@ func main() {
 	http.HandleFunc("/api/characters/favored-enemy", handleCharacterFavoredEnemy) // v0.9.87
 	http.HandleFunc("/api/characters/mystic-arcanum", handleCharacterMysticArcanum) // v0.9.93
 	http.HandleFunc("/api/characters/one-with-shadows", handleCharacterOneWithShadows) // v1.0.4
+	http.HandleFunc("/api/characters/eldritch-master", handleCharacterEldritchMaster) // v1.0.12
+	http.HandleFunc("/api/characters/signature-spells", handleCharacterSignatureSpells) // v1.0.12
 	http.HandleFunc("/api/universe/fighting-styles", handleUniverseFightingStyles)
 	http.HandleFunc("/api/universe/metamagic", handleUniverseMetamagic)
 	http.HandleFunc("/api/universe/invocations", handleUniverseInvocations)
@@ -1090,6 +1092,17 @@ func initDB() {
 		-- Or if you fail an ability check, treat the d20 roll as a 20.
 		-- Once per short or long rest.
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS stroke_of_luck_used BOOLEAN DEFAULT FALSE;
+		
+		-- v1.0.12: Warlock Eldritch Master (PHB p108)
+		-- Level 20: Spend 1 minute to regain all Pact Magic spell slots.
+		-- Once per long rest.
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS eldritch_master_used BOOLEAN DEFAULT FALSE;
+		
+		-- v1.0.12: Wizard Signature Spells (PHB p115)
+		-- Level 20: Choose 2 3rd-level wizard spells. Always prepared, don't count against limit.
+		-- Cast each once at 3rd level without expending a spell slot. Resets on long rest.
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS signature_spells JSONB DEFAULT '[]';
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS signature_spells_used JSONB DEFAULT '[]';
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -9559,6 +9572,71 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v1.0.12: Warlock Eldritch Master (level 20)
+	warlockLevel = getWarlockLevel(charID)
+	if warlockLevel >= 20 {
+		var eldritchMasterUsed bool
+		db.QueryRow("SELECT COALESCE(eldritch_master_used, false) FROM characters WHERE id = $1", charID).Scan(&eldritchMasterUsed)
+		
+		response["eldritch_master"] = map[string]interface{}{
+			"available":     !eldritchMasterUsed,
+			"used":          eldritchMasterUsed,
+			"recovers_on":   "long rest",
+			"casting_time":  "1 minute",
+			"description":   "Spend 1 minute entreating your patron to regain all expended Pact Magic spell slots.",
+			"how_to_use":    "POST /api/characters/eldritch-master with character_id",
+			"phb_reference": "PHB p108",
+		}
+	}
+	
+	// v1.0.12: Wizard Signature Spells (level 20)
+	wizardLevel := getWizardLevel(charID)
+	if wizardLevel >= 20 {
+		var signatureSpellsJSON, signatureSpellsUsedJSON []byte
+		db.QueryRow(`SELECT COALESCE(signature_spells, '[]'), COALESCE(signature_spells_used, '[]') FROM characters WHERE id = $1`, charID).Scan(&signatureSpellsJSON, &signatureSpellsUsedJSON)
+		
+		var signatureSpells []string
+		var signatureSpellsUsed []string
+		json.Unmarshal(signatureSpellsJSON, &signatureSpells)
+		json.Unmarshal(signatureSpellsUsedJSON, &signatureSpellsUsed)
+		
+		// Build spell info with availability
+		spellInfo := []map[string]interface{}{}
+		for _, spell := range signatureSpells {
+			used := false
+			for _, usedSpell := range signatureSpellsUsed {
+				if usedSpell == spell {
+					used = true
+					break
+				}
+			}
+			// Get spell name
+			var spellName string
+			db.QueryRow("SELECT name FROM spells WHERE slug = $1", spell).Scan(&spellName)
+			if spellName == "" {
+				spellName = spell
+			}
+			spellInfo = append(spellInfo, map[string]interface{}{
+				"slug":      spell,
+				"name":      spellName,
+				"used":      used,
+				"available": !used,
+			})
+		}
+		
+		response["signature_spells"] = map[string]interface{}{
+			"spells_chosen":      len(signatureSpells),
+			"max_spells":         2,
+			"needs_choice":       len(signatureSpells) < 2,
+			"spells":             spellInfo,
+			"free_casts_remaining": 2 - len(signatureSpellsUsed),
+			"recovers_on":        "long rest (free casts)",
+			"description":        "Two 3rd-level wizard spells you have mastered. Always prepared (don't count against limit), and you can cast each once at 3rd level without expending a spell slot.",
+			"how_to_use":         "POST /api/characters/signature-spells with action='cast', spell='spell-slug'",
+			"phb_reference":      "PHB p115",
+		}
+	}
+	
 	// v0.9.87: Ranger Favored Enemy info
 	if strings.ToLower(class) == "ranger" {
 		favoredEnemies := getFavoredEnemies(charID)
@@ -11143,6 +11221,86 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 			mysticArcanumResponse["tip"] = "✨ You have Mystic Arcanum spells ready! Cast them once per long rest without a slot."
 		}
 		response["mystic_arcanum"] = mysticArcanumResponse
+	}
+	
+	// v1.0.12: Warlock Eldritch Master (level 20)
+	warlockLevelMyTurn := getWarlockLevel(charID)
+	if warlockLevelMyTurn >= 20 {
+		var eldritchMasterUsed bool
+		db.QueryRow("SELECT COALESCE(eldritch_master_used, false) FROM characters WHERE id = $1", charID).Scan(&eldritchMasterUsed)
+		
+		eldritchMasterInfo := map[string]interface{}{
+			"available":     !eldritchMasterUsed,
+			"used":          eldritchMasterUsed,
+			"recovers_on":   "long rest",
+			"casting_time":  "1 minute",
+			"description":   "Spend 1 minute entreating your patron to regain all expended Pact Magic spell slots.",
+			"how_to_use":    "POST /api/characters/eldritch-master with character_id",
+			"phb_reference": "PHB p108",
+		}
+		if eldritchMasterUsed {
+			eldritchMasterInfo["tip"] = "⚠️ You've used Eldritch Master. It recovers on your next long rest."
+		} else {
+			eldritchMasterInfo["tip"] = "✨ You can spend 1 minute to restore all your Pact Magic slots!"
+		}
+		response["eldritch_master"] = eldritchMasterInfo
+	}
+	
+	// v1.0.12: Wizard Signature Spells (level 20)
+	wizardLevelMyTurn := getWizardLevel(charID)
+	if wizardLevelMyTurn >= 20 {
+		var signatureSpellsJSON, signatureSpellsUsedJSON []byte
+		db.QueryRow(`SELECT COALESCE(signature_spells, '[]'), COALESCE(signature_spells_used, '[]') FROM characters WHERE id = $1`, charID).Scan(&signatureSpellsJSON, &signatureSpellsUsedJSON)
+		
+		var signatureSpells []string
+		var signatureSpellsUsed []string
+		json.Unmarshal(signatureSpellsJSON, &signatureSpells)
+		json.Unmarshal(signatureSpellsUsedJSON, &signatureSpellsUsed)
+		
+		spellInfo := []map[string]interface{}{}
+		for _, spell := range signatureSpells {
+			used := false
+			for _, usedSpell := range signatureSpellsUsed {
+				if usedSpell == spell {
+					used = true
+					break
+				}
+			}
+			var spellName string
+			db.QueryRow("SELECT name FROM spells WHERE slug = $1", spell).Scan(&spellName)
+			if spellName == "" {
+				spellName = spell
+			}
+			spellInfo = append(spellInfo, map[string]interface{}{
+				"slug":      spell,
+				"name":      spellName,
+				"used":      used,
+				"available": !used,
+			})
+		}
+		
+		freeCastsRemaining := 2 - len(signatureSpellsUsed)
+		sigSpellsInfo := map[string]interface{}{
+			"spells_chosen":        len(signatureSpells),
+			"max_spells":           2,
+			"needs_choice":         len(signatureSpells) < 2,
+			"spells":               spellInfo,
+			"free_casts_remaining": freeCastsRemaining,
+			"recovers_on":          "long rest (free casts)",
+			"description":          "Two 3rd-level wizard spells you have mastered. Always prepared (don't count against limit), and you can cast each once at 3rd level without expending a spell slot.",
+			"how_to_cast":          "POST /api/characters/signature-spells with action='cast', spell='spell-slug'",
+			"phb_reference":        "PHB p115",
+		}
+		
+		if len(signatureSpells) < 2 {
+			sigSpellsInfo["tip"] = fmt.Sprintf("📜 You need to choose %d more signature spell(s)! Use POST /api/characters/signature-spells with action='choose'", 2-len(signatureSpells))
+		} else if freeCastsRemaining > 0 {
+			sigSpellsInfo["tip"] = fmt.Sprintf("📜 You have %d free signature spell cast(s) available!", freeCastsRemaining)
+		} else {
+			sigSpellsInfo["tip"] = "📜 You've used your free signature spell casts. They recover on long rest. You can still cast these spells using slots."
+		}
+		
+		response["signature_spells"] = sigSpellsInfo
 	}
 	
 	// v0.9.88: Fighter Indomitable (level 9+)
@@ -40148,7 +40306,9 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			invocation_spells_used = '[]',
 			indomitable_used = 0,
 			mystic_arcanum_used = '[]',
-			stroke_of_luck_used = false
+			stroke_of_luck_used = false,
+			eldritch_master_used = false,
+			signature_spells_used = '[]'
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
@@ -49849,6 +50009,599 @@ func handleCharacterOneWithShadows(w http.ResponseWriter, r *http.Request) {
 		"warning":      "The invisibility ends immediately if you move, take any action, or use your reaction.",
 		"phb_reference": "PHB p111",
 	})
+}
+
+// handleCharacterEldritchMaster handles the Warlock level 20 Eldritch Master feature
+// @Summary Use Eldritch Master to restore Pact Magic slots
+// @Description Level 20 Warlocks can spend 1 minute to regain all Pact Magic spell slots. Once per long rest.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (GET)"
+// @Param body body object{character_id=int} false "Character ID (POST)"
+// @Success 200 {object} object "Eldritch Master result"
+// @Failure 400 {object} object "Not a level 20 Warlock or already used"
+// @Security BasicAuth
+// @Router /characters/eldritch-master [get]
+// @Router /characters/eldritch-master [post]
+func handleCharacterEldritchMaster(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check Eldritch Master status",
+				"usage":   "GET /api/characters/eldritch-master?character_id=X",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var eldritchMasterUsed bool
+		err = db.QueryRow(`
+			SELECT class, level, COALESCE(eldritch_master_used, false)
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &eldritchMasterUsed)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		// Check Warlock level (multiclass support)
+		warlockLevel := getWarlockLevel(charID)
+		if warlockLevel < 20 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":         "level_requirement",
+				"message":       fmt.Sprintf("Eldritch Master requires Warlock level 20 (current: %d)", warlockLevel),
+				"warlock_level": warlockLevel,
+				"class_feature": "Eldritch Master",
+				"phb_reference": "PHB p108",
+			})
+			return
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":    charID,
+			"class":           class,
+			"level":           level,
+			"warlock_level":   warlockLevel,
+			"class_feature":   "Eldritch Master",
+			"available":       !eldritchMasterUsed,
+			"used_this_rest":  eldritchMasterUsed,
+			"effect":          "Spend 1 minute to regain all Pact Magic spell slots",
+			"usage":           "Once per long rest",
+			"how_to_use":      "POST /api/characters/eldritch-master with character_id",
+			"phb_reference":   "PHB p108",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Description string `json:"description"` // Optional flavor text
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var campaignID sql.NullInt64
+	var eldritchMasterUsed bool
+	var pactSlotsUsed int
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, lobby_id, COALESCE(eldritch_master_used, false), COALESCE(pact_slots_used, 0)
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &campaignID, &eldritchMasterUsed, &pactSlotsUsed)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only use Eldritch Master for your own characters",
+		})
+		return
+	}
+	
+	// Check Warlock level (multiclass support)
+	warlockLevel := getWarlockLevel(req.CharacterID)
+	if warlockLevel < 20 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":         "level_requirement",
+			"message":       fmt.Sprintf("%s needs Warlock level 20 for Eldritch Master (current: %d)", charName, warlockLevel),
+			"warlock_level": warlockLevel,
+		})
+		return
+	}
+	
+	// Check if already used this rest
+	if eldritchMasterUsed {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "already_used",
+			"message": fmt.Sprintf("%s has already used Eldritch Master since their last long rest", charName),
+			"tip":     "Take a long rest to use Eldritch Master again",
+		})
+		return
+	}
+	
+	// Get max pact slots for this level
+	maxSlots := getWarlockPactSlots(warlockLevel)
+	slotsRestored := pactSlotsUsed
+	
+	// Restore all pact slots and mark as used
+	db.Exec(`
+		UPDATE characters SET 
+			pact_slots_used = 0,
+			eldritch_master_used = true
+		WHERE id = $1
+	`, req.CharacterID)
+	
+	// Log action if in campaign
+	if campaignID.Valid {
+		desc := req.Description
+		if desc == "" {
+			desc = fmt.Sprintf("%s entreats their patron, drawing on their inner reserve of mystical power", charName)
+		}
+		actionLog := fmt.Sprintf("✨ Eldritch Master — %s (restored %d/%d pact slots)", desc, slotsRestored, maxSlots)
+		db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+			VALUES ($1, $2, 'other', $3, NOW())`, campaignID.Int64, req.CharacterID, actionLog)
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"class_feature":   "Eldritch Master",
+		"character":       charName,
+		"slots_restored":  slotsRestored,
+		"max_slots":       maxSlots,
+		"casting_time":    "1 minute",
+		"description":     fmt.Sprintf("%s spends a minute in communion with their patron, feeling arcane power flow back into them.", charName),
+		"pact_slots":      fmt.Sprintf("%d/%d", maxSlots, maxSlots),
+		"note":            "All Pact Magic spell slots have been restored",
+		"recharge":        "Long rest",
+		"phb_reference":   "PHB p108",
+	})
+}
+
+// handleCharacterSignatureSpells handles the Wizard level 20 Signature Spells feature
+// @Summary Manage Signature Spells (Wizard level 20)
+// @Description Choose 2 3rd-level wizard spells. Always prepared, cast each once at 3rd level without slot. Resets on long rest.
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (GET)"
+// @Param body body object{character_id=int,action=string,spell=string} false "Action: choose/cast"
+// @Success 200 {object} object "Signature Spells result"
+// @Failure 400 {object} object "Not a level 20 Wizard or invalid spell"
+// @Security BasicAuth
+// @Router /characters/signature-spells [get]
+// @Router /characters/signature-spells [post]
+func handleCharacterSignatureSpells(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_id_required",
+				"message": "Provide character_id to check Signature Spells status",
+				"usage":   "GET /api/characters/signature-spells?character_id=X",
+			})
+			return
+		}
+		
+		var class string
+		var level int
+		var signatureSpellsJSON, signatureSpellsUsedJSON []byte
+		err = db.QueryRow(`
+			SELECT class, level, COALESCE(signature_spells, '[]'), COALESCE(signature_spells_used, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &level, &signatureSpellsJSON, &signatureSpellsUsedJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		// Check Wizard level (multiclass support)
+		wizardLevel := getWizardLevel(charID)
+		if wizardLevel < 20 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":         "level_requirement",
+				"message":       fmt.Sprintf("Signature Spells requires Wizard level 20 (current: %d)", wizardLevel),
+				"wizard_level":  wizardLevel,
+				"class_feature": "Signature Spells",
+				"phb_reference": "PHB p115",
+			})
+			return
+		}
+		
+		var signatureSpells []string
+		var signatureSpellsUsed []string
+		json.Unmarshal(signatureSpellsJSON, &signatureSpells)
+		json.Unmarshal(signatureSpellsUsedJSON, &signatureSpellsUsed)
+		
+		// Get available 3rd level wizard spells if they need to choose
+		availableSpells := []map[string]interface{}{}
+		if len(signatureSpells) < 2 {
+			rows, _ := db.Query(`
+				SELECT s.slug, s.name 
+				FROM spells s
+				JOIN class_spell_lists csl ON s.slug = csl.spell_slug
+				WHERE csl.class = 'wizard' AND s.level = 3
+				ORDER BY s.name
+			`)
+			if rows != nil {
+				defer rows.Close()
+				for rows.Next() {
+					var slug, name string
+					rows.Scan(&slug, &name)
+					availableSpells = append(availableSpells, map[string]interface{}{
+						"slug": slug,
+						"name": name,
+					})
+				}
+			}
+		}
+		
+		// Build spell info with availability
+		spellInfo := []map[string]interface{}{}
+		for _, spell := range signatureSpells {
+			used := false
+			for _, usedSpell := range signatureSpellsUsed {
+				if usedSpell == spell {
+					used = true
+					break
+				}
+			}
+			spellInfo = append(spellInfo, map[string]interface{}{
+				"spell":     spell,
+				"used":      used,
+				"available": !used,
+			})
+		}
+		
+		response := map[string]interface{}{
+			"character_id":   charID,
+			"class":          class,
+			"level":          level,
+			"wizard_level":   wizardLevel,
+			"class_feature":  "Signature Spells",
+			"spells_chosen":  len(signatureSpells),
+			"max_spells":     2,
+			"signature_spells": spellInfo,
+			"effect":         "Always prepared, don't count against limit. Cast each once at 3rd level without slot.",
+			"recharge":       "Long rest (free casts)",
+			"phb_reference":  "PHB p115",
+		}
+		
+		if len(signatureSpells) < 2 {
+			response["needs_choice"] = true
+			response["slots_remaining"] = 2 - len(signatureSpells)
+			response["available_spells"] = availableSpells
+			response["how_to_choose"] = "POST /api/characters/signature-spells with action='choose', spell='spell-slug'"
+		} else {
+			response["complete"] = true
+			response["how_to_cast"] = "POST /api/characters/signature-spells with action='cast', spell='spell-slug'"
+		}
+		
+		json.NewEncoder(w).Encode(response)
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Action      string `json:"action"` // "choose" or "cast"
+		Spell       string `json:"spell"`  // Spell slug
+		Description string `json:"description"` // Optional flavor
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	if req.Action == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "action_required",
+			"message": "Specify action: 'choose' to select a signature spell, 'cast' to cast one without a slot",
+		})
+		return
+	}
+	
+	// Get character info
+	var ownerID int
+	var class, charName string
+	var level int
+	var campaignID sql.NullInt64
+	var signatureSpellsJSON, signatureSpellsUsedJSON []byte
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, lobby_id, COALESCE(signature_spells, '[]'), COALESCE(signature_spells_used, '[]')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&ownerID, &class, &charName, &level, &campaignID, &signatureSpellsJSON, &signatureSpellsUsedJSON)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if ownerID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You can only manage Signature Spells for your own characters",
+		})
+		return
+	}
+	
+	// Check Wizard level (multiclass support)
+	wizardLevel := getWizardLevel(req.CharacterID)
+	if wizardLevel < 20 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":        "level_requirement",
+			"message":      fmt.Sprintf("%s needs Wizard level 20 for Signature Spells (current: %d)", charName, wizardLevel),
+			"wizard_level": wizardLevel,
+		})
+		return
+	}
+	
+	var signatureSpells []string
+	var signatureSpellsUsed []string
+	json.Unmarshal(signatureSpellsJSON, &signatureSpells)
+	json.Unmarshal(signatureSpellsUsedJSON, &signatureSpellsUsed)
+	
+	switch req.Action {
+	case "choose":
+		if len(signatureSpells) >= 2 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "already_chosen",
+				"message":          fmt.Sprintf("%s has already chosen 2 signature spells", charName),
+				"signature_spells": signatureSpells,
+				"tip":              "Signature spells are permanent choices (PHB p115)",
+			})
+			return
+		}
+		
+		// Check spell is a valid 3rd level wizard spell
+		var spellName string
+		var spellLevel int
+		err := db.QueryRow(`
+			SELECT s.name, s.level FROM spells s
+			JOIN class_spell_lists csl ON s.slug = csl.spell_slug
+			WHERE s.slug = $1 AND csl.class = 'wizard'
+		`, req.Spell).Scan(&spellName, &spellLevel)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "invalid_spell",
+				"message": fmt.Sprintf("'%s' is not a valid wizard spell", req.Spell),
+			})
+			return
+		}
+		
+		if spellLevel != 3 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "wrong_level",
+				"message": fmt.Sprintf("Signature spells must be 3rd level (%s is level %d)", spellName, spellLevel),
+			})
+			return
+		}
+		
+		// Check not already chosen
+		for _, existing := range signatureSpells {
+			if existing == req.Spell {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "already_selected",
+					"message": fmt.Sprintf("%s is already a signature spell", spellName),
+				})
+				return
+			}
+		}
+		
+		// Add the spell
+		signatureSpells = append(signatureSpells, req.Spell)
+		updatedJSON, _ := json.Marshal(signatureSpells)
+		db.Exec(`UPDATE characters SET signature_spells = $1 WHERE id = $2`, updatedJSON, req.CharacterID)
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":          true,
+			"action":           "choose",
+			"character":        charName,
+			"spell_chosen":     spellName,
+			"spell_slug":       req.Spell,
+			"signature_spells": signatureSpells,
+			"slots_remaining":  2 - len(signatureSpells),
+			"note":             fmt.Sprintf("%s is now a signature spell (always prepared, can cast once at 3rd level without slot)", spellName),
+			"phb_reference":    "PHB p115",
+		})
+		
+	case "cast":
+		// Check spell is one of their signature spells
+		isSignature := false
+		for _, spell := range signatureSpells {
+			if spell == req.Spell {
+				isSignature = true
+				break
+			}
+		}
+		
+		if !isSignature {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":            "not_signature_spell",
+				"message":          fmt.Sprintf("'%s' is not one of %s's signature spells", req.Spell, charName),
+				"signature_spells": signatureSpells,
+			})
+			return
+		}
+		
+		// Check if already used this rest
+		for _, used := range signatureSpellsUsed {
+			if used == req.Spell {
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":   "already_cast",
+					"message": fmt.Sprintf("%s has already cast %s for free since their last long rest", charName, req.Spell),
+					"tip":     "You can still cast this spell using a spell slot, or take a long rest to use it for free again",
+				})
+				return
+			}
+		}
+		
+		// Get spell info for response
+		var spellName string
+		db.QueryRow(`SELECT name FROM spells WHERE slug = $1`, req.Spell).Scan(&spellName)
+		
+		// Mark as used
+		signatureSpellsUsed = append(signatureSpellsUsed, req.Spell)
+		updatedJSON, _ := json.Marshal(signatureSpellsUsed)
+		db.Exec(`UPDATE characters SET signature_spells_used = $1 WHERE id = $2`, updatedJSON, req.CharacterID)
+		
+		// Log action if in campaign
+		if campaignID.Valid {
+			desc := req.Description
+			if desc == "" {
+				desc = fmt.Sprintf("%s casts %s (signature spell)", charName, spellName)
+			}
+			actionLog := fmt.Sprintf("📜 Signature Spell — %s (3rd level, no slot)", desc)
+			db.Exec(`INSERT INTO actions (campaign_id, character_id, action_type, description, created_at)
+				VALUES ($1, $2, 'cast', $3, NOW())`, campaignID.Int64, req.CharacterID, actionLog)
+		}
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":       true,
+			"action":        "cast",
+			"character":     charName,
+			"spell":         spellName,
+			"spell_slug":    req.Spell,
+			"spell_level":   3,
+			"slot_used":     false,
+			"description":   fmt.Sprintf("%s casts %s using mastery over this signature spell.", charName, spellName),
+			"note":          "Cast at 3rd level without expending a spell slot",
+			"free_casts_remaining": 2 - len(signatureSpellsUsed),
+			"tip":           "Apply the spell effect using /api/action or /api/gm/aoe-cast as appropriate",
+			"phb_reference": "PHB p115",
+		})
+		
+	default:
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_action",
+			"message": fmt.Sprintf("Unknown action '%s'. Use 'choose' or 'cast'", req.Action),
+		})
+	}
+}
+
+// getWizardLevel returns the Wizard class level for a character (handles multiclass)
+func getWizardLevel(charID int) int {
+	var classLevelsJSON []byte
+	var class string
+	var level int
+	db.QueryRow(`SELECT class, level, COALESCE(class_levels, '{}') FROM characters WHERE id = $1`, charID).Scan(&class, &level, &classLevelsJSON)
+	
+	// Check multiclass first
+	var classLevels map[string]int
+	if err := json.Unmarshal(classLevelsJSON, &classLevels); err == nil && len(classLevels) > 0 {
+		if wizLevel, ok := classLevels["wizard"]; ok {
+			return wizLevel
+		}
+		return 0
+	}
+	
+	// Single class
+	if strings.ToLower(class) == "wizard" {
+		return level
+	}
+	return 0
+}
+
+// getWarlockLevel returns the Warlock class level for a character (handles multiclass)
+func getWarlockLevel(charID int) int {
+	var classLevelsJSON []byte
+	var class string
+	var level int
+	db.QueryRow(`SELECT class, level, COALESCE(class_levels, '{}') FROM characters WHERE id = $1`, charID).Scan(&class, &level, &classLevelsJSON)
+	
+	// Check multiclass first
+	var classLevels map[string]int
+	if err := json.Unmarshal(classLevelsJSON, &classLevels); err == nil && len(classLevels) > 0 {
+		if warlockLevel, ok := classLevels["warlock"]; ok {
+			return warlockLevel
+		}
+		return 0
+	}
+	
+	// Single class
+	if strings.ToLower(class) == "warlock" {
+		return level
+	}
+	return 0
+}
+
+// getWarlockPactSlots returns the number of Pact Magic spell slots for a Warlock at given level
+func getWarlockPactSlots(warlockLevel int) int {
+	// PHB p106: Warlocks have limited spell slots that are all the same level
+	// Slots: 1 at level 1, 2 at level 2, 2 at levels 3-10, 3 at levels 11-16, 4 at levels 17+
+	if warlockLevel < 1 {
+		return 0
+	}
+	if warlockLevel == 1 {
+		return 1
+	}
+	if warlockLevel <= 10 {
+		return 2
+	}
+	if warlockLevel <= 16 {
+		return 3
+	}
+	return 4
 }
 
 // handleUniverseFightingStyles returns all available fighting styles

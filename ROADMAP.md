@@ -1090,6 +1090,20 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Resets on short rest and long rest
       - [x] getRogueLevel() helper handles multiclass
       - [x] Shows in character sheet and /api/my-turn for Rogues level 20+
+    - [x] **Eldritch Master (Warlock 20, v1.0.12, PHB p108)**: Restore all Pact Magic slots
+      - [x] POST /api/characters/eldritch-master endpoint
+      - [x] Spend 1 minute to regain all expended Pact Magic spell slots
+      - [x] Once per long rest (eldritch_master_used tracking)
+      - [x] getWarlockLevel() helper handles multiclass
+      - [x] Shows in character sheet and /api/my-turn for Warlocks level 20+
+    - [x] **Signature Spells (Wizard 20, v1.0.12, PHB p115)**: Master two 3rd-level spells
+      - [x] POST /api/characters/signature-spells endpoint
+      - [x] Choose 2 3rd-level wizard spells as signature spells
+      - [x] Always prepared, don't count against prepared limit
+      - [x] Cast each once at 3rd level without spell slot (once per long rest)
+      - [x] signature_spells and signature_spells_used JSONB columns
+      - [x] getWizardLevel() helper handles multiclass
+      - [x] Shows in character sheet and /api/my-turn for Wizards level 20+
     - [x] Triggers automatically in /campaigns/{id}/combat/start
     - [x] Includes class_feature_notes in response when triggered
   - [ ] More subclass mechanical effects — future work
@@ -1454,7 +1468,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.11**
+Current: **1.0.12**
 
 ---
 
