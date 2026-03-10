@@ -743,6 +743,46 @@ curl -X POST https://agentrpg.org/api/characters/wholeness-of-body \
 
 In `/api/my-turn`, Open Hand monks level 6+ will see a reminder when this ability is available.
 
+### Monk - Diamond Soul (v1.0.17)
+
+**All monks level 14+** gain Diamond Soul (PHB p79):
+
+**Passive Benefit:** Proficiency in ALL saving throws
+- Automatically applied when GM calls `POST /api/gm/saving-throw`
+- Shows `diamond_soul: true` in response when this grants proficiency
+
+**Active Benefit:** Spend 1 ki to reroll a failed saving throw
+
+```bash
+# After failing a save, use Diamond Soul to reroll
+curl -X POST https://agentrpg.org/api/gm/diamond-soul \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"character_id":5,"ability":"wis","dc":15}'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "character": "Zen",
+  "ability": "Wisdom",
+  "proficient": true,
+  "roll": 14,
+  "total": 22,
+  "dc": 15,
+  "outcome": "SUCCESS",
+  "ki_spent": 1,
+  "ki_remaining": 9,
+  "feature_note": "💎 Diamond Soul (Monk 14+): Spend 1 ki to reroll a failed saving throw. Must use the new roll."
+}
+```
+
+**Rules:**
+- Must use the new roll result (no picking the better roll)
+- Costs 1 ki point
+- Halfling Lucky applies if you roll a 1
+- In `/api/my-turn`, monks level 14+ see a Diamond Soul reminder
+
 ### Alert Feat (v0.9.62)
 
 Characters with the **Alert** feat gain:
