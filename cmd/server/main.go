@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.19
+// @version 1.0.20
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.19"
+const version = "1.0.20"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -24005,7 +24005,10 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 			// Blindsight and truesight allow seeing invisible creatures (PHB)
 			_, attackerBlindsight, attackerTruesight := getCharacterVision(charID)
 			if attackerBlindsight == 0 && attackerTruesight == 0 {
-				hasDisadvantage = true
+				// v1.0.20: Feral Senses (Ranger 18+) negates disadvantage from attacking unseen creatures (PHB p92)
+				if !hasFeralSenses(charID) {
+					hasDisadvantage = true
+				}
 			}
 			continue
 		}
@@ -24022,6 +24025,13 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 		case "reckless":
 			// v0.9.14: Reckless Attack - attacks against the reckless character have advantage
 			hasAdvantage = true
+		}
+	}
+	
+	// v1.0.20: Elusive (Rogue 18+) negates advantage against you while not incapacitated (PHB p96)
+	if len(targetID) > 0 && targetID[0] > 0 && hasAdvantage {
+		if hasElusive(targetID[0]) && !isIncapacitated(targetID[0]) {
+			hasAdvantage = false
 		}
 	}
 	
@@ -35968,6 +35978,64 @@ func hasUncannyDodge(characterID int) bool {
 			if choices["superior_defense"] == "uncanny_dodge" {
 				return true
 			}
+		}
+	}
+	
+	return false
+}
+
+// hasElusive checks if a character has the Elusive feature (Rogue 18+)
+// v1.0.20: No attack roll has advantage against you while you aren't incapacitated (PHB p96)
+func hasElusive(characterID int) bool {
+	var class string
+	var level int
+	err := db.QueryRow(`SELECT class, level FROM characters WHERE id = $1`, characterID).Scan(&class, &level)
+	if err != nil {
+		return false
+	}
+	
+	// Rogue gets Elusive at level 18
+	if strings.ToLower(class) == "rogue" && level >= 18 {
+		return true
+	}
+	
+	// Check multiclass: need at least 18 levels in Rogue
+	var classLevels map[string]int
+	var classLevelsJSON []byte
+	err = db.QueryRow(`SELECT COALESCE(class_levels, '{}') FROM characters WHERE id = $1`, characterID).Scan(&classLevelsJSON)
+	if err == nil && len(classLevelsJSON) > 2 {
+		json.Unmarshal(classLevelsJSON, &classLevels)
+		if rogueLevel, ok := classLevels["rogue"]; ok && rogueLevel >= 18 {
+			return true
+		}
+	}
+	
+	return false
+}
+
+// hasFeralSenses checks if a character has the Feral Senses feature (Ranger 18+)
+// v1.0.20: Attacking a creature you can't see doesn't impose disadvantage (PHB p92)
+func hasFeralSenses(characterID int) bool {
+	var class string
+	var level int
+	err := db.QueryRow(`SELECT class, level FROM characters WHERE id = $1`, characterID).Scan(&class, &level)
+	if err != nil {
+		return false
+	}
+	
+	// Ranger gets Feral Senses at level 18
+	if strings.ToLower(class) == "ranger" && level >= 18 {
+		return true
+	}
+	
+	// Check multiclass: need at least 18 levels in Ranger
+	var classLevels map[string]int
+	var classLevelsJSON []byte
+	err = db.QueryRow(`SELECT COALESCE(class_levels, '{}') FROM characters WHERE id = $1`, characterID).Scan(&classLevelsJSON)
+	if err == nil && len(classLevelsJSON) > 2 {
+		json.Unmarshal(classLevelsJSON, &classLevels)
+		if rangerLevel, ok := classLevels["ranger"]; ok && rangerLevel >= 18 {
+			return true
 		}
 	}
 	

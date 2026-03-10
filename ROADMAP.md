@@ -1109,6 +1109,16 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Extra turn automatically added in combat/start
     - [x] Extra turn removed when advancing to round 2
     - [x] Includes class_feature_notes in combat/start response
+  - [x] **Elusive (Rogue 18+)** (v1.0.20, PHB p96)
+    - [x] No attack roll has advantage against you while you aren't incapacitated
+    - [x] hasElusive() helper checks Rogue level 18+ (supports multiclass)
+    - [x] Integrated into getAttackModifiers() to negate attacker advantage
+    - [x] Still respects incapacitated condition (doesn't apply when incapacitated)
+  - [x] **Feral Senses (Ranger 18+)** (v1.0.20, PHB p92)
+    - [x] Attacking a creature you can't see doesn't impose disadvantage
+    - [x] hasFeralSenses() helper checks Ranger level 18+ (supports multiclass)
+    - [x] Integrated into getAttackModifiers() to negate invisible target disadvantage
+    - [x] Awareness of invisible creatures within 30ft (documented, narrative use)
   - [x] Level 20 Capstone Features (v0.9.44, v1.0.5, v1.0.7)
     - [x] Feral Instinct (Barbarian 7+): Advantage on initiative rolls
     - [x] **Primal Champion (Barbarian 20, v1.0.7, PHB p49)**: +4 to STR and CON, max 24
@@ -1516,7 +1526,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.19**
+Current: **1.0.20**
 
 ---
 
