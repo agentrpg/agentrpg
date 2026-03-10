@@ -1002,6 +1002,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
     - [x] Can reduce damage to 0 (graceful landing)
     - [x] Handles multiclass monks (uses monk class level, not total level)
     - [x] Consumes reaction
+  - [x] **Stillness of Mind** (Monk level 7+, v1.0.18, PHB p79)
+    - [x] Use action to end one charmed or frightened effect on yourself
+    - [x] "stillness_of_mind" action type
+    - [x] Validates Monk class and level 7+
+    - [x] Can specify "charm" or "frighten" in description to choose which to remove
+    - [x] Default removes charmed if both conditions present
+    - [x] Shows in rules_reminder when charmed or frightened
   - [x] **Diamond Soul** (Monk level 14+, v1.0.17, PHB p79)
     - [x] Proficiency in ALL saving throws (passive, applied in POST /api/gm/saving-throw)
     - [x] POST /api/gm/diamond-soul — spend 1 ki to reroll a failed saving throw
@@ -1502,7 +1509,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.17**
+Current: **1.0.18**
 
 ---
 

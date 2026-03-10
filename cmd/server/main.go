@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.17"
+const version = "1.0.18"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -10080,6 +10080,10 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	// v1.0.17: Diamond Soul reminder for Monks level 14+
 	if classKey == "monk" && level >= 14 {
 		rulesReminder["diamond_soul"] = "💎 You have proficiency in ALL saving throws. If you fail a save, you can spend 1 ki to reroll (must use new result). Use POST /api/gm/diamond-soul."
+	}
+	// v1.0.18: Stillness of Mind reminder for Monks level 7+ who are charmed/frightened
+	if classKey == "monk" && level >= 7 && (hasAnyCharm(charID) || hasAnyFrightened(charID)) {
+		rulesReminder["stillness_of_mind"] = "🧘 Stillness of Mind: Use your action to end one charmed or frightened effect on yourself. Use 'stillness_of_mind' action."
 	}
 	if c, ok := srdClasses[classKey]; ok && c.Spellcasting != "" {
 		spellMod := 0
@@ -26862,6 +26866,77 @@ func resolveAction(action, description string, charID int) string {
 		kiSaveDC := 8 + game.ProficiencyBonus(level) + game.Modifier(wis)
 		
 		return fmt.Sprintf("⚡ Stunning Strike! (1 ki spent, %d remaining) Target must make CON save DC %d or be STUNNED until the end of your next turn.", ssRemaining, kiSaveDC)
+
+	case "stillness_of_mind":
+		// v1.0.18: Monk's Stillness of Mind (level 7+, PHB p79)
+		// Use your action to end one effect on yourself that is causing you to be charmed or frightened.
+		
+		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
+		if classKey != "monk" {
+			return "Only monks can use Stillness of Mind!"
+		}
+		
+		if level < 7 {
+			return "Stillness of Mind requires Monk level 7+!"
+		}
+		
+		// Check if the character has any charmed or frightened conditions
+		hasCharm := hasAnyCharm(charID)
+		hasFright := hasAnyFrightened(charID)
+		
+		if !hasCharm && !hasFright {
+			return "You are not charmed or frightened. Stillness of Mind has no effect."
+		}
+		
+		// Get current conditions
+		var existingConds []byte
+		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingConds)
+		var conds []string
+		json.Unmarshal(existingConds, &conds)
+		
+		// Parse description to see if player specified which to remove (default: remove charmed first if both)
+		descLower := strings.ToLower(description)
+		removeCharm := hasCharm
+		removeFright := hasFright
+		
+		if strings.Contains(descLower, "frighten") || strings.Contains(descLower, "fear") {
+			removeCharm = false
+		} else if strings.Contains(descLower, "charm") {
+			removeFright = false
+		}
+		
+		// If both present and no preference, default to removing one (charmed first)
+		if hasCharm && hasFright && !strings.Contains(descLower, "frighten") && !strings.Contains(descLower, "charm") {
+			removeFright = false
+		}
+		
+		// Remove the specified condition(s)
+		newConds := []string{}
+		removedCondition := ""
+		for _, c := range conds {
+			cLower := strings.ToLower(c)
+			if removeCharm && (cLower == "charmed" || strings.HasPrefix(cLower, "charmed:")) {
+				removedCondition = c
+				// Skip this condition (remove it)
+			} else if removeFright && (cLower == "frightened" || strings.HasPrefix(cLower, "frightened:")) {
+				removedCondition = c
+				// Skip this condition (remove it)
+			} else {
+				newConds = append(newConds, c)
+			}
+		}
+		
+		// Update conditions
+		updatedConds, _ := json.Marshal(newConds)
+		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
+		
+		// Determine what was removed for the message
+		effectType := "charmed"
+		if strings.HasPrefix(strings.ToLower(removedCondition), "frightened") {
+			effectType = "frightened"
+		}
+		
+		return fmt.Sprintf("🧘 Stillness of Mind! You focus inward and end the %s effect on yourself.", effectType)
 
 	case "cunning_action":
 		// v0.9.5: Rogue's Cunning Action (level 2+)

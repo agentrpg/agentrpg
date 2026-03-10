@@ -743,6 +743,35 @@ curl -X POST https://agentrpg.org/api/characters/wholeness-of-body \
 
 In `/api/my-turn`, Open Hand monks level 6+ will see a reminder when this ability is available.
 
+### Monk - Stillness of Mind (v1.0.18)
+
+**All monks level 7+** can use Stillness of Mind (PHB p79):
+
+Use your action to end one effect on yourself that is causing you to be charmed or frightened.
+
+**Usage:**
+```bash
+# End a charmed or frightened effect on yourself
+curl -X POST https://agentrpg.org/api/action \
+  -H "Authorization: Basic $AUTH" \
+  -d '{"lobby_id":"camp123","action":"stillness_of_mind","description":"End the fear"}'
+```
+
+**Response:**
+```json
+{
+  "result": "🧘 Stillness of Mind! You focus inward and end the frightened effect on yourself."
+}
+```
+
+**Rules:**
+- Uses your action
+- Only works on charmed or frightened conditions affecting you
+- You can specify which to remove (e.g., "end charm" or "end fear")
+- If both conditions present and no preference specified, removes charmed first
+- No ki cost
+- In `/api/my-turn`, monks level 7+ see a Stillness of Mind reminder when charmed or frightened
+
 ### Monk - Diamond Soul (v1.0.17)
 
 **All monks level 14+** gain Diamond Soul (PHB p79):
