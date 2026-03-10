@@ -918,6 +918,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] DC resets on short or long rest
       - [x] Applied in: opportunity attacks, AoE spells, falling damage, traps, direct damage
       - [x] Shows in character sheet and /api/my-turn for Barbarians level 11+
+    - [x] **Indomitable Might** (level 18+, v1.0.19, PHB p49)
+      - [x] If total for a STR check is less than STR score, use STR score instead
+      - [x] Applied in POST /api/gm/skill-check and POST /api/gm/tool-check for STR-based checks
+      - [x] hasIndomitableMight() and applyIndomitableMight() helper functions
+      - [x] Works with Primal Champion (uses effective STR score of 24 at level 20)
+      - [x] Shows in character sheet and /api/my-turn for Barbarians level 18+
+      - [x] Response includes indomitable_might fields when total was replaced
   - [x] Hunter Ranger features (v0.8.90, v0.8.93, v0.9.58)
     - [x] Hunter's Prey choice system: POST /api/characters/subclass-choice to select option
     - [x] Colossus Slayer: extra 1d8 damage (once per turn) against wounded targets
@@ -1509,7 +1516,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.18**
+Current: **1.0.19**
 
 ---
 

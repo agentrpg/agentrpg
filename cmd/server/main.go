@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.16
+// @version 1.0.19
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.18"
+const version = "1.0.19"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -2468,6 +2468,50 @@ func getAbilityScoreMax(ability string, class string, level int, classLevels map
 		return 24
 	}
 	return 20
+}
+
+// hasIndomitableMight checks if character has Indomitable Might (Barbarian 18+, PHB p49)
+// "If your total for a Strength check is less than your Strength score, you can use that score in place of the total."
+func hasIndomitableMight(class string, level int, classLevels map[string]int) bool {
+	// Check multiclass first
+	if len(classLevels) > 0 {
+		for c, lvl := range classLevels {
+			if strings.ToLower(c) == "barbarian" && lvl >= 18 {
+				return true
+			}
+		}
+		return false
+	}
+	// Single class check
+	return strings.ToLower(class) == "barbarian" && level >= 18
+}
+
+// hasIndomitableMightByID checks Indomitable Might by character ID
+func hasIndomitableMightByID(characterID int) bool {
+	var class string
+	var level int
+	var classLevelsJSON []byte
+	err := db.QueryRow("SELECT class, level, COALESCE(class_levels, '{}') FROM characters WHERE id = $1", characterID).Scan(&class, &level, &classLevelsJSON)
+	if err != nil {
+		return false
+	}
+	var classLevels map[string]int
+	json.Unmarshal(classLevelsJSON, &classLevels)
+	return hasIndomitableMight(class, level, classLevels)
+}
+
+// applyIndomitableMight returns the effective total for a STR check, applying Indomitable Might if applicable
+// Returns: effectiveTotal, wasApplied, strScore
+func applyIndomitableMight(total int, strScore int, class string, level int, classLevels map[string]int) (int, bool, int) {
+	if !hasIndomitableMight(class, level, classLevels) {
+		return total, false, strScore
+	}
+	// Get effective STR score (includes Primal Champion bonus if applicable)
+	effectiveStr := getEffectiveAbilityScore(strScore, "str", class, level, classLevels)
+	if total < effectiveStr {
+		return effectiveStr, true, effectiveStr
+	}
+	return total, false, effectiveStr
 }
 
 // isDwarf checks if a character is a dwarf (v0.9.51 - Dwarven Resilience)
@@ -9511,6 +9555,20 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		response["relentless_rage"] = relentlessRageInfo
 	}
 	
+	// v1.0.19: Barbarian Indomitable Might (level 18+, PHB p49)
+	if hasIndomitableMight(class, level, classLevels) {
+		// Get effective STR score (includes Primal Champion bonus at level 20)
+		effectiveStr := getEffectiveAbilityScore(str, "str", class, level, classLevels)
+		response["indomitable_might"] = map[string]interface{}{
+			"description":    "If your total for a Strength check is less than your Strength score, you can use that score in place of the total. (PHB p49)",
+			"str_score":      effectiveStr,
+			"minimum_result": effectiveStr,
+			"affects":        "all Strength-based ability checks",
+			"automatic":      true,
+			"tip":            fmt.Sprintf("💪 Indomitable Might: Your STR checks can never be lower than %d (your STR score)!", effectiveStr),
+		}
+	}
+	
 	// v0.9.49: Gnome Cunning info
 	if isGnome(charID) {
 		response["gnome_cunning"] = map[string]interface{}{
@@ -10914,6 +10972,22 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		response["relentless_rage"] = relentlessRageInfo
+	}
+	
+	// v1.0.19: Barbarian Indomitable Might (level 18+, PHB p49)
+	// Parse class levels for multiclass support
+	var classLevelsMyTurn map[string]int
+	json.Unmarshal(classLevelsJSONMyTurn, &classLevelsMyTurn)
+	if hasIndomitableMight(class, level, classLevelsMyTurn) {
+		// Get effective STR score (includes Primal Champion bonus at level 20)
+		effectiveStr := getEffectiveAbilityScore(str, "str", class, level, classLevelsMyTurn)
+		response["indomitable_might"] = map[string]interface{}{
+			"str_score":      effectiveStr,
+			"minimum_result": effectiveStr,
+			"affects":        "all Strength-based ability checks",
+			"automatic":      true,
+			"tip":            fmt.Sprintf("💪 Indomitable Might: Your STR checks can never be lower than %d!", effectiveStr),
+		}
 	}
 	
 	// v0.9.49: Gnome Cunning tip for saves against magic
@@ -13484,10 +13558,15 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	var hasInspiration bool
 	var subclassRaw sql.NullString
 	var class string
+	var classLevelsJSON []byte
 	err = db.QueryRow(`
-		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, ''), COALESCE(class, '')
+		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, COALESCE(skill_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, ''), COALESCE(class, ''), COALESCE(class_levels, '{}')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &expertiseRaw, &hasInspiration, &subclassRaw, &class)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &skillProfsRaw, &expertiseRaw, &hasInspiration, &subclassRaw, &class, &classLevelsJSON)
+	
+	// Parse class levels for multiclass feature checks
+	var classLevels map[string]int
+	json.Unmarshal(classLevelsJSON, &classLevels)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -13818,6 +13897,23 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	total := finalRoll + totalMod + peerlessSkillRoll
+	
+	// v1.0.19: Indomitable Might (Barbarian 18+, PHB p49)
+	// If the total for a Strength check is less than STR score, use STR score instead
+	indomitableMightApplied := false
+	indomitableMightOriginalTotal := total
+	indomitableMightStrScore := 0
+	isStrCheck := abilityUsed == "str" || abilityUsed == "strength"
+	if isStrCheck {
+		newTotal, applied, effectiveStr := applyIndomitableMight(total, str, class, level, classLevels)
+		if applied {
+			indomitableMightApplied = true
+			indomitableMightOriginalTotal = total
+			indomitableMightStrScore = effectiveStr
+			total = newTotal
+		}
+	}
+	
 	success := total >= req.DC
 	
 	// Format check name
@@ -13959,6 +14055,13 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 			response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (exhaustion level %d)", charName, charExhaustion)
 		}
 	}
+	// v1.0.19: Add Indomitable Might note
+	if indomitableMightApplied {
+		response["indomitable_might"] = true
+		response["indomitable_might_original_total"] = indomitableMightOriginalTotal
+		response["indomitable_might_str_score"] = indomitableMightStrScore
+		response["class_feature_note"] = fmt.Sprintf("💪 %s's Indomitable Might: total %d replaced with STR score %d", charName, indomitableMightOriginalTotal, indomitableMightStrScore)
+	}
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -14043,11 +14146,16 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	var hasInspiration bool
 	var toolSubclassRaw sql.NullString
 	var toolClass string
+	var toolClassLevelsJSON []byte
 	err = db.QueryRow(`
 		SELECT name, str, dex, con, intl, wis, cha, level, lobby_id, 
-			COALESCE(tool_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, ''), COALESCE(class, '')
+			COALESCE(tool_proficiencies, ''), COALESCE(expertise, ''), COALESCE(inspiration, false), COALESCE(subclass, ''), COALESCE(class, ''), COALESCE(class_levels, '{}')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &expertiseRaw, &hasInspiration, &toolSubclassRaw, &toolClass)
+	`, req.CharacterID).Scan(&charName, &str, &dex, &con, &intl, &wis, &cha, &level, &charLobbyID, &toolProfsRaw, &expertiseRaw, &hasInspiration, &toolSubclassRaw, &toolClass, &toolClassLevelsJSON)
+	
+	// Parse class levels for multiclass feature checks
+	var toolClassLevels map[string]int
+	json.Unmarshal(toolClassLevelsJSON, &toolClassLevels)
 	
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -14305,6 +14413,23 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	total := finalRoll + totalMod + toolPeerlessSkillRoll
+	
+	// v1.0.19: Indomitable Might (Barbarian 18+, PHB p49)
+	// If the total for a Strength check is less than STR score, use STR score instead
+	toolIndomitableMightApplied := false
+	toolIndomitableMightOriginalTotal := total
+	toolIndomitableMightStrScore := 0
+	isToolStrCheck := abilityUsed == "str" || abilityUsed == "strength"
+	if isToolStrCheck {
+		newTotal, applied, effectiveStr := applyIndomitableMight(total, str, toolClass, level, toolClassLevels)
+		if applied {
+			toolIndomitableMightApplied = true
+			toolIndomitableMightOriginalTotal = total
+			toolIndomitableMightStrScore = effectiveStr
+			total = newTotal
+		}
+	}
+	
 	success := total >= req.DC
 	
 	// Build result description
@@ -14445,6 +14570,13 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		} else {
 			response["condition_note"] = fmt.Sprintf("%s has disadvantage on ability checks (exhaustion level %d)", charName, charExhaustion)
 		}
+	}
+	// v1.0.19: Add Indomitable Might note
+	if toolIndomitableMightApplied {
+		response["indomitable_might"] = true
+		response["indomitable_might_original_total"] = toolIndomitableMightOriginalTotal
+		response["indomitable_might_str_score"] = toolIndomitableMightStrScore
+		response["class_feature_note"] = fmt.Sprintf("💪 %s's Indomitable Might: total %d replaced with STR score %d", charName, toolIndomitableMightOriginalTotal, toolIndomitableMightStrScore)
 	}
 	json.NewEncoder(w).Encode(response)
 }
