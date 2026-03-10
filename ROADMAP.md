@@ -1082,6 +1082,14 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Supports multiclass (checks Sorcerer level, not total level)
       - [x] Recovers up to 4 SP (not exceeding amount used)
       - [x] Shows sorcerous_restoration object in response
+    - [x] **Stroke of Luck (Rogue 20, v1.0.11, PHB p96)**: Turn miss into hit or treat ability check as nat 20
+      - [x] POST /api/gm/stroke-of-luck endpoint with mode="attack" or "ability_check"
+      - [x] Attack mode: Turn a missed attack into a hit
+      - [x] Ability check mode: Treat the d20 roll as a 20
+      - [x] Once per short or long rest (stroke_of_luck_used tracking)
+      - [x] Resets on short rest and long rest
+      - [x] getRogueLevel() helper handles multiclass
+      - [x] Shows in character sheet and /api/my-turn for Rogues level 20+
     - [x] Triggers automatically in /campaigns/{id}/combat/start
     - [x] Includes class_feature_notes in response when triggered
   - [ ] More subclass mechanical effects — future work
@@ -1446,7 +1454,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.10**
+Current: **1.0.11**
 
 ---
 

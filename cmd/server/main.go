@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.10"
+const version = "1.0.11"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -416,6 +416,7 @@ func main() {
 	http.HandleFunc("/api/gm/cutting-words", handleGMCuttingWords)
 	http.HandleFunc("/api/gm/dark-ones-luck", handleGMDarkOnesLuck)
 	http.HandleFunc("/api/gm/indomitable", handleGMIndomitable)
+	http.HandleFunc("/api/gm/stroke-of-luck", handleGMStrokeOfLuck)
 	http.HandleFunc("/api/gm/hurl-through-hell", handleGMHurlThroughHell)
 	http.HandleFunc("/api/gm/dispel-magic", handleGMDispelMagic)
 	http.HandleFunc("/api/gm/flanking", handleGMFlanking)
@@ -1083,6 +1084,12 @@ func initDB() {
 		-- divine_intervention_cooldown_until = timestamp when it can be used again after success
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS divine_intervention_failed BOOLEAN DEFAULT FALSE;
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS divine_intervention_cooldown_until TIMESTAMP;
+		
+		-- v1.0.11: Rogue Stroke of Luck (PHB p96)
+		-- Level 20: If your attack misses, turn the miss into a hit. 
+		-- Or if you fail an ability check, treat the d20 roll as a 20.
+		-- Once per short or long rest.
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS stroke_of_luck_used BOOLEAN DEFAULT FALSE;
 	EXCEPTION WHEN OTHERS THEN NULL;
 	END $$;
 	
@@ -2118,6 +2125,32 @@ func getIndomitableRemaining(characterID int) int {
 		return 0
 	}
 	return remaining
+}
+
+// getRogueLevel returns the Rogue class level for a character (handles multiclass) (v1.0.11)
+func getRogueLevel(charID int, primaryClass string, totalLevel int) int {
+	// Try to get class_levels for multiclass
+	var classLevelsJSON []byte
+	db.QueryRow("SELECT COALESCE(class_levels, '{}') FROM characters WHERE id = $1", charID).Scan(&classLevelsJSON)
+	
+	classLevels := make(map[string]int)
+	json.Unmarshal(classLevelsJSON, &classLevels)
+	
+	if len(classLevels) > 1 {
+		// Multiclass: check for Rogue levels
+		for c, lvl := range classLevels {
+			if strings.ToLower(c) == "rogue" {
+				return lvl
+			}
+		}
+		return 0
+	}
+	
+	// Single class
+	if strings.ToLower(primaryClass) == "rogue" {
+		return totalLevel
+	}
+	return 0
 }
 
 // isGnome checks if a character is a gnome (v0.9.49 - Gnome Cunning)
@@ -9600,6 +9633,32 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	
+	// v1.0.11: Rogue Stroke of Luck info (level 20)
+	rogueLevel := getRogueLevel(charID, class, level)
+	if rogueLevel >= 20 {
+		var strokeUsed bool
+		db.QueryRow("SELECT COALESCE(stroke_of_luck_used, false) FROM characters WHERE id = $1", charID).Scan(&strokeUsed)
+		
+		response["stroke_of_luck"] = map[string]interface{}{
+			"available":   !strokeUsed,
+			"used":        strokeUsed,
+			"recovery":    "short or long rest",
+			"description": "If your attack misses, you can turn the miss into a hit. Alternatively, if you fail an ability check, you can treat the d20 roll as a 20. (PHB p96)",
+			"modes": []map[string]string{
+				{"mode": "attack", "description": "Turn a missed attack into a hit"},
+				{"mode": "ability_check", "description": "Treat a failed ability check d20 as a 20"},
+			},
+			"how_to_use":    "Ask GM to call POST /api/gm/stroke-of-luck with your character_id and mode",
+			"phb_reference": "PHB p96 - Rogue",
+		}
+		
+		if !strokeUsed {
+			response["stroke_of_luck_tip"] = "🎲 Stroke of Luck available! If you miss an attack or fail an ability check, ask the GM to use it!"
+		} else {
+			response["stroke_of_luck_tip"] = "🎲 Stroke of Luck used. Take a short or long rest to recover."
+		}
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -11115,6 +11174,34 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		response["indomitable"] = indomitableInfo
+	}
+	
+	// v1.0.11: Rogue Stroke of Luck (level 20)
+	rogueLevel := getRogueLevel(charID, class, level)
+	if rogueLevel >= 20 {
+		var strokeUsed bool
+		db.QueryRow("SELECT COALESCE(stroke_of_luck_used, false) FROM characters WHERE id = $1", charID).Scan(&strokeUsed)
+		
+		strokeInfo := map[string]interface{}{
+			"available":   !strokeUsed,
+			"used":        strokeUsed,
+			"recovery":    "short or long rest",
+			"description": "If your attack misses, you can turn the miss into a hit. Alternatively, if you fail an ability check, you can treat the d20 roll as a 20. (PHB p96)",
+			"modes": []map[string]string{
+				{"mode": "attack", "description": "Turn a missed attack into a hit"},
+				{"mode": "ability_check", "description": "Treat a failed ability check d20 as a 20"},
+			},
+			"how_to_use":    "Ask GM to call POST /api/gm/stroke-of-luck with your character_id and mode",
+			"phb_reference": "PHB p96 - Rogue",
+		}
+		
+		if !strokeUsed {
+			strokeInfo["tip"] = "🎲 Stroke of Luck ready! If you miss an attack or fail an ability check, use it!"
+		} else {
+			strokeInfo["tip"] = "🎲 Stroke of Luck used. Take a short or long rest to recover."
+		}
+		
+		response["stroke_of_luck"] = strokeInfo
 	}
 	
 	json.NewEncoder(w).Encode(response)
@@ -31330,6 +31417,178 @@ func handleGMIndomitable(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// handleGMStrokeOfLuck godoc
+// @Summary Rogue's Stroke of Luck capstone (PHB p96)
+// @Description Level 20 Rogues can use this feature in two ways: 1) If an attack misses, turn the miss into a hit (mode="attack"). 2) If an ability check fails, treat the d20 roll as a 20 (mode="ability_check"). This feature can only be used once per short or long rest.
+// @Tags GM Tools
+// @Accept json
+// @Produce json
+// @Param Authorization header string true "Basic auth"
+// @Param request body object{character_id=integer,mode=string} true "character_id (Rogue level 20), mode ('attack' to turn miss into hit, 'ability_check' to treat roll as 20)"
+// @Success 200 {object} map[string]interface{} "Stroke of Luck applied"
+// @Failure 401 {object} map[string]interface{} "Unauthorized"
+// @Failure 403 {object} map[string]interface{} "Not GM"
+// @Failure 400 {object} map[string]interface{} "Invalid request or feature unavailable"
+// @Router /gm/stroke-of-luck [post]
+func handleGMStrokeOfLuck(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		Mode        string `json:"mode"` // "attack" or "ability_check"
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	
+	// Validate inputs
+	if req.CharacterID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "character_id required",
+		})
+		return
+	}
+	
+	if req.Mode == "" {
+		req.Mode = "attack" // Default to attack miss conversion
+	}
+	
+	modeLower := strings.ToLower(req.Mode)
+	if modeLower != "attack" && modeLower != "ability_check" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_request",
+			"message": "mode must be 'attack' (turn miss into hit) or 'ability_check' (treat roll as 20)",
+		})
+		return
+	}
+	
+	// Verify agent is DM of the character's campaign
+	var lobbyID, dmID int
+	err = db.QueryRow(`
+		SELECT c.lobby_id, l.dm_id FROM characters c
+		JOIN lobbies l ON c.lobby_id = l.id
+		WHERE c.id = $1
+	`, req.CharacterID).Scan(&lobbyID, &dmID)
+	
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	if dmID != agentID {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_gm",
+			"message": "You are not the GM of this character's campaign",
+		})
+		return
+	}
+	
+	// Get character info and check class/level
+	var charName, class string
+	var level int
+	var strokeOfLuckUsed bool
+	var classLevelsJSON []byte
+	err = db.QueryRow(`
+		SELECT name, class, level, COALESCE(stroke_of_luck_used, false), COALESCE(class_levels, '{}')
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charName, &class, &level, &strokeOfLuckUsed, &classLevelsJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+	
+	// Check Rogue level (handle multiclass)
+	rogueLevel := 0
+	classLevels := make(map[string]int)
+	json.Unmarshal(classLevelsJSON, &classLevels)
+	
+	if len(classLevels) > 1 {
+		// Multiclass: check for Rogue levels
+		for c, lvl := range classLevels {
+			if strings.ToLower(c) == "rogue" {
+				rogueLevel = lvl
+				break
+			}
+		}
+	} else if strings.ToLower(class) == "rogue" {
+		rogueLevel = level
+	}
+	
+	// Verify Rogue level 20
+	if rogueLevel < 20 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "feature_unavailable",
+			"message": fmt.Sprintf("%s is a Rogue level %d. Stroke of Luck requires Rogue level 20.", charName, rogueLevel),
+		})
+		return
+	}
+	
+	// Check if already used
+	if strokeOfLuckUsed {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":    "already_used",
+			"message":  fmt.Sprintf("%s has already used Stroke of Luck since their last rest.", charName),
+			"recovery": "short or long rest",
+		})
+		return
+	}
+	
+	// Mark as used
+	db.Exec("UPDATE characters SET stroke_of_luck_used = true WHERE id = $1", req.CharacterID)
+	
+	// Build result based on mode
+	var actionDesc, fullResult, modeDesc string
+	if modeLower == "attack" {
+		modeDesc = "turn a miss into a hit"
+		actionDesc = fmt.Sprintf("%s uses Stroke of Luck to turn a missed attack into a hit!", charName)
+		fullResult = "🎯 Stroke of Luck: The attack that missed is now a HIT!"
+	} else {
+		modeDesc = "treat ability check as natural 20"
+		actionDesc = fmt.Sprintf("%s uses Stroke of Luck to succeed on an ability check!", charName)
+		fullResult = "🎲 Stroke of Luck: The ability check result is treated as a natural 20!"
+	}
+	
+	// Log the action
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4, $5)
+	`, lobbyID, req.CharacterID, "stroke_of_luck", actionDesc, fullResult)
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"character":         charName,
+		"mode":              modeLower,
+		"mode_description":  modeDesc,
+		"result":            fullResult,
+		"stroke_of_luck_used": true,
+		"recovery":          "short or long rest",
+		"feature_note":      "Stroke of Luck (Rogue 20): Once per short or long rest, you can turn a miss into a hit or treat an ability check d20 as a 20.",
+	})
+}
+
 // handleGMHurlThroughHell godoc
 // @Summary Fiend Warlock's Hurl Through Hell capstone (PHB p109)
 // @Description Level 14+ Fiend Warlocks can use this feature when they hit a creature with an attack. The target is instantly transported through the lower planes, disappearing until the end of the Warlock's next turn. When the target returns, if it is not a fiend, it takes 10d10 psychic damage. This feature can only be used once per long rest. The target gains a "hurled_through_hell" condition while absent.
@@ -39658,6 +39917,28 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		}
 	}
 	
+	// v1.0.11: Reset Rogue's Stroke of Luck on short rest
+	var strokeOfLuckReset bool
+	rogueLevel := 0
+	if len(classLevels) > 1 {
+		for c, lvl := range classLevels {
+			if strings.ToLower(c) == "rogue" {
+				rogueLevel = lvl
+				break
+			}
+		}
+	} else if strings.ToLower(charClass) == "rogue" {
+		rogueLevel = charLevel
+	}
+	if rogueLevel >= 20 {
+		var strokeUsed bool
+		db.QueryRow("SELECT COALESCE(stroke_of_luck_used, false) FROM characters WHERE id = $1", charID).Scan(&strokeUsed)
+		if strokeUsed {
+			db.Exec("UPDATE characters SET stroke_of_luck_used = false WHERE id = $1", charID)
+			strokeOfLuckReset = true
+		}
+	}
+	
 	// v1.0.5: Sorcerous Restoration (Sorcerer level 20, PHB p102)
 	// Regain 4 expended sorcery points on short rest
 	var sorcerousRestorationRecovered int
@@ -39766,6 +40047,12 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		}
 	}
 	
+	// v1.0.11: Show Stroke of Luck recovery
+	if strokeOfLuckReset {
+		response["stroke_of_luck_recovered"] = true
+		response["stroke_of_luck_note"] = "Stroke of Luck is available again!"
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }
 
@@ -39860,7 +40147,8 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 			hurl_through_hell_used = false,
 			invocation_spells_used = '[]',
 			indomitable_used = 0,
-			mystic_arcanum_used = '[]'
+			mystic_arcanum_used = '[]',
+			stroke_of_luck_used = false
 		WHERE id = $1
 	`, charID, newHitDiceSpent, newExhaustion)
 	
