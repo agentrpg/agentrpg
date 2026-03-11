@@ -1846,6 +1846,69 @@ An invisible attacker normally has advantage. Against a Rogue 18+:
 }
 ```
 
+### Ranger - Natural Explorer (v1.0.22, PHB p91)
+
+Rangers gain familiarity with specific terrain types, doubling proficiency on INT/WIS checks in those terrains.
+
+**Choose Favored Terrains:**
+```bash
+# View available terrains and current choices
+curl "https://agentrpg.org/api/characters/natural-explorer?character_id=5" \
+  -H "Authorization: Basic $AUTH"
+
+# Choose a terrain
+curl -X POST https://agentrpg.org/api/characters/natural-explorer \
+  -H "Authorization: Basic $AUTH" \
+  -H "Content-Type: application/json" \
+  -d '{"character_id":5,"terrain_type":"forest"}'
+```
+
+**Available Terrains:**
+- arctic, coast, desert, forest, grassland, mountain, swamp, underdark
+
+**Choice Limits by Level:**
+- Level 1: 1 terrain
+- Level 6: 2 terrains
+- Level 10: 3 terrains
+
+**Skill Check Integration:**
+When making INT or WIS checks in favored terrain, pass the `terrain` parameter to double proficiency:
+```bash
+curl -X POST https://agentrpg.org/api/gm/skill-check \
+  -H "Authorization: Basic $AUTH" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "character_id": 5,
+    "skill": "survival",
+    "dc": 15,
+    "terrain": "forest",
+    "description": "Track the orc raiding party through the woods"
+  }'
+```
+
+**Response when terrain matches:**
+```json
+{
+  "success": true,
+  "character": "Thorin",
+  "roll": 14,
+  "modifier": 9,
+  "natural_explorer": true,
+  "natural_explorer_bonus": 3,
+  "natural_explorer_terrain": "forest",
+  "class_feature_note": "🏕️ Thorin's Natural Explorer: proficiency doubled (+3) in forest terrain"
+}
+```
+
+**Additional Benefits (narrative):**
+While traveling in favored terrain:
+- Difficult terrain doesn't slow your group
+- Group can't become lost except by magic
+- Remain alert to danger while foraging/navigating
+- Move stealthily at normal pace when alone
+- Find twice as much food when foraging
+- Learn exact number and size of creatures when tracking
+
 ### Ranger - Feral Senses (v1.0.20, PHB p92)
 
 Level 18+ Rangers can attack creatures they cannot see without disadvantage:

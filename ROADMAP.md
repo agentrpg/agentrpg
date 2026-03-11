@@ -981,6 +981,13 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Include "foe slayer" in attack description to add WIS mod to damage
       - [x] foe_slayer_used tracking, resets at turn start
       - [x] Shows in character sheet for Rangers level 20+
+    - [x] **Natural Explorer** (v1.0.22, PHB p91)
+      - [x] POST /api/characters/natural-explorer to choose terrain types
+      - [x] 8 terrain types available: arctic, coast, desert, forest, grassland, mountain, swamp, underdark
+      - [x] When making INT or WIS check in favored terrain, proficiency bonus doubled (if proficient)
+      - [x] Uses terrain param in POST /api/gm/skill-check
+      - [x] Shows in character sheet and /api/my-turn for Rangers
+      - [x] Choice limits by level: 1 at level 1, 2 at level 6, 3 at level 10
   - [x] Monk Ki abilities and Open Hand features (v0.9.2)
     - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
     - [x] patient_defense action: Dodge as bonus action for 1 ki
@@ -1535,7 +1542,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.21**
+Current: **1.0.22**
 
 ---
 

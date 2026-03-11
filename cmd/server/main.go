@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.21"
+const version = "1.0.22"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -475,6 +475,7 @@ func main() {
 	http.HandleFunc("/api/characters/divine-intervention", handleCharacterDivineIntervention)
 	http.HandleFunc("/api/characters/fiendish-resilience", handleCharacterFiendishResilience)
 	http.HandleFunc("/api/characters/favored-enemy", handleCharacterFavoredEnemy) // v0.9.87
+	http.HandleFunc("/api/characters/natural-explorer", handleCharacterNaturalExplorer) // v1.0.22
 	http.HandleFunc("/api/characters/mystic-arcanum", handleCharacterMysticArcanum) // v0.9.93
 	http.HandleFunc("/api/characters/one-with-shadows", handleCharacterOneWithShadows) // v1.0.4
 	http.HandleFunc("/api/characters/eldritch-master", handleCharacterEldritchMaster) // v1.0.12
@@ -1062,6 +1063,11 @@ func initDB() {
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS favored_enemies JSONB DEFAULT '[]';
 		-- Track Foe Slayer usage (once per turn, Ranger level 20)
 		ALTER TABLE characters ADD COLUMN IF NOT EXISTS foe_slayer_used BOOLEAN DEFAULT FALSE;
+		
+		-- v1.0.22: Ranger Natural Explorer (PHB p91)
+		-- Track chosen terrain types for Ranger class feature
+		-- Rangers can choose terrains at levels 1, 6, 10
+		ALTER TABLE characters ADD COLUMN IF NOT EXISTS favored_terrains JSONB DEFAULT '[]';
 		
 		-- v0.9.88: Fighter Indomitable (PHB p72)
 		-- Reroll a failed saving throw, must use new result
@@ -9904,6 +9910,35 @@ func handleCharacterByID(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		response["favored_enemy"] = favoredEnemyInfo
+		
+		// v1.0.22: Ranger Natural Explorer info (PHB p91)
+		favoredTerrains := getFavoredTerrains(charID)
+		maxTerrainChoices := getRangerNaturalExplorerCount(level)
+		
+		// Build terrain info with descriptions
+		terrainsInfo := []map[string]string{}
+		for _, terrain := range favoredTerrains {
+			desc := favoredTerrainTypes[terrain]
+			if desc == "" {
+				desc = terrain
+			}
+			terrainsInfo = append(terrainsInfo, map[string]string{"type": terrain, "description": desc})
+		}
+		
+		naturalExplorerInfo := map[string]interface{}{
+			"terrains":          terrainsInfo,
+			"total":             len(favoredTerrains),
+			"max_choices":       maxTerrainChoices,
+			"remaining_choices": maxTerrainChoices - len(favoredTerrains),
+			"mechanics":         "In favored terrain: proficiency doubled on INT/WIS checks (when proficient), difficult terrain doesn't slow group, can't become lost (except magic), remain alert, move stealthily at normal pace (alone), find twice as much food when foraging",
+			"phb_reference":     "PHB p91 - Ranger",
+		}
+		
+		if len(favoredTerrains) < maxTerrainChoices {
+			naturalExplorerInfo["tip"] = "You have unfilled terrain choices! Use POST /api/characters/natural-explorer to choose."
+		}
+		
+		response["natural_explorer"] = naturalExplorerInfo
 	}
 	
 	// v0.9.88: Fighter Indomitable info (level 9+)
@@ -13583,6 +13618,7 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		RequiresSight    bool   `json:"requires_sight"`    // v0.8.23: Auto-fail if blinded
 		UsePeerlessSkill bool   `json:"use_peerless_skill"` // v0.9.32: Lore Bard 14+ adds Bardic Inspiration die to own check
 		HalfSpeedMovement bool  `json:"half_speed_movement"` // v0.9.76: For Supreme Sneak (Thief 9+) - moved no more than half speed this turn
+		Terrain          string `json:"terrain"`            // v1.0.22: For Ranger Natural Explorer (e.g., "forest", "mountain")
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -13772,6 +13808,21 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		// Half proficiency bonus, rounded down
 		jackOfAllTradesBonus = game.ProficiencyBonus(level) / 2
 		totalMod += jackOfAllTradesBonus
+	}
+	
+	// v1.0.22: Natural Explorer (Ranger level 1+) (PHB p91)
+	// When making an INT or WIS check related to your favored terrain, proficiency bonus is doubled
+	// This applies if: Ranger, proficient in skill, INT or WIS check, terrain matches favored terrain
+	// Does not stack with expertise (expertise already doubles)
+	naturalExplorerBonus := 0
+	isIntOrWisCheck := abilityUsed == "int" || abilityUsed == "intelligence" ||
+		abilityUsed == "wis" || abilityUsed == "wisdom"
+	if isProficient && !hasExpertise && isIntOrWisCheck && strings.ToLower(class) == "ranger" && req.Terrain != "" {
+		if isFavoredTerrain(req.CharacterID, req.Terrain) {
+			// Double the proficiency bonus (add it again)
+			naturalExplorerBonus = game.ProficiencyBonus(level)
+			totalMod += naturalExplorerBonus
+		}
 	}
 	
 	// Handle inspiration: spend it for advantage
@@ -14070,6 +14121,13 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		response["jack_of_all_trades"] = true
 		response["jack_of_all_trades_bonus"] = jackOfAllTradesBonus
 		response["class_feature_note"] = fmt.Sprintf("%s adds +%d from Jack of All Trades (half proficiency for non-proficient checks)", charName, jackOfAllTradesBonus)
+	}
+	// v1.0.22: Add Natural Explorer note
+	if naturalExplorerBonus > 0 {
+		response["natural_explorer"] = true
+		response["natural_explorer_bonus"] = naturalExplorerBonus
+		response["natural_explorer_terrain"] = req.Terrain
+		response["class_feature_note"] = fmt.Sprintf("🏕️ %s's Natural Explorer: proficiency doubled (+%d) in %s terrain", charName, naturalExplorerBonus, req.Terrain)
 	}
 	// v0.9.26: Add Reliable Talent note
 	if reliableTalentApplied {
@@ -49949,6 +50007,18 @@ var favoredEnemyTypes = map[string]string{
 	"humanoids_dwarves":    "Humanoids: Dwarves",
 }
 
+// v1.0.22: Natural Explorer terrain types (PHB p91)
+var favoredTerrainTypes = map[string]string{
+	"arctic":     "Arctic (tundra, ice sheets, glaciers)",
+	"coast":      "Coast (beaches, shorelines, sea cliffs)",
+	"desert":     "Desert (sand dunes, badlands, salt flats)",
+	"forest":     "Forest (rainforest, woodland, jungle)",
+	"grassland":  "Grassland (prairie, savanna, steppe)",
+	"mountain":   "Mountain (alpine, highland, rocky terrain)",
+	"swamp":      "Swamp (marsh, bog, wetland)",
+	"underdark":  "Underdark (caverns, underground passages)",
+}
+
 // getRangerFavoredEnemyCount returns how many favored enemies a Ranger can have at their level
 func getRangerFavoredEnemyCount(level int) int {
 	if level >= 14 {
@@ -50327,6 +50397,337 @@ func getNextFavoredEnemyLevel(currentCount int) interface{} {
 	default:
 		return nil // Max reached
 	}
+}
+
+// v1.0.22: Natural Explorer helper functions (PHB p91)
+
+// getRangerNaturalExplorerCount returns how many favored terrains a Ranger can have at their level
+func getRangerNaturalExplorerCount(level int) int {
+	if level >= 10 {
+		return 3 // Third terrain at level 10
+	}
+	if level >= 6 {
+		return 2 // Second terrain at level 6
+	}
+	return 1 // First terrain at level 1
+}
+
+// getFavoredTerrains returns the list of favored terrain types for a character
+func getFavoredTerrains(characterID int) []string {
+	var terrainsJSON []byte
+	err := db.QueryRow("SELECT COALESCE(favored_terrains, '[]') FROM characters WHERE id = $1", characterID).Scan(&terrainsJSON)
+	if err != nil {
+		return []string{}
+	}
+	var terrains []string
+	json.Unmarshal(terrainsJSON, &terrains)
+	return terrains
+}
+
+// isFavoredTerrain checks if a terrain type matches any of the character's favored terrains
+func isFavoredTerrain(characterID int, terrainType string) bool {
+	terrains := getFavoredTerrains(characterID)
+	if len(terrains) == 0 {
+		return false
+	}
+	
+	terrainLower := strings.ToLower(terrainType)
+	for _, terrain := range terrains {
+		if strings.ToLower(terrain) == terrainLower {
+			return true
+		}
+		// Handle partial matches (e.g., "forest" matches "forest")
+		if strings.Contains(terrainLower, strings.ToLower(terrain)) || strings.Contains(strings.ToLower(terrain), terrainLower) {
+			return true
+		}
+	}
+	return false
+}
+
+// getNextNaturalExplorerLevel returns the level at which Rangers get their next terrain choice
+func getNextNaturalExplorerLevel(currentCount int) interface{} {
+	switch currentCount {
+	case 0:
+		return 1 // First choice at level 1
+	case 1:
+		return 6 // Second choice at level 6
+	case 2:
+		return 10 // Third choice at level 10
+	default:
+		return nil // Max reached
+	}
+}
+
+// handleCharacterNaturalExplorer manages Ranger Natural Explorer choices (PHB p91)
+// @Summary Manage Ranger Natural Explorer
+// @Description View or choose favored terrain types for Ranger characters
+// @Tags Characters
+// @Accept json
+// @Produce json
+// @Param character_id query int false "Character ID (GET only)"
+// @Param body body object{character_id=int,terrain_type=string} false "POST body"
+// @Success 200 {object} object
+// @Router /characters/natural-explorer [get]
+// @Router /characters/natural-explorer [post]
+func handleCharacterNaturalExplorer(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	if r.Method == "GET" {
+		charIDStr := r.URL.Query().Get("character_id")
+		charID, err := strconv.Atoi(charIDStr)
+		if err != nil {
+			// List all available terrain types
+			terrainTypes := []map[string]string{}
+			for key, desc := range favoredTerrainTypes {
+				terrainTypes = append(terrainTypes, map[string]string{"type": key, "description": desc})
+			}
+			// Sort alphabetically
+			sort.Slice(terrainTypes, func(i, j int) bool {
+				return terrainTypes[i]["type"] < terrainTypes[j]["type"]
+			})
+			
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"feature":      "Natural Explorer",
+				"class":        "Ranger",
+				"description":  "You are particularly familiar with one type of natural environment and are adept at traveling and surviving in such regions. Choose a favored terrain.",
+				"mechanics":    "When making an INT or WIS check related to your favored terrain, your proficiency bonus is doubled if you are using a skill that you're proficient in. While in favored terrain: difficult terrain doesn't slow your group's travel, your group can't become lost except by magical means, you remain alert to danger while doing other activities, you move stealthily at normal pace (when alone), find twice as much food when foraging, and learn exact number/size of creatures when tracking.",
+				"terrain_types":  terrainTypes,
+				"choices_by_level": map[string]int{
+					"level_1":  1,
+					"level_6":  2,
+					"level_10": 3,
+				},
+				"usage": "GET /api/characters/natural-explorer?character_id=X to view choices, POST to add a favored terrain",
+			})
+			return
+		}
+		
+		// Get character info
+		var class, charName string
+		var level int
+		var terrainsJSON []byte
+		err = db.QueryRow(`
+			SELECT class, name, level, COALESCE(favored_terrains, '[]')
+			FROM characters WHERE id = $1
+		`, charID).Scan(&class, &charName, &level, &terrainsJSON)
+		
+		if err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "character_not_found",
+				"message": fmt.Sprintf("Character %d not found", charID),
+			})
+			return
+		}
+		
+		if strings.ToLower(class) != "ranger" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "not_ranger",
+				"message": fmt.Sprintf("%s is a %s, not a Ranger. Natural Explorer is a Ranger feature.", charName, class),
+			})
+			return
+		}
+		
+		var currentTerrains []string
+		json.Unmarshal(terrainsJSON, &currentTerrains)
+		
+		maxChoices := getRangerNaturalExplorerCount(level)
+		remainingChoices := maxChoices - len(currentTerrains)
+		
+		// Get descriptions for current terrains
+		currentTerrainsInfo := []map[string]string{}
+		for _, terrain := range currentTerrains {
+			desc := favoredTerrainTypes[terrain]
+			if desc == "" {
+				desc = terrain
+			}
+			currentTerrainsInfo = append(currentTerrainsInfo, map[string]string{"type": terrain, "description": desc})
+		}
+		
+		// Build available choices (exclude already chosen)
+		availableTypes := []map[string]string{}
+		for key, desc := range favoredTerrainTypes {
+			alreadyChosen := false
+			for _, existing := range currentTerrains {
+				if existing == key {
+					alreadyChosen = true
+					break
+				}
+			}
+			if !alreadyChosen {
+				availableTypes = append(availableTypes, map[string]string{"type": key, "description": desc})
+			}
+		}
+		sort.Slice(availableTypes, func(i, j int) bool {
+			return availableTypes[i]["type"] < availableTypes[j]["type"]
+		})
+		
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"character_id":        charID,
+			"character":           charName,
+			"class":               class,
+			"level":               level,
+			"feature":             "Natural Explorer",
+			"current_terrains":    currentTerrainsInfo,
+			"max_choices":         maxChoices,
+			"remaining_choices":   remainingChoices,
+			"available_types":     availableTypes,
+			"can_add":             remainingChoices > 0,
+			"next_terrain_at":     getNextNaturalExplorerLevel(len(currentTerrains)),
+			"mechanics":           "When making an INT or WIS check related to your favored terrain, your proficiency bonus is doubled if proficient. Additional benefits apply while traveling in favored terrain.",
+			"how_to_use":          "POST /api/characters/natural-explorer with character_id and terrain_type",
+		})
+		return
+	}
+	
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	
+	// Auth
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "unauthorized", "message": err.Error()})
+		return
+	}
+	
+	var req struct {
+		CharacterID int    `json:"character_id"`
+		TerrainType string `json:"terrain_type"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json", "message": err.Error()})
+		return
+	}
+	
+	if req.CharacterID == 0 {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_id_required",
+			"message": "Provide character_id",
+		})
+		return
+	}
+	
+	if req.TerrainType == "" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "terrain_type_required",
+			"message":         "Provide terrain_type (e.g., 'forest', 'mountain')",
+			"available_types": favoredTerrainTypes,
+		})
+		return
+	}
+	
+	// Validate terrain type
+	terrainTypeLower := strings.ToLower(req.TerrainType)
+	if _, valid := favoredTerrainTypes[terrainTypeLower]; !valid {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "invalid_terrain_type",
+			"message":         fmt.Sprintf("'%s' is not a valid terrain type", req.TerrainType),
+			"available_types": favoredTerrainTypes,
+		})
+		return
+	}
+	
+	// Get character info
+	var charOwnerID int
+	var class, charName string
+	var level int
+	var terrainsJSON []byte
+	var campaignID sql.NullInt64
+	err = db.QueryRow(`
+		SELECT agent_id, class, name, level, COALESCE(favored_terrains, '[]'), lobby_id
+		FROM characters WHERE id = $1
+	`, req.CharacterID).Scan(&charOwnerID, &class, &charName, &level, &terrainsJSON, &campaignID)
+	
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "character_not_found",
+			"message": fmt.Sprintf("Character %d not found", req.CharacterID),
+		})
+		return
+	}
+	
+	// Verify ownership
+	if charOwnerID != agentID {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_owner",
+			"message": "You don't own this character",
+		})
+		return
+	}
+	
+	// Must be a Ranger
+	if strings.ToLower(class) != "ranger" {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "not_ranger",
+			"message": fmt.Sprintf("%s is a %s, not a Ranger. Natural Explorer is a Ranger feature.", charName, class),
+		})
+		return
+	}
+	
+	// Parse current terrains
+	var currentTerrains []string
+	json.Unmarshal(terrainsJSON, &currentTerrains)
+	
+	// Check if already chosen
+	for _, existing := range currentTerrains {
+		if strings.ToLower(existing) == terrainTypeLower {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "already_chosen",
+				"message": fmt.Sprintf("%s has already chosen %s as a favored terrain", charName, terrainTypeLower),
+			})
+			return
+		}
+	}
+	
+	// Check if can add more
+	maxChoices := getRangerNaturalExplorerCount(level)
+	if len(currentTerrains) >= maxChoices {
+		nextLevel := getNextNaturalExplorerLevel(len(currentTerrains))
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":           "max_terrains_reached",
+			"message":         fmt.Sprintf("%s already has %d favored terrain(s), the maximum for level %d", charName, len(currentTerrains), level),
+			"current_count":   len(currentTerrains),
+			"max_for_level":   maxChoices,
+			"next_terrain_at": nextLevel,
+		})
+		return
+	}
+	
+	// Add the terrain
+	currentTerrains = append(currentTerrains, terrainTypeLower)
+	terrainsJSONNew, _ := json.Marshal(currentTerrains)
+	
+	_, err = db.Exec("UPDATE characters SET favored_terrains = $1 WHERE id = $2", terrainsJSONNew, req.CharacterID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "database_error",
+			"message": "Failed to save terrain choice",
+		})
+		return
+	}
+	
+	// Log to campaign feed if in a campaign
+	if campaignID.Valid {
+		db.Exec(`
+			INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+			VALUES ($1, $2, 'natural_explorer', $3, 'success')
+		`, campaignID.Int64, req.CharacterID,
+			fmt.Sprintf("🏕️ %s becomes familiar with %s terrain (Natural Explorer)", charName, favoredTerrainTypes[terrainTypeLower]))
+	}
+	
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"feature":           "Natural Explorer",
+		"character":         charName,
+		"new_terrain":       terrainTypeLower,
+		"new_terrain_info":  favoredTerrainTypes[terrainTypeLower],
+		"total_terrains":    len(currentTerrains),
+		"all_terrains":      currentTerrains,
+		"remaining_choices": maxChoices - len(currentTerrains),
+		"mechanics":         "When making INT or WIS checks related to this terrain, your proficiency bonus is doubled if proficient. While in this terrain: difficult terrain doesn't slow your group, you can't become lost (except magically), remain alert while doing other activities, move stealthily at normal pace when alone, find twice as much food when foraging, and learn exact details when tracking.",
+	})
 }
 
 // getMysticArcanumLevelRequirement returns the warlock level required for a given spell level arcanum
