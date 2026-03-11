@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.21
+// @version 1.0.23
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.22"
+const version = "1.0.23"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -27205,14 +27205,14 @@ func resolveAction(action, description string, charID int) string {
 		// v0.9.5: Rogue's Cunning Action (level 2+)
 		// Take Dash, Disengage, or Hide as a bonus action
 		// Thief subclass (level 3+) via Fast Hands: also Sleight of Hand, Thieves' Tools, or Use Object
+		// v1.0.23: Ranger's Vanish (level 14+, PHB p92) — Hide as bonus action only
 		
 		classKey := strings.ToLower(strings.ReplaceAll(class, " ", "_"))
-		if classKey != "rogue" {
-			return "Only rogues can use Cunning Action!"
-		}
+		isRogue := classKey == "rogue" && level >= 2
+		isRangerVanish := classKey == "ranger" && level >= 14
 		
-		if level < 2 {
-			return "Cunning Action requires level 2+!"
+		if !isRogue && !isRangerVanish {
+			return "Only rogues (level 2+) or rangers with Vanish (level 14+) can use this!"
 		}
 		
 		// Parse which action from description
@@ -27315,12 +27315,18 @@ func resolveAction(action, description string, charID int) string {
 			}
 		}
 		
-		// Standard Cunning Action options
+		// Standard Cunning Action options (Rogues only for Dash/Disengage)
 		if strings.Contains(descLower, "dash") {
+			if isRangerVanish && !isRogue {
+				return "🏹 Vanish only allows Hide as a bonus action, not Dash. Rangers use normal action economy for Dash."
+			}
 			return "💨 Cunning Action (Dash)! Your speed is doubled for this turn. You can move up to twice your normal speed."
 		}
 		
 		if strings.Contains(descLower, "disengage") {
+			if isRangerVanish && !isRogue {
+				return "🏹 Vanish only allows Hide as a bonus action, not Disengage. Rangers use normal action economy for Disengage."
+			}
 			return "🏃 Cunning Action (Disengage)! Your movement doesn't provoke opportunity attacks for the rest of this turn."
 		}
 		
@@ -27369,10 +27375,18 @@ func resolveAction(action, description string, charID int) string {
 			updatedConds, _ := json.Marshal(conds)
 			db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedConds, charID)
 			
+			// v1.0.23: Different message for Ranger's Vanish vs Rogue's Cunning Action
+			if isRangerVanish && !isRogue {
+				return fmt.Sprintf("🏹 Vanish (Hide)! Stealth check: %d + %d = %d. You are now hidden (attacks against you have disadvantage, you have advantage on attacks until you're revealed). You also can't be tracked by nonmagical means.", roll, bonus, total)
+			}
 			return fmt.Sprintf("🙈 Cunning Action (Hide)! Stealth check: %d + %d = %d. You are now hidden (attacks against you have disadvantage, you have advantage on attacks until you're revealed).", roll, bonus, total)
 		}
 		
 		// No specific action given - provide options
+		// v1.0.23: Rangers with Vanish only get Hide option
+		if isRangerVanish && !isRogue {
+			return "🏹 Vanish! You can use the Hide action as a bonus action. Specify: hide"
+		}
 		options := "Specify: dash, disengage, or hide"
 		if isThief {
 			options = "Specify: dash, disengage, hide, sleight of hand, thieves' tools, or use object"

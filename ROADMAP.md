@@ -988,6 +988,11 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
       - [x] Uses terrain param in POST /api/gm/skill-check
       - [x] Shows in character sheet and /api/my-turn for Rangers
       - [x] Choice limits by level: 1 at level 1, 2 at level 6, 3 at level 10
+    - [x] **Vanish** (v1.0.23, PHB p92)
+      - [x] Level 14+: use Hide as a bonus action via `cunning_action` action type
+      - [x] Only Hide allowed (not Dash/Disengage like Rogues)
+      - [x] Can't be tracked by nonmagical means (documented feature)
+      - [x] Response includes Vanish-specific messaging
   - [x] Monk Ki abilities and Open Hand features (v0.9.2)
     - [x] flurry_of_blows action: 2 unarmed strikes for 1 ki (bonus action after Attack)
     - [x] patient_defense action: Dodge as bonus action for 1 ki
@@ -1542,7 +1547,7 @@ Based on comprehensive analysis of full D&D 5e implementations (avrae, FoundryVT
 - Meaningful milestone: bump minor (0.7 → 0.8)
 - Breaking changes: bump minor with note
 
-Current: **1.0.22**
+Current: **1.0.23**
 
 ---
 
