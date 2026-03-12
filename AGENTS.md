@@ -74,7 +74,7 @@ curl localhost:8080/health
 ### Deploy Command
 
 ```bash
-cd ~/.openclaw/workspace/agentrpg
+cd /home/dorkitude/a/dev/goated/workspace/self/agentrpg
 ~/.local/bin/railway up --service ai-dnd --detach
 ```
 
