@@ -1399,3 +1399,133 @@ func TestSkipRequiredVsSkipRecommended(t *testing.T) {
 		}
 	}
 }
+
+// TestGMStatusMultiCampaign verifies that /api/gm/status returns the correct
+// campaign when the GM runs multiple campaigns and passes ?campaign_id=.
+func TestGMStatusMultiCampaign(t *testing.T) {
+	if os.Getenv("DATABASE_URL") == "" && os.Getenv("TEST_DATABASE_URL") == "" {
+		t.Skip("No database URL set - skipping integration test")
+	}
+
+	initTestDB(t)
+	testPrefix := fmt.Sprintf("test_multicampaign_%d_", time.Now().Unix())
+	defer cleanupTestData(t, testPrefix)
+
+	// Register a GM
+	_, result := makeRequest(t, "POST", "/api/register", map[string]interface{}{
+		"name":     testPrefix + "GM",
+		"password": "gm123",
+	}, "")
+	gmID := int(result["agent_id"].(float64))
+	gmAuth := createAuth(fmt.Sprintf("%d", gmID), "gm123")
+
+	// Register two players
+	_, result = makeRequest(t, "POST", "/api/register", map[string]interface{}{
+		"name":     testPrefix + "Player1",
+		"password": "player123",
+	}, "")
+	player1ID := int(result["agent_id"].(float64))
+	player1Auth := createAuth(fmt.Sprintf("%d", player1ID), "player123")
+
+	_, result = makeRequest(t, "POST", "/api/register", map[string]interface{}{
+		"name":     testPrefix + "Player2",
+		"password": "player456",
+	}, "")
+	player2ID := int(result["agent_id"].(float64))
+	player2Auth := createAuth(fmt.Sprintf("%d", player2ID), "player456")
+
+	// Create two characters, one per player
+	_, result = makeRequest(t, "POST", "/api/characters", map[string]interface{}{
+		"name":  testPrefix + "Fighter",
+		"class": "fighter",
+		"race":  "human",
+	}, player1Auth)
+	char1ID := int(result["character_id"].(float64))
+
+	_, result = makeRequest(t, "POST", "/api/characters", map[string]interface{}{
+		"name":  testPrefix + "Wizard",
+		"class": "wizard",
+		"race":  "elf",
+	}, player2Auth)
+	char2ID := int(result["character_id"].(float64))
+
+	// Create Campaign A
+	_, result = makeRequest(t, "POST", "/api/campaigns", map[string]interface{}{
+		"name":    testPrefix + "Campaign Alpha",
+		"setting": "A dark dungeon",
+	}, gmAuth)
+	campaignAID := int(result["campaign_id"].(float64))
+
+	// Create Campaign B
+	_, result = makeRequest(t, "POST", "/api/campaigns", map[string]interface{}{
+		"name":    testPrefix + "Campaign Beta",
+		"setting": "A bright forest",
+	}, gmAuth)
+	campaignBID := int(result["campaign_id"].(float64))
+
+	// Join and start Campaign A with Player 1
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/join", campaignAID), map[string]interface{}{
+		"character_id": char1ID,
+	}, player1Auth)
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/start", campaignAID), nil, gmAuth)
+
+	// Join and start Campaign B with Player 2
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/join", campaignBID), map[string]interface{}{
+		"character_id": char2ID,
+	}, player2Auth)
+	_, _ = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/start", campaignBID), nil, gmAuth)
+
+	t.Run("WithoutCampaignID_ReturnsAny", func(t *testing.T) {
+		_, result := makeRequest(t, "GET", "/api/gm/status", nil, gmAuth)
+		returnedID := int(result["campaign_id"].(float64))
+		t.Logf("Without campaign_id param, got campaign_id=%d", returnedID)
+		// Should return one of the two
+		if returnedID != campaignAID && returnedID != campaignBID {
+			t.Errorf("Expected campaign_id to be %d or %d, got %d", campaignAID, campaignBID, returnedID)
+		}
+	})
+
+	t.Run("WithCampaignID_ReturnsCampaignA", func(t *testing.T) {
+		_, result := makeRequest(t, "GET", fmt.Sprintf("/api/gm/status?campaign_id=%d", campaignAID), nil, gmAuth)
+		returnedID := int(result["campaign_id"].(float64))
+		returnedName := result["campaign_name"].(string)
+		if returnedID != campaignAID {
+			t.Errorf("Expected campaign_id=%d, got %d", campaignAID, returnedID)
+		}
+		if !strings.Contains(returnedName, "Campaign Alpha") {
+			t.Errorf("Expected campaign name containing 'Campaign Alpha', got '%s'", returnedName)
+		}
+		t.Logf("✓ campaign_id=%d returned '%s'", returnedID, returnedName)
+	})
+
+	t.Run("WithCampaignID_ReturnsCampaignB", func(t *testing.T) {
+		_, result := makeRequest(t, "GET", fmt.Sprintf("/api/gm/status?campaign_id=%d", campaignBID), nil, gmAuth)
+		returnedID := int(result["campaign_id"].(float64))
+		returnedName := result["campaign_name"].(string)
+		if returnedID != campaignBID {
+			t.Errorf("Expected campaign_id=%d, got %d", campaignBID, returnedID)
+		}
+		if !strings.Contains(returnedName, "Campaign Beta") {
+			t.Errorf("Expected campaign name containing 'Campaign Beta', got '%s'", returnedName)
+		}
+		t.Logf("✓ campaign_id=%d returned '%s'", returnedID, returnedName)
+	})
+
+	t.Run("DifferentCampaigns_DifferentData", func(t *testing.T) {
+		_, resultA := makeRequest(t, "GET", fmt.Sprintf("/api/gm/status?campaign_id=%d", campaignAID), nil, gmAuth)
+		_, resultB := makeRequest(t, "GET", fmt.Sprintf("/api/gm/status?campaign_id=%d", campaignBID), nil, gmAuth)
+
+		idA := int(resultA["campaign_id"].(float64))
+		idB := int(resultB["campaign_id"].(float64))
+
+		if idA == idB {
+			t.Errorf("Both requests returned campaign_id=%d — BUG: should return different campaigns", idA)
+		} else {
+			t.Logf("✓ Campaign A returned id=%d, Campaign B returned id=%d", idA, idB)
+		}
+	})
+
+	_ = player2ID
+	_ = char1ID
+	_ = char2ID
+}

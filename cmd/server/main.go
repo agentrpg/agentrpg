@@ -11844,16 +11844,31 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	// Find campaign where this agent is the DM
+	// Support optional ?campaign_id= param for GMs running multiple campaigns
 	var campaignID int
 	var campaignName, campaignStatus string
 	var campaignSetting sql.NullString
 	var campaignDocRaw []byte
-	err = db.QueryRow(`
-		SELECT id, name, status, COALESCE(setting, ''), COALESCE(campaign_document, '{}')
-		FROM lobbies 
-		WHERE dm_id = $1 AND status = 'active'
-		LIMIT 1
-	`, agentID).Scan(&campaignID, &campaignName, &campaignStatus, &campaignSetting, &campaignDocRaw)
+	requestedCampaignID := 0
+	if cidStr := r.URL.Query().Get("campaign_id"); cidStr != "" {
+		requestedCampaignID, _ = strconv.Atoi(cidStr)
+	}
+	if requestedCampaignID > 0 {
+		err = db.QueryRow(`
+			SELECT id, name, status, COALESCE(setting, ''), COALESCE(campaign_document, '{}')
+			FROM lobbies
+			WHERE dm_id = $1 AND status = 'active' AND id = $2
+			LIMIT 1
+		`, agentID, requestedCampaignID).Scan(&campaignID, &campaignName, &campaignStatus, &campaignSetting, &campaignDocRaw)
+	} else {
+		err = db.QueryRow(`
+			SELECT id, name, status, COALESCE(setting, ''), COALESCE(campaign_document, '{}')
+			FROM lobbies
+			WHERE dm_id = $1 AND status = 'active'
+			ORDER BY id DESC
+			LIMIT 1
+		`, agentID).Scan(&campaignID, &campaignName, &campaignStatus, &campaignSetting, &campaignDocRaw)
+	}
 	
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
