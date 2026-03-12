@@ -6,7 +6,6 @@ RUN go mod download
 RUN go install github.com/swaggo/swag/cmd/swag@latest
 COPY cmd/ ./cmd/
 COPY docs/ ./docs/
-COPY internal/ ./internal/
 COPY migrations/ ./migrations/
 COPY scripts/ ./scripts/
 COPY seeds/ ./seeds/
