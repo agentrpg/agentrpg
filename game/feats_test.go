@@ -132,11 +132,11 @@ func TestAllFeats(t *testing.T) {
 
 func TestFeatMeetsPrerequisite(t *testing.T) {
 	tests := []struct {
-		name         string
-		prereq       string
-		abilities    map[string]int
+		name          string
+		prereq        string
+		abilities     map[string]int
 		isSpellcaster bool
-		expected     bool
+		expected      bool
 	}{
 		{"empty prereq", "", nil, false, true},
 		{"spellcaster required and is", "spellcaster", nil, true, true},
@@ -151,7 +151,7 @@ func TestFeatMeetsPrerequisite(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			result := FeatMeetsPrerequisite(tt.prereq, tt.abilities, tt.isSpellcaster)
 			if result != tt.expected {
-				t.Errorf("FeatMeetsPrerequisite(%q, %v, %v) = %v, want %v", 
+				t.Errorf("FeatMeetsPrerequisite(%q, %v, %v) = %v, want %v",
 					tt.prereq, tt.abilities, tt.isSpellcaster, result, tt.expected)
 			}
 		})

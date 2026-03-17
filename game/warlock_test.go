@@ -7,11 +7,11 @@ func TestGetMaxInvocations(t *testing.T) {
 		level    int
 		expected int
 	}{
-		{1, 0},   // No invocations at level 1
-		{2, 2},   // First invocations at level 2
+		{1, 0}, // No invocations at level 1
+		{2, 2}, // First invocations at level 2
 		{3, 2},
 		{4, 2},
-		{5, 3},   // Third invocation at level 5
+		{5, 3}, // Third invocation at level 5
 		{6, 3},
 		{7, 4},
 		{8, 4},
@@ -192,19 +192,19 @@ func TestListPactBoons(t *testing.T) {
 func TestLevelBasedInvocations(t *testing.T) {
 	// Verify level prerequisites are correctly set
 	levelRequirements := map[string]int{
-		"agonizing-blast":         0, // No level requirement (just spell)
-		"mire-the-mind":           5,
-		"one-with-shadows":        5,
-		"sign-of-ill-omen":        5,
-		"sculptor-of-flesh":       7,
-		"ascendant-step":          9,
-		"minions-of-chaos":        9,
-		"otherworldly-leap":       9,
-		"whispers-of-the-grave":   9,
-		"lifedrinker":             12,
-		"master-of-myriad-forms":  15,
+		"agonizing-blast":           0, // No level requirement (just spell)
+		"mire-the-mind":             5,
+		"one-with-shadows":          5,
+		"sign-of-ill-omen":          5,
+		"sculptor-of-flesh":         7,
+		"ascendant-step":            9,
+		"minions-of-chaos":          9,
+		"otherworldly-leap":         9,
+		"whispers-of-the-grave":     9,
+		"lifedrinker":               12,
+		"master-of-myriad-forms":    15,
 		"visions-of-distant-realms": 15,
-		"witch-sight":             15,
+		"witch-sight":               15,
 	}
 
 	for slug, expectedLevel := range levelRequirements {

@@ -178,11 +178,11 @@ func TestGetSaveDisadvantage(t *testing.T) {
 
 func TestGetAttackDisadvantage(t *testing.T) {
 	tests := []struct {
-		name                string
-		conditions          []string
-		exhaustion          int
-		frightenedVisible   bool
-		want                bool
+		name              string
+		conditions        []string
+		exhaustion        int
+		frightenedVisible bool
+		want              bool
 	}{
 		{"no conditions", []string{}, 0, false, false},
 		{"blinded", []string{"blinded"}, 0, false, true},
@@ -340,7 +340,7 @@ func TestAllConditions(t *testing.T) {
 	if len(conditions) != 14 {
 		t.Errorf("AllConditions() returned %d conditions, want 14 (15 minus exhaustion which is separate)", len(conditions))
 	}
-	
+
 	// Check a few known conditions are present
 	found := make(map[string]bool)
 	for _, c := range conditions {
@@ -352,7 +352,7 @@ func TestAllConditions(t *testing.T) {
 			t.Errorf("Condition %q has no effects listed", c.Name)
 		}
 	}
-	
+
 	expectedConditions := []string{"blinded", "charmed", "paralyzed", "prone", "stunned"}
 	for _, exp := range expectedConditions {
 		if !found[exp] {

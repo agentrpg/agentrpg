@@ -6,9 +6,9 @@ import (
 
 func TestArmorDonDoffTime(t *testing.T) {
 	tests := []struct {
-		armorType    string
-		wantDon      int
-		wantDoff     int
+		armorType string
+		wantDon   int
+		wantDoff  int
 	}{
 		{"light", 1, 1},
 		{"Light", 1, 1},
@@ -22,7 +22,7 @@ func TestArmorDonDoffTime(t *testing.T) {
 		{"unknown", 1, 1}, // defaults to light
 		{"", 1, 1},        // defaults to light
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.armorType, func(t *testing.T) {
 			don, doff := ArmorDonDoffTime(tt.armorType)
@@ -105,7 +105,7 @@ func TestCalculateArmorAC(t *testing.T) {
 			wantAC:    20, // 18 + 2
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ac := CalculateArmorAC(tt.dexMod, tt.armor, tt.hasShield)
@@ -119,12 +119,12 @@ func TestCalculateArmorAC(t *testing.T) {
 
 func TestCalculateArmorACWithNatural(t *testing.T) {
 	tests := []struct {
-		name         string
-		dexMod       int
-		armor        *ArmorInfo
-		hasShield    bool
-		naturalBase  int
-		wantAC       int
+		name        string
+		dexMod      int
+		armor       *ArmorInfo
+		hasShield   bool
+		naturalBase int
+		wantAC      int
 	}{
 		{
 			name:        "draconic resilience (13 + DEX)",
@@ -148,7 +148,7 @@ func TestCalculateArmorACWithNatural(t *testing.T) {
 			wantAC:      18, // Armor wins
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ac := CalculateArmorACWithNatural(tt.dexMod, tt.armor, tt.hasShield, tt.naturalBase)
@@ -172,11 +172,11 @@ func TestAmmoTypeForWeapon(t *testing.T) {
 		{"hand_crossbow", "bolts"},
 		{"blowgun", "needles"},
 		{"sling", "bullets"},
-		{"longsword", ""},  // melee weapon
-		{"dagger", ""},     // melee/thrown
+		{"longsword", ""}, // melee weapon
+		{"dagger", ""},    // melee/thrown
 		{"unknown", ""},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.weapon, func(t *testing.T) {
 			got := AmmoTypeForWeapon(tt.weapon)
@@ -199,7 +199,7 @@ func TestAmmoNames(t *testing.T) {
 		{"bullets", "sling bullets"},
 		{"unknown", "unknown"}, // falls back to the type itself
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.ammoType+"_"+tt.contains, func(t *testing.T) {
 			names := AmmoNames(tt.ammoType)
@@ -231,7 +231,7 @@ func TestIsWeaponCategoryProficient(t *testing.T) {
 		{"MARTIAL", "martial", true},
 		{" simple ", "simple", true},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.profCategory+"_"+tt.weaponCategory, func(t *testing.T) {
 			got := IsWeaponCategoryProficient(tt.profCategory, tt.weaponCategory)
@@ -311,7 +311,7 @@ func TestIsArmorCategoryProficient(t *testing.T) {
 			want:          true,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := IsArmorCategoryProficient(tt.profList, tt.armorCategory)
@@ -335,7 +335,7 @@ func TestParseProficiencyList(t *testing.T) {
 		{"  light  ,  medium  ", []string{"light", "medium"}},
 		{"all armor, shields", []string{"all armor", "shields"}},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := ParseProficiencyList(tt.input)
@@ -363,7 +363,7 @@ func TestNormalizeWeaponName(t *testing.T) {
 		{"  DAGGER  ", "dagger"},
 		{"hand_crossbow", "hand crossbow"},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			got := NormalizeWeaponName(tt.input)
@@ -379,7 +379,7 @@ func TestIsUnderwaterExemptWeapon(t *testing.T) {
 		"light_crossbow", "heavy_crossbow", "hand_crossbow",
 		"net", "dagger", "dart", "javelin", "spear", "trident",
 	}
-	
+
 	for _, w := range exemptWeapons {
 		t.Run(w+"_exempt", func(t *testing.T) {
 			if !IsUnderwaterExemptWeapon(w) {
@@ -387,11 +387,11 @@ func TestIsUnderwaterExemptWeapon(t *testing.T) {
 			}
 		})
 	}
-	
+
 	nonExemptWeapons := []string{
 		"longsword", "shortbow", "longbow", "greatsword", "handaxe",
 	}
-	
+
 	for _, w := range nonExemptWeapons {
 		t.Run(w+"_not_exempt", func(t *testing.T) {
 			if IsUnderwaterExemptWeapon(w) {
@@ -445,7 +445,7 @@ func TestMeetsArmorStrengthRequirement(t *testing.T) {
 			want:     true,
 		},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := MeetsArmorStrengthRequirement(tt.strength, tt.armor)
@@ -468,7 +468,7 @@ func TestHasStealthDisadvantage(t *testing.T) {
 		{"chain mail (disadvantage)", &ArmorInfo{StealthDisadvantage: true}, true},
 		{"plate (disadvantage)", &ArmorInfo{StealthDisadvantage: true}, true},
 	}
-	
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := HasStealthDisadvantage(tt.armor)

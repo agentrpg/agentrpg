@@ -15,12 +15,12 @@ type SubclassFeature struct {
 
 // Subclass represents a character subclass from the SRD
 type Subclass struct {
-	Name          string             `json:"name"`
-	Class         string             `json:"class"`          // Parent class (fighter, rogue, etc.)
-	SubclassLevel int                `json:"subclass_level"` // Level when subclass is chosen (3 for most, 1-2 for some)
-	Description   string             `json:"description"`
-	Features      []SubclassFeature  `json:"features"`
-	DomainSpells  map[int][]string   `json:"domain_spells,omitempty"` // Always-prepared spells by character level
+	Name          string            `json:"name"`
+	Class         string            `json:"class"`          // Parent class (fighter, rogue, etc.)
+	SubclassLevel int               `json:"subclass_level"` // Level when subclass is chosen (3 for most, 1-2 for some)
+	Description   string            `json:"description"`
+	Features      []SubclassFeature `json:"features"`
+	DomainSpells  map[int][]string  `json:"domain_spells,omitempty"` // Always-prepared spells by character level
 }
 
 // AvailableSubclasses contains all 12 SRD subclasses

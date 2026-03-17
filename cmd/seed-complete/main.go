@@ -87,7 +87,7 @@ func main() {
 
 	// Import races (was 0)
 	seedRaces(db)
-	
+
 	// Import magic items (new)
 	seedMagicItems(db)
 

@@ -14,10 +14,10 @@ const (
 
 // ArmorInfo contains the relevant stats for an armor piece
 type ArmorInfo struct {
-	AC                   int
-	Type                 string // light, medium, heavy, shield
-	StealthDisadvantage  bool
-	StrengthRequirement  int
+	AC                  int
+	Type                string // light, medium, heavy, shield
+	StealthDisadvantage bool
+	StrengthRequirement int
 }
 
 // ArmorDonDoffTime returns donning and doffing times in minutes for an armor type (PHB p146)
@@ -56,7 +56,7 @@ func CalculateArmorAC(dexMod int, armor *ArmorInfo, hasShield bool) int {
 // Used for features like Draconic Resilience (13 + DEX) or Monk/Barbarian Unarmored Defense.
 func CalculateArmorACWithNatural(dexMod int, armor *ArmorInfo, hasShield bool, naturalACBase int) int {
 	baseAC := naturalACBase + dexMod // Unarmored with natural AC
-	
+
 	if armor != nil && armor.AC > 0 {
 		switch strings.ToLower(armor.Type) {
 		case ArmorTypeLight:
@@ -71,11 +71,11 @@ func CalculateArmorACWithNatural(dexMod int, armor *ArmorInfo, hasShield bool, n
 			baseAC = armor.AC
 		}
 	}
-	
+
 	if hasShield {
 		baseAC += 2
 	}
-	
+
 	return baseAC
 }
 
@@ -125,26 +125,26 @@ func IsWeaponCategoryProficient(profCategory, weaponCategory string) bool {
 // armorCategory is "light", "medium", "heavy", or "shield"
 func IsArmorCategoryProficient(profList []string, armorCategory string) bool {
 	categoryLower := strings.ToLower(strings.TrimSpace(armorCategory))
-	
+
 	for _, prof := range profList {
 		prof = strings.ToLower(strings.TrimSpace(prof))
-		
+
 		// "all armor" covers light, medium, and heavy (but not shields)
 		if prof == "all armor" && (categoryLower == "light" || categoryLower == "medium" || categoryLower == "heavy") {
 			return true
 		}
-		
+
 		// Direct match (including "shields" for shield category)
 		if prof == categoryLower {
 			return true
 		}
-		
+
 		// Handle "shields" matching "shield"
 		if prof == "shields" && categoryLower == "shield" {
 			return true
 		}
 	}
-	
+
 	return false
 }
 
@@ -182,7 +182,7 @@ func NormalizeWeaponName(name string) string {
 func IsUnderwaterExemptWeapon(weaponKey string) bool {
 	// Normalize the weapon key for consistent matching
 	normalized := strings.ToLower(weaponKey)
-	
+
 	exemptWeapons := map[string]bool{
 		// Underscore format (SRD style)
 		"light_crossbow": true,

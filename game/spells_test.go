@@ -55,8 +55,8 @@ func TestMaxPreparedSpells(t *testing.T) {
 		expected int
 	}{
 		// Wizard (INT-based, full level + INT mod)
-		{"Wizard L1 INT 16", "wizard", 1, 16, 10, 10, 4},   // 1 + 3 = 4
-		{"Wizard L5 INT 18", "wizard", 5, 18, 10, 10, 9},   // 5 + 4 = 9
+		{"Wizard L1 INT 16", "wizard", 1, 16, 10, 10, 4},    // 1 + 3 = 4
+		{"Wizard L5 INT 18", "wizard", 5, 18, 10, 10, 9},    // 5 + 4 = 9
 		{"Wizard L10 INT 20", "wizard", 10, 20, 10, 10, 15}, // 10 + 5 = 15
 
 		// Cleric (WIS-based, full level + WIS mod)
@@ -67,8 +67,8 @@ func TestMaxPreparedSpells(t *testing.T) {
 		{"Druid L3 WIS 14", "druid", 3, 10, 14, 10, 5}, // 3 + 2 = 5
 
 		// Paladin (CHA-based, half level + CHA mod)
-		{"Paladin L2 CHA 16", "paladin", 2, 10, 10, 16, 4}, // 1 + 3 = 4 (level/2 min 1)
-		{"Paladin L4 CHA 16", "paladin", 4, 10, 10, 16, 5}, // 2 + 3 = 5
+		{"Paladin L2 CHA 16", "paladin", 2, 10, 10, 16, 4},   // 1 + 3 = 4 (level/2 min 1)
+		{"Paladin L4 CHA 16", "paladin", 4, 10, 10, 16, 5},   // 2 + 3 = 5
 		{"Paladin L10 CHA 18", "paladin", 10, 10, 10, 18, 9}, // 5 + 4 = 9
 
 		// Known casters return 0
@@ -176,17 +176,17 @@ func TestMulticlassSpellSlotsWarlockHybrid(t *testing.T) {
 
 func TestSlotRecoveryAbility(t *testing.T) {
 	tests := []struct {
-		name            string
-		class           string
-		subclass        string
-		level           int
-		expectAbility   string
-		expectCombined  int
-		expectMaxLevel  int
+		name           string
+		class          string
+		subclass       string
+		level          int
+		expectAbility  string
+		expectCombined int
+		expectMaxLevel int
 	}{
 		{"Wizard L1", "wizard", "", 1, "arcane_recovery", 1, 5},
-		{"Wizard L5", "wizard", "", 5, "arcane_recovery", 3, 5},   // (5+1)/2 = 3
-		{"Wizard L10", "wizard", "", 10, "arcane_recovery", 5, 5}, // (10+1)/2 = 5
+		{"Wizard L5", "wizard", "", 5, "arcane_recovery", 3, 5},         // (5+1)/2 = 3
+		{"Wizard L10", "wizard", "", 10, "arcane_recovery", 5, 5},       // (10+1)/2 = 5
 		{"Land Druid L2", "druid", "land", 2, "natural_recovery", 1, 5}, // (2+1)/2 = 1
 		{"Land Druid L6", "druid", "land", 6, "natural_recovery", 3, 5}, // (6+1)/2 = 3
 		{"Moon Druid L6 (no recovery)", "druid", "moon", 6, "", 0, 0},

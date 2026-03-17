@@ -15,7 +15,7 @@ func TestNormalizeRace(t *testing.T) {
 		{"half_orc", "half_orc"},
 		{"DWARF", "dwarf"},
 	}
-	
+
 	for _, tt := range tests {
 		got := normalizeRace(tt.input)
 		if got != tt.expected {
@@ -35,7 +35,7 @@ func TestIsRaceChecks(t *testing.T) {
 		{"Human", IsHuman, "IsHuman", true},
 		{"human", IsHuman, "IsHuman", true},
 		{"Elf", IsHuman, "IsHuman", false},
-		
+
 		// Elf (matches all elf variants)
 		{"Elf", IsElf, "IsElf", true},
 		{"High Elf", IsElf, "IsElf", true},
@@ -45,43 +45,43 @@ func TestIsRaceChecks(t *testing.T) {
 		{"Half-Elf", IsElf, "IsElf", true},
 		{"half_elf", IsElf, "IsElf", true},
 		{"Dwarf", IsElf, "IsElf", false},
-		
+
 		// Dwarf
 		{"Dwarf", IsDwarf, "IsDwarf", true},
 		{"Hill Dwarf", IsDwarf, "IsDwarf", true},
 		{"Mountain Dwarf", IsDwarf, "IsDwarf", true},
 		{"Elf", IsDwarf, "IsDwarf", false},
-		
+
 		// Halfling
 		{"Halfling", IsHalfling, "IsHalfling", true},
 		{"Lightfoot Halfling", IsHalfling, "IsHalfling", true},
 		{"Stout Halfling", IsHalfling, "IsHalfling", true},
 		{"Gnome", IsHalfling, "IsHalfling", false},
-		
+
 		// Gnome
 		{"Gnome", IsGnome, "IsGnome", true},
 		{"Rock Gnome", IsGnome, "IsGnome", true},
 		{"Forest Gnome", IsGnome, "IsGnome", true},
 		{"Halfling", IsGnome, "IsGnome", false},
-		
+
 		// Half-Orc
 		{"Half-Orc", IsHalfOrc, "IsHalfOrc", true},
 		{"half_orc", IsHalfOrc, "IsHalfOrc", true},
 		{"HalfOrc", IsHalfOrc, "IsHalfOrc", true},
 		{"Orc", IsHalfOrc, "IsHalfOrc", false},
 		{"Human", IsHalfOrc, "IsHalfOrc", false},
-		
+
 		// Tiefling
 		{"Tiefling", IsTiefling, "IsTiefling", true},
 		{"tiefling", IsTiefling, "IsTiefling", true},
 		{"Human", IsTiefling, "IsTiefling", false},
-		
+
 		// Dragonborn
 		{"Dragonborn", IsDragonborn, "IsDragonborn", true},
 		{"dragonborn", IsDragonborn, "IsDragonborn", true},
 		{"Human", IsDragonborn, "IsDragonborn", false},
 	}
-	
+
 	for _, tt := range tests {
 		got := tt.checkFn(tt.race)
 		if got != tt.expected {
@@ -101,7 +101,7 @@ func TestRacialTraits(t *testing.T) {
 	if HasFeyAncestry("Human") {
 		t.Error("Human should not have Fey Ancestry")
 	}
-	
+
 	// Gnome Cunning
 	if !HasGnomeCunning("Gnome") {
 		t.Error("Gnome should have Gnome Cunning")
@@ -112,7 +112,7 @@ func TestRacialTraits(t *testing.T) {
 	if HasGnomeCunning("Halfling") {
 		t.Error("Halfling should not have Gnome Cunning")
 	}
-	
+
 	// Dwarven Resilience
 	if !HasDwarvenResilience("Dwarf") {
 		t.Error("Dwarf should have Dwarven Resilience")
@@ -120,7 +120,7 @@ func TestRacialTraits(t *testing.T) {
 	if HasDwarvenResilience("Elf") {
 		t.Error("Elf should not have Dwarven Resilience")
 	}
-	
+
 	// Halfling Lucky
 	if !HasHalflingLucky("Halfling") {
 		t.Error("Halfling should have Lucky trait")
@@ -128,12 +128,12 @@ func TestRacialTraits(t *testing.T) {
 	if HasHalflingLucky("Gnome") {
 		t.Error("Gnome should not have Lucky trait")
 	}
-	
+
 	// Halfling Brave
 	if !HasHalflingBrave("Stout Halfling") {
 		t.Error("Stout Halfling should have Brave trait")
 	}
-	
+
 	// Relentless Endurance (Half-Orc)
 	if !HasRelentlessEndurance("Half-Orc") {
 		t.Error("Half-Orc should have Relentless Endurance")
@@ -141,12 +141,12 @@ func TestRacialTraits(t *testing.T) {
 	if HasRelentlessEndurance("Human") {
 		t.Error("Human should not have Relentless Endurance")
 	}
-	
+
 	// Savage Attacks (Half-Orc)
 	if !HasSavageAttacks("half_orc") {
 		t.Error("half_orc should have Savage Attacks")
 	}
-	
+
 	// Hellish Resistance (Tiefling)
 	if !HasHellishResistance("Tiefling") {
 		t.Error("Tiefling should have Hellish Resistance")
@@ -154,7 +154,7 @@ func TestRacialTraits(t *testing.T) {
 	if HasHellishResistance("Human") {
 		t.Error("Human should not have Hellish Resistance")
 	}
-	
+
 	// Breath Weapon (Dragonborn)
 	if !HasBreathWeapon("Dragonborn") {
 		t.Error("Dragonborn should have Breath Weapon")
@@ -180,7 +180,7 @@ func TestGetRaceSize(t *testing.T) {
 		{"Tiefling", SizeMedium},
 		{"Dragonborn", SizeMedium},
 	}
-	
+
 	for _, tt := range tests {
 		got := GetRaceSize(tt.race)
 		if got != tt.expected {
@@ -205,7 +205,7 @@ func TestGetDefaultSpeed(t *testing.T) {
 		{"Tiefling", 30},
 		{"Dragonborn", 30},
 	}
-	
+
 	for _, tt := range tests {
 		got := GetDefaultSpeed(tt.race)
 		if got != tt.expected {
@@ -237,17 +237,17 @@ func TestIsSizeAtLeastOneLarger(t *testing.T) {
 	if !IsSizeAtLeastOneLarger(SizeLarge, SizeMedium) {
 		t.Error("Large should be at least one size larger than Medium")
 	}
-	
+
 	// Mastiff (Medium) can carry Small rider
 	if !IsSizeAtLeastOneLarger(SizeMedium, SizeSmall) {
 		t.Error("Medium should be at least one size larger than Small")
 	}
-	
+
 	// Medium cannot carry Medium
 	if IsSizeAtLeastOneLarger(SizeMedium, SizeMedium) {
 		t.Error("Medium is not larger than Medium")
 	}
-	
+
 	// Small cannot carry Medium
 	if IsSizeAtLeastOneLarger(SizeSmall, SizeMedium) {
 		t.Error("Small is not larger than Medium")
@@ -265,7 +265,7 @@ func TestKeywordChecks(t *testing.T) {
 	if CheckFrightenKeywords("A normal attack") {
 		t.Error("Should not match normal attack")
 	}
-	
+
 	// Charm keywords
 	if !CheckCharmKeywords("You are charmed by the vampire") {
 		t.Error("Should match 'charmed'")
@@ -276,7 +276,7 @@ func TestKeywordChecks(t *testing.T) {
 	if CheckCharmKeywords("A fire attack") {
 		t.Error("Should not match fire attack")
 	}
-	
+
 	// Poison keywords
 	if !CheckPoisonKeywords("You are poisoned") {
 		t.Error("Should match 'poisoned'")
@@ -300,7 +300,7 @@ func TestRacialSaveAdvantages(t *testing.T) {
 	if CheckHalflingBrave("Halfling", "fire damage") {
 		t.Error("Halfling Brave only applies to frighten saves")
 	}
-	
+
 	// Fey Ancestry (Charm)
 	if !CheckFeyAncestryCharm("High Elf", "vampire's charm") {
 		t.Error("High Elf should get Fey Ancestry advantage vs charm")
@@ -311,7 +311,7 @@ func TestRacialSaveAdvantages(t *testing.T) {
 	if CheckFeyAncestryCharm("Dwarf", "vampire's charm") {
 		t.Error("Dwarf should not get Fey Ancestry")
 	}
-	
+
 	// Dwarven Resilience (Poison)
 	if !CheckDwarvenResiliencePoison("Dwarf", "poisoned blade") {
 		t.Error("Dwarf should get advantage vs poison")
@@ -319,7 +319,7 @@ func TestRacialSaveAdvantages(t *testing.T) {
 	if CheckDwarvenResiliencePoison("Elf", "poisoned blade") {
 		t.Error("Elf should not get Dwarven Resilience")
 	}
-	
+
 	// Gnome Cunning (Magic + INT/WIS/CHA)
 	if !CheckGnomeCunningMagic("Gnome", "wis", true) {
 		t.Error("Gnome should get advantage on WIS save vs magic")
@@ -341,7 +341,7 @@ func TestRacialSaveAdvantages(t *testing.T) {
 func TestApplyHalflingLucky(t *testing.T) {
 	// When a Halfling rolls a 1, they reroll
 	// We can't predict the reroll, but we can verify the behavior
-	
+
 	// Non-1 rolls should pass through unchanged
 	final, rerolled, orig := ApplyHalflingLucky(15, true)
 	if rerolled {
@@ -350,7 +350,7 @@ func TestApplyHalflingLucky(t *testing.T) {
 	if final != 15 || orig != 15 {
 		t.Errorf("Expected 15/15, got %d/%d", final, orig)
 	}
-	
+
 	// Non-Halfling rolling 1 should not reroll
 	final, rerolled, orig = ApplyHalflingLucky(1, false)
 	if rerolled {
@@ -359,7 +359,7 @@ func TestApplyHalflingLucky(t *testing.T) {
 	if final != 1 {
 		t.Errorf("Expected 1, got %d", final)
 	}
-	
+
 	// Halfling rolling 1 should reroll (result is random but should be 1-20)
 	final, rerolled, orig = ApplyHalflingLucky(1, true)
 	if !rerolled {
@@ -387,7 +387,7 @@ func TestBreathWeaponDamage(t *testing.T) {
 		{16, "5d6"},
 		{20, "5d6"},
 	}
-	
+
 	for _, tt := range tests {
 		got := BreathWeaponDamage(tt.level)
 		if got != tt.expected {
@@ -415,25 +415,25 @@ func TestDragonAncestries(t *testing.T) {
 			t.Errorf("Dragon %s has invalid save ability: %s", color, ancestry.SaveAbility)
 		}
 	}
-	
+
 	// Test case insensitivity
 	red := GetDragonAncestry("RED")
 	if red == nil {
 		t.Error("Should find RED dragon ancestry")
 	}
-	
+
 	// Test invalid color
 	invalid := GetDragonAncestry("purple")
 	if invalid != nil {
 		t.Error("Should not find purple dragon ancestry")
 	}
-	
+
 	// Verify specific ancestries
 	gold := GetDragonAncestry("gold")
 	if gold.DamageType != "fire" || gold.BreathArea != "15ft cone" {
 		t.Errorf("Gold dragon should be fire/15ft cone, got %s/%s", gold.DamageType, gold.BreathArea)
 	}
-	
+
 	black := GetDragonAncestry("black")
 	if black.DamageType != "acid" || black.BreathArea != "5x30ft line" {
 		t.Errorf("Black dragon should be acid/5x30ft line, got %s/%s", black.DamageType, black.BreathArea)

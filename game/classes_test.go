@@ -55,7 +55,7 @@ func TestHitDie(t *testing.T) {
 		{"warlock", 8},
 		{"sorcerer", 6},
 		{"wizard", 6},
-		{"unknown", 8}, // default
+		{"unknown", 8},    // default
 		{"BARBARIAN", 12}, // case insensitive
 	}
 

@@ -163,17 +163,17 @@ func IsAutoCrit(conditions []string) bool {
 // Exhaustion 3+ gives disadvantage on all saves.
 func GetSaveDisadvantage(conditions []string, exhaustionLevel int, ability string) bool {
 	ability = strings.ToUpper(ability)
-	
+
 	// Exhaustion 3+ = disadvantage on all saves
 	if exhaustionLevel >= 3 {
 		return true
 	}
-	
+
 	// Restrained = disadvantage on DEX saves
 	if ability == "DEX" && HasCondition(conditions, ConditionRestrained) {
 		return true
 	}
-	
+
 	return false
 }
 
@@ -185,7 +185,7 @@ func GetAttackDisadvantage(conditions []string, exhaustionLevel int, frightenedS
 	if exhaustionLevel >= 3 {
 		return true
 	}
-	
+
 	// These conditions always give attack disadvantage
 	directDisadvantage := []string{
 		ConditionBlinded, ConditionPoisoned, ConditionProne, ConditionRestrained,
@@ -195,12 +195,12 @@ func GetAttackDisadvantage(conditions []string, exhaustionLevel int, frightenedS
 			return true
 		}
 	}
-	
+
 	// Frightened gives disadvantage only if source is visible
 	if frightenedSourceVisible && HasCondition(conditions, ConditionFrightened) {
 		return true
 	}
-	
+
 	return false
 }
 
@@ -211,17 +211,17 @@ func GetAbilityCheckDisadvantage(conditions []string, exhaustionLevel int, frigh
 	if exhaustionLevel >= 1 {
 		return true
 	}
-	
+
 	// Poisoned = disadvantage on ability checks
 	if HasCondition(conditions, ConditionPoisoned) {
 		return true
 	}
-	
+
 	// Frightened = disadvantage if source visible
 	if frightenedSourceVisible && HasCondition(conditions, ConditionFrightened) {
 		return true
 	}
-	
+
 	return false
 }
 
@@ -239,12 +239,12 @@ func GetAttackAdvantage(targetConditions []string, isMelee bool, withinFiveFeet 
 			return true
 		}
 	}
-	
+
 	// Prone: advantage if within 5ft, disadvantage otherwise
 	if HasCondition(targetConditions, ConditionProne) {
 		return withinFiveFeet
 	}
-	
+
 	return false
 }
 
@@ -256,12 +256,12 @@ func GetAttackDisadvantageVsTarget(targetConditions []string, isRanged bool, wit
 	if HasCondition(targetConditions, ConditionInvisible) {
 		return true
 	}
-	
+
 	// Prone = disadvantage if ranged (not within 5ft)
 	if HasCondition(targetConditions, ConditionProne) && isRanged && !withinFiveFeet {
 		return true
 	}
-	
+
 	return false
 }
 

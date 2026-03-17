@@ -77,9 +77,9 @@ func TestGetSubclass(t *testing.T) {
 
 func TestGetActiveSubclassFeatures(t *testing.T) {
 	tests := []struct {
-		subclass     string
-		level        int
-		expectedMin  int // minimum number of features expected
+		subclass    string
+		level       int
+		expectedMin int // minimum number of features expected
 	}{
 		{"champion", 3, 1},   // Improved Critical
 		{"champion", 7, 2},   // + Remarkable Athlete
@@ -95,7 +95,7 @@ func TestGetActiveSubclassFeatures(t *testing.T) {
 		t.Run(tt.subclass, func(t *testing.T) {
 			features := GetActiveSubclassFeatures(tt.subclass, tt.level)
 			if len(features) < tt.expectedMin {
-				t.Errorf("GetActiveSubclassFeatures(%q, %d) returned %d features, expected at least %d", 
+				t.Errorf("GetActiveSubclassFeatures(%q, %d) returned %d features, expected at least %d",
 					tt.subclass, tt.level, len(features), tt.expectedMin)
 			}
 		})
@@ -122,22 +122,22 @@ func TestHasSubclassFeature(t *testing.T) {
 		{"champion", 7, "remarkable_athlete", true},
 		{"champion", 6, "remarkable_athlete", false},
 		{"champion", 18, "survivor_regen", true},
-		
+
 		// Berserker
 		{"berserker", 3, "frenzy_bonus_attack", true},
 		{"berserker", 6, "rage_immune_charm", true},
 		{"berserker", 14, "retaliation_attack", true},
-		
+
 		// Thief
 		{"thief", 3, "fast_hands", true},
 		{"thief", 9, "supreme_sneak", true},
 		{"thief", 17, "extra_first_round_turn", true},
-		
+
 		// Life Cleric
 		{"life", 1, "bonus_healing", true},
 		{"life", 6, "blessed_healer", true},
 		{"life", 17, "supreme_healing", true},
-		
+
 		// Nonexistent
 		{"champion", 20, "nonexistent_mechanic", false},
 		{"nonexistent", 10, "anything", false},
@@ -148,7 +148,7 @@ func TestHasSubclassFeature(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			result := HasSubclassFeature(tt.subclass, tt.level, tt.mechanic)
 			if result != tt.expected {
-				t.Errorf("HasSubclassFeature(%q, %d, %q) = %v, expected %v", 
+				t.Errorf("HasSubclassFeature(%q, %d, %q) = %v, expected %v",
 					tt.subclass, tt.level, tt.mechanic, result, tt.expected)
 			}
 		})
@@ -176,12 +176,12 @@ func TestGetSubclassMechanic(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			val, found := GetSubclassMechanic(tt.subclass, tt.level, tt.mechanic)
 			if found != tt.wantFound {
-				t.Errorf("GetSubclassMechanic(%q, %d, %q) found=%v, expected %v", 
+				t.Errorf("GetSubclassMechanic(%q, %d, %q) found=%v, expected %v",
 					tt.subclass, tt.level, tt.mechanic, found, tt.wantFound)
 			}
 			// For crit_range, we just check it's found since the value depends on which feature is checked first
 			if tt.wantFound && tt.mechanic != "crit_range" && val != tt.wantVal {
-				t.Errorf("GetSubclassMechanic(%q, %d, %q) = %q, expected %q", 
+				t.Errorf("GetSubclassMechanic(%q, %d, %q) = %q, expected %q",
 					tt.subclass, tt.level, tt.mechanic, val, tt.wantVal)
 			}
 		})
@@ -194,9 +194,9 @@ func TestGetDomainSpells(t *testing.T) {
 		level    int
 		minCount int
 	}{
-		{"life", 1, 2},    // bless, cure-wounds
-		{"life", 3, 4},    // +lesser-restoration, spiritual-weapon
-		{"life", 9, 10},   // All 5 levels of domain spells
+		{"life", 1, 2},  // bless, cure-wounds
+		{"life", 3, 4},  // +lesser-restoration, spiritual-weapon
+		{"life", 9, 10}, // All 5 levels of domain spells
 		{"devotion", 3, 2},
 		{"devotion", 17, 10},
 		{"fiend", 1, 2},
@@ -208,7 +208,7 @@ func TestGetDomainSpells(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			spells := GetDomainSpells(tt.subclass, tt.level)
 			if len(spells) < tt.minCount {
-				t.Errorf("GetDomainSpells(%q, %d) returned %d spells, expected at least %d", 
+				t.Errorf("GetDomainSpells(%q, %d) returned %d spells, expected at least %d",
 					tt.subclass, tt.level, len(spells), tt.minCount)
 			}
 		})
@@ -230,7 +230,7 @@ func TestDragonAncestryDamageTypes(t *testing.T) {
 	}
 
 	if len(DragonAncestryDamageTypes) != len(expected) {
-		t.Errorf("DragonAncestryDamageTypes has %d entries, expected %d", 
+		t.Errorf("DragonAncestryDamageTypes has %d entries, expected %d",
 			len(DragonAncestryDamageTypes), len(expected))
 	}
 
@@ -280,7 +280,7 @@ func TestGetNaturalACBase(t *testing.T) {
 		t.Run(tt.subclass, func(t *testing.T) {
 			result := GetNaturalACBase(tt.subclass, tt.level)
 			if result != tt.expected {
-				t.Errorf("GetNaturalACBase(%q, %d) = %d, expected %d", 
+				t.Errorf("GetNaturalACBase(%q, %d) = %d, expected %d",
 					tt.subclass, tt.level, result, tt.expected)
 			}
 		})
@@ -301,7 +301,7 @@ func TestGetDraconicBonusHP(t *testing.T) {
 		t.Run(tt.subclass, func(t *testing.T) {
 			result := GetDraconicBonusHP(tt.subclass)
 			if result != tt.expected {
-				t.Errorf("GetDraconicBonusHP(%q) = %d, expected %d", 
+				t.Errorf("GetDraconicBonusHP(%q) = %d, expected %d",
 					tt.subclass, result, tt.expected)
 			}
 		})
@@ -311,17 +311,17 @@ func TestGetDraconicBonusHP(t *testing.T) {
 func TestSubclassLevels(t *testing.T) {
 	// Verify subclass unlock levels are correct per PHB
 	expected := map[string]int{
-		"life":     1,  // Cleric - level 1
-		"draconic": 1,  // Sorcerer - level 1
-		"fiend":    1,  // Warlock - level 1
-		"land":     2,  // Druid - level 2
+		"life":      1, // Cleric - level 1
+		"draconic":  1, // Sorcerer - level 1
+		"fiend":     1, // Warlock - level 1
+		"land":      2, // Druid - level 2
 		"evocation": 2, // Wizard - level 2
 		"berserker": 3, // Barbarian - level 3
-		"champion": 3,  // Fighter - level 3
-		"thief":    3,  // Rogue - level 3
-		"devotion": 3,  // Paladin - level 3
-		"hunter":   3,  // Ranger - level 3
-		"lore":     3,  // Bard - level 3
+		"champion":  3, // Fighter - level 3
+		"thief":     3, // Rogue - level 3
+		"devotion":  3, // Paladin - level 3
+		"hunter":    3, // Ranger - level 3
+		"lore":      3, // Bard - level 3
 		"open-hand": 3, // Monk - level 3
 	}
 
@@ -332,7 +332,7 @@ func TestSubclassLevels(t *testing.T) {
 			continue
 		}
 		if sub.SubclassLevel != expectedLevel {
-			t.Errorf("Subclass %q has SubclassLevel=%d, expected %d", 
+			t.Errorf("Subclass %q has SubclassLevel=%d, expected %d",
 				slug, sub.SubclassLevel, expectedLevel)
 		}
 	}

@@ -102,13 +102,13 @@ func TestApplyDamageModifiers(t *testing.T) {
 			wantHalved:      false, // Cancelled out
 		},
 		{
-			name:        "immunity takes precedence over vulnerability",
-			damage:      10,
-			damageType:  "fire",
-			immunities:  []string{"fire"},
+			name:            "immunity takes precedence over vulnerability",
+			damage:          10,
+			damageType:      "fire",
+			immunities:      []string{"fire"},
 			vulnerabilities: []string{"fire"},
-			wantDamage:  0,
-			wantNegated: true,
+			wantDamage:      0,
+			wantNegated:     true,
 		},
 		{
 			name:        "magical damage bypasses nonmagical resistance",
@@ -362,8 +362,8 @@ func TestGetAttackModifiersFromConditions(t *testing.T) {
 			targetConditions:     []string{"stunned"},
 			attackerCanSeeTarget: true,
 			targetCanSeeAttacker: true,
-			wantAdvantage:        true,  // From stunned
-			wantDisadvantage:     true,  // From poisoned
+			wantAdvantage:        true, // From stunned
+			wantDisadvantage:     true, // From poisoned
 			// Note: They don't cancel in the struct, but the caller handles that
 		},
 	}

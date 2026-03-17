@@ -84,11 +84,11 @@ func TestParseDice(t *testing.T) {
 		{"1d8", 1, 8},
 		{"3d10", 3, 10},
 		{"1d20", 1, 20},
-		{"2d6+3", 2, 6}, // Modifier stripped
-		{"4D4", 4, 4},   // Case insensitive
+		{"2d6+3", 2, 6},   // Modifier stripped
+		{"4D4", 4, 4},     // Case insensitive
 		{"invalid", 1, 6}, // Default fallback
-		{"1d", 1, 6},    // Missing sides
-		{"d6", 1, 6},    // Missing count parsed as 0, becomes 1
+		{"1d", 1, 6},      // Missing sides
+		{"d6", 1, 6},      // Missing count parsed as 0, becomes 1
 	}
 
 	for _, tt := range tests {

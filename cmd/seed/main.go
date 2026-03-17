@@ -141,14 +141,14 @@ func seedMonsters(db *sql.DB) {
 			}
 		}
 		actionsJSON, _ := json.Marshal(actions)
-		
+
 		// Parse legendary resistances (v0.8.29)
 		legendaryResistances := 0
 		if lr, ok := m["legendary_resistances"].([]interface{}); ok && len(lr) > 0 {
 			// Count entries - each usually says "the X can choose to succeed instead"
 			legendaryResistances = len(lr)
 		}
-		
+
 		// Parse legendary actions (v0.8.30)
 		legendaryActions := []map[string]interface{}{}
 		legendaryActionCount := 0
@@ -177,7 +177,7 @@ func seedMonsters(db *sql.DB) {
 			}
 		}
 		legendaryActionsJSON, _ := json.Marshal(legendaryActions)
-		
+
 		// Parse damage resistances/immunities/vulnerabilities (v0.8.31)
 		damageResistances := extractDamageTypes(m, "damage_resistances")
 		damageImmunities := extractDamageTypes(m, "damage_immunities")

@@ -6,25 +6,25 @@ import "strings"
 
 // Race constants for the PHB/SRD races
 const (
-	RaceHuman       = "human"
-	RaceElf         = "elf"
-	RaceHighElf     = "high_elf"
-	RaceWoodElf     = "wood_elf"
-	RaceDarkElf     = "dark_elf" // Drow
-	RaceDrow        = "drow"
-	RaceHalfElf     = "half_elf"
-	RaceDwarf       = "dwarf"
-	RaceHillDwarf   = "hill_dwarf"
+	RaceHuman         = "human"
+	RaceElf           = "elf"
+	RaceHighElf       = "high_elf"
+	RaceWoodElf       = "wood_elf"
+	RaceDarkElf       = "dark_elf" // Drow
+	RaceDrow          = "drow"
+	RaceHalfElf       = "half_elf"
+	RaceDwarf         = "dwarf"
+	RaceHillDwarf     = "hill_dwarf"
 	RaceMountainDwarf = "mountain_dwarf"
-	RaceHalfling    = "halfling"
-	RaceLightfoot   = "lightfoot"
-	RaceStout       = "stout"
-	RaceGnome       = "gnome"
-	RaceRockGnome   = "rock_gnome"
-	RaceForestGnome = "forest_gnome"
-	RaceHalfOrc     = "half_orc"
-	RaceTiefling    = "tiefling"
-	RaceDragonborn  = "dragonborn"
+	RaceHalfling      = "halfling"
+	RaceLightfoot     = "lightfoot"
+	RaceStout         = "stout"
+	RaceGnome         = "gnome"
+	RaceRockGnome     = "rock_gnome"
+	RaceForestGnome   = "forest_gnome"
+	RaceHalfOrc       = "half_orc"
+	RaceTiefling      = "tiefling"
+	RaceDragonborn    = "dragonborn"
 )
 
 // Size constants
@@ -181,22 +181,22 @@ func GetRaceSize(race string) string {
 // Most races have 30ft, but some have different speeds.
 func GetDefaultSpeed(race string) int {
 	norm := normalizeRace(race)
-	
+
 	// Small races typically have 25ft speed
 	if IsHalfling(race) || IsGnome(race) {
 		return 25
 	}
-	
+
 	// Dwarves have 25ft speed
 	if IsDwarf(race) {
 		return 25
 	}
-	
+
 	// Wood elves have 35ft speed
 	if strings.Contains(norm, "wood") && strings.Contains(norm, "elf") {
 		return 35
 	}
-	
+
 	// Default speed for most races
 	return 30
 }
@@ -355,9 +355,9 @@ func BreathWeaponDamage(level int) string {
 
 // DragonAncestry maps dragon types to their damage types and breath weapon shapes.
 type DragonAncestry struct {
-	Color      string
-	DamageType string
-	BreathArea string // "15ft cone" or "5x30ft line"
+	Color       string
+	DamageType  string
+	BreathArea  string // "15ft cone" or "5x30ft line"
 	SaveAbility string // "dex" or "con"
 }
 

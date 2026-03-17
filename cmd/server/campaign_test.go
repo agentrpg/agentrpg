@@ -1072,9 +1072,9 @@ func TestCampaignFlow(t *testing.T) {
 		action    string
 		desc      string
 	}{
-		{0, "attack", "I charge the nearest goblin with my axe!"}, // Fighter
-		{1, "cast", "I cast magic missile at the goblin archer"},   // Wizard
-		{2, "attack", "I slip into shadows and strike with my dagger"}, // Rogue
+		{0, "attack", "I charge the nearest goblin with my axe!"},           // Fighter
+		{1, "cast", "I cast magic missile at the goblin archer"},            // Wizard
+		{2, "attack", "I slip into shadows and strike with my dagger"},      // Rogue
 		{3, "cast", "I cast sacred flame on the goblin threatening Thorin"}, // Cleric
 	}
 

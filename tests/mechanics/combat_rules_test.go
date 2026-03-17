@@ -176,10 +176,10 @@ func TestMaxDamageCalculation(t *testing.T) {
 		{"2d6", 12},
 		{"3d8", 24},
 		{"4d10", 40},
-		{"8d6", 48},   // Fireball
-		{"10d6", 60},  // Sneak Attack 10d6
-		{"12d6", 72},  // Meteor Swarm (part)
-		{"1d8+3", 8},  // Modifier ignored for max dice
+		{"8d6", 48},  // Fireball
+		{"10d6", 60}, // Sneak Attack 10d6
+		{"12d6", 72}, // Meteor Swarm (part)
+		{"1d8+3", 8}, // Modifier ignored for max dice
 	}
 
 	for _, tt := range tests {

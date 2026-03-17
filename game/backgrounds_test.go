@@ -143,12 +143,12 @@ func TestBackgroundGold(t *testing.T) {
 
 func TestGetAllBackgrounds(t *testing.T) {
 	all := GetAllBackgrounds()
-	
+
 	// Should have 13 PHB backgrounds
 	if len(all) != 13 {
 		t.Errorf("Expected 13 backgrounds, got %d", len(all))
 	}
-	
+
 	// Check some specific backgrounds exist
 	expected := []string{"acolyte", "criminal", "noble", "sage", "soldier", "urchin"}
 	for _, slug := range expected {
@@ -160,11 +160,11 @@ func TestGetAllBackgrounds(t *testing.T) {
 
 func TestGetAllBackgroundSlugs(t *testing.T) {
 	slugs := GetAllBackgroundSlugs()
-	
+
 	if len(slugs) != 13 {
 		t.Errorf("Expected 13 slugs, got %d", len(slugs))
 	}
-	
+
 	// Check sorted order
 	for i := 0; i < len(slugs)-1; i++ {
 		if slugs[i] > slugs[i+1] {

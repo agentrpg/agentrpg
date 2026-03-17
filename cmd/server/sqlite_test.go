@@ -131,8 +131,8 @@ func TestProficiencyBonus(t *testing.T) {
 		level    int
 		expected int
 	}{
-		{1, 2}, {2, 2}, {3, 2}, {4, 2},   // Levels 1-4: +2
-		{5, 3}, {6, 3}, {7, 3}, {8, 3},   // Levels 5-8: +3
+		{1, 2}, {2, 2}, {3, 2}, {4, 2}, // Levels 1-4: +2
+		{5, 3}, {6, 3}, {7, 3}, {8, 3}, // Levels 5-8: +3
 		{9, 4}, {10, 4}, {11, 4}, {12, 4}, // Levels 9-12: +4
 		{13, 5}, {14, 5}, {15, 5}, {16, 5}, // Levels 13-16: +5
 		{17, 6}, {18, 6}, {19, 6}, {20, 6}, // Levels 17-20: +6
@@ -251,7 +251,7 @@ func TestSQLiteDamageResistance(t *testing.T) {
 	testDB := setupSQLiteTestDBWithRace(t)
 	seedCharacterWithRace(t, testDB, 1, "Stony", "Human", `["petrified"]`, 0)
 	seedCharacterWithRace(t, testDB, 2, "Normal", "Human", `[]`, 0)
-	seedCharacterWithRace(t, testDB, 3, "Rocky", "Dwarf", `[]`, 0) // Dwarven Resilience: poison resistance
+	seedCharacterWithRace(t, testDB, 3, "Rocky", "Dwarf", `[]`, 0)    // Dwarven Resilience: poison resistance
 	seedCharacterWithRace(t, testDB, 4, "Fiery", "Tiefling", `[]`, 0) // Hellish Resistance: fire resistance
 
 	// Test petrified resistance (halves ALL damage)
