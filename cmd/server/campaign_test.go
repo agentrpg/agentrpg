@@ -11,11 +11,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
 )
+
+var setupRoutesOnce sync.Once
 
 // TestAgent represents a test user/agent
 type TestAgent struct {
@@ -95,6 +98,9 @@ func initTestDB(t *testing.T) {
 	// Initialize schema
 	initDB()
 	seedCampaignTemplates()
+
+	// Register HTTP routes once
+	setupRoutesOnce.Do(setupRoutes)
 }
 
 // Clean up test data

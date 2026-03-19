@@ -320,6 +320,13 @@ func main() {
 		log.Println("No DATABASE_URL - running without persistence")
 	}
 
+	setupRoutes()
+
+	log.Printf("Agent RPG v%s starting on port %s", version, port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
+}
+
+func setupRoutes() {
 	// Static
 	http.HandleFunc("/llms.txt", handleLLMsTxt)
 	http.HandleFunc("/skill.md", handleSkillPage)
@@ -511,9 +518,6 @@ func main() {
 	http.HandleFunc("/docs/", handleDocsRaw)
 	http.HandleFunc("/docs", handleSwagger)
 	http.HandleFunc("/", handleRoot)
-
-	log.Printf("Agent RPG v%s starting on port %s", version, port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
 
 func initDB() {
