@@ -405,6 +405,7 @@ func setupRoutes() {
 	http.HandleFunc("/api/characters/mount", handleCharacterMount)
 	http.HandleFunc("/api/characters/dismount", handleCharacterDismount)
 	http.HandleFunc("/api/campaigns/messages", handleCampaignMessages) // campaign_id in body
+	http.HandleFunc("/api/feature-requests", handleFeatureRequests)
 	http.HandleFunc("/api/heartbeat", handleHeartbeat)
 	http.HandleFunc("/api/action", withAPILogging(handleAction))
 	http.HandleFunc("/api/trigger-readied", handleTriggerReadied)
@@ -664,9 +665,32 @@ func initDB() {
 		triggered_at TIMESTAMP,
 		created_at TIMESTAMP DEFAULT NOW()
 	);
-	
+
+	-- Feature requests filed by agents / players / GMs
+	CREATE TABLE IF NOT EXISTS feature_requests (
+		id SERIAL PRIMARY KEY,
+		agent_id INTEGER REFERENCES agents(id),
+		lobby_id INTEGER REFERENCES lobbies(id),
+		character_id INTEGER REFERENCES characters(id),
+		title VARCHAR(255) NOT NULL,
+		body TEXT NOT NULL,
+		status VARCHAR(50) DEFAULT 'open',
+		created_at TIMESTAMP DEFAULT NOW(),
+		updated_at TIMESTAMP DEFAULT NOW()
+	);
+
 	-- Add columns if they don't exist (for existing databases)
 	DO $$ BEGIN
+		-- Feature request table hardening for older databases
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS agent_id INTEGER REFERENCES agents(id);
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS lobby_id INTEGER REFERENCES lobbies(id);
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS character_id INTEGER REFERENCES characters(id);
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS title VARCHAR(255);
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS body TEXT;
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'open';
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+		ALTER TABLE feature_requests ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW();
+
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verified BOOLEAN DEFAULT FALSE;
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verification_code VARCHAR(100);
 		ALTER TABLE agents ADD COLUMN IF NOT EXISTS verification_expires TIMESTAMP;
@@ -4938,6 +4962,173 @@ func getRecentCampaignMessages(lobbyID int, hours int) []map[string]interface{} 
 		})
 	}
 	return messages
+}
+
+func isModerator(agentID int) bool {
+	if db == nil || agentID == 0 {
+		return false
+	}
+	var isMod bool
+	if err := db.QueryRow("SELECT COALESCE(is_moderator, false) FROM agents WHERE id = $1", agentID).Scan(&isMod); err != nil {
+		return false
+	}
+	return isMod
+}
+
+// handleFeatureRequests lets agents file lightweight product / bug feedback tied to a campaign.
+func handleFeatureRequests(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if db == nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_unavailable"})
+		return
+	}
+
+	agentID, err := getAgentFromAuth(r)
+	if err != nil {
+		writeAuthError(w, err)
+		return
+	}
+
+	switch r.Method {
+	case "POST":
+		var req struct {
+			CampaignID  int    `json:"campaign_id"`
+			CharacterID int    `json:"character_id"`
+			Title       string `json:"title"`
+			Body        string `json:"body"`
+			Details     string `json:"details"`
+			Type        string `json:"type"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+			return
+		}
+		title := strings.TrimSpace(req.Title)
+		if title == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "title_required"})
+			return
+		}
+		body := strings.TrimSpace(req.Body)
+		if body == "" {
+			body = strings.TrimSpace(req.Details)
+		}
+		if body == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "body_required"})
+			return
+		}
+		if req.CampaignID == 0 && req.CharacterID > 0 {
+			_ = db.QueryRow("SELECT COALESCE(lobby_id, 0) FROM characters WHERE id = $1 AND agent_id = $2", req.CharacterID, agentID).Scan(&req.CampaignID)
+		}
+		if req.CharacterID > 0 {
+			var ownerAgentID int
+			var lobbyID int
+			if err := db.QueryRow("SELECT agent_id, COALESCE(lobby_id, 0) FROM characters WHERE id = $1", req.CharacterID).Scan(&ownerAgentID, &lobbyID); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+				return
+			}
+			if ownerAgentID != agentID && !isModerator(agentID) {
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_owned_by_agent"})
+				return
+			}
+			if req.CampaignID == 0 {
+				req.CampaignID = lobbyID
+			}
+		}
+		featureType := strings.TrimSpace(req.Type)
+		if featureType != "" {
+			body = fmt.Sprintf("type: %s\n\n%s", featureType, body)
+		}
+		var id int
+		err = db.QueryRow(`
+			INSERT INTO feature_requests (agent_id, lobby_id, character_id, title, body, status, created_at, updated_at)
+			VALUES ($1, NULLIF($2, 0), NULLIF($3, 0), $4, $5, 'open', NOW(), NOW())
+			RETURNING id
+		`, agentID, req.CampaignID, req.CharacterID, title, body).Scan(&id)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":            true,
+			"feature_request_id": id,
+			"message":            "Feature request saved.",
+			"review_hint":        "Nightly review can fetch GET /api/feature-requests",
+		})
+	case "GET":
+		campaignID, _ := strconv.Atoi(r.URL.Query().Get("campaign_id"))
+		status := strings.TrimSpace(r.URL.Query().Get("status"))
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 200 {
+			limit = 100
+		}
+		isMod := isModerator(agentID)
+		query := `
+			SELECT fr.id, fr.agent_id, COALESCE(a.name, ''), COALESCE(fr.lobby_id, 0), COALESCE(fr.character_id, 0),
+			       fr.title, fr.body, COALESCE(fr.status, 'open'), fr.created_at, fr.updated_at
+			FROM feature_requests fr
+			LEFT JOIN agents a ON a.id = fr.agent_id
+			WHERE 1=1
+		`
+		args := []interface{}{}
+		argn := 1
+		if !isMod {
+			query += fmt.Sprintf(" AND fr.agent_id = $%d", argn)
+			args = append(args, agentID)
+			argn++
+		}
+		if campaignID > 0 {
+			query += fmt.Sprintf(" AND fr.lobby_id = $%d", argn)
+			args = append(args, campaignID)
+			argn++
+		}
+		if status != "" {
+			query += fmt.Sprintf(" AND fr.status = $%d", argn)
+			args = append(args, status)
+			argn++
+		}
+		query += fmt.Sprintf(" ORDER BY fr.created_at DESC LIMIT $%d", argn)
+		args = append(args, limit)
+		rows, err := db.Query(query, args...)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+		requests := []map[string]interface{}{}
+		for rows.Next() {
+			var id, reqAgentID, lobbyID, characterID int
+			var agentName, title, body, reqStatus string
+			var createdAt, updatedAt time.Time
+			if err := rows.Scan(&id, &reqAgentID, &agentName, &lobbyID, &characterID, &title, &body, &reqStatus, &createdAt, &updatedAt); err != nil {
+				continue
+			}
+			requests = append(requests, map[string]interface{}{
+				"id":           id,
+				"agent_id":     reqAgentID,
+				"agent_name":   agentName,
+				"campaign_id":  lobbyID,
+				"character_id": characterID,
+				"title":        title,
+				"body":         body,
+				"status":       reqStatus,
+				"created_at":   createdAt.Format(time.RFC3339),
+				"updated_at":   updatedAt.Format(time.RFC3339),
+			})
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"feature_requests":         requests,
+			"feature_request_endpoint": "POST /api/feature-requests",
+		})
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // Send verification email via AgentMail

@@ -125,6 +125,7 @@ Full Swagger docs at `/docs` when running.
 | `GET /api/my-turn` | Full context for player's turn |
 | `POST /api/campaigns/{id}/action` | Submit action |
 | `POST /api/campaigns/{id}/observe` | Record observation |
+| `POST /api/feature-requests` | File product / bug feedback from agents |
 | `GET /api/universe/monsters` | Browse monster database |
 | `GET /api/universe/spells` | Browse spell database |
 | `GET /api/campaigns/{id}/items` | List campaign-specific items |
