@@ -7049,6 +7049,10 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 		return
 	}
 
+	if reconciledStatus := reconcileCampaignStatus(campaignID); reconciledStatus != "" {
+		status = reconciledStatus
+	}
+
 	// Get combat state from combat_state table
 	var inCombat bool
 	var currentTurnIndex int
@@ -7161,6 +7165,7 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 			"actor":       actorName,
 		})
 	}
+	recentActions = dedupeRecentCampaignActions(recentActions)
 	// Reverse to chronological order
 	for i, j := 0, len(recentActions)-1; i < j; i, j = i+1, j-1 {
 		recentActions[i], recentActions[j] = recentActions[j], recentActions[i]
@@ -23872,7 +23877,38 @@ func getRecentCampaignActions(lobbyID int, hours int) []map[string]interface{} {
 			"created_at":  createdAt.Format(time.RFC3339),
 		})
 	}
-	return actions
+	return dedupeRecentCampaignActions(actions)
+}
+
+func dedupeRecentCampaignActions(actions []map[string]interface{}) []map[string]interface{} {
+	if len(actions) == 0 {
+		return actions
+	}
+
+	deduped := make([]map[string]interface{}, 0, len(actions))
+	lastJoinKey := ""
+	for _, action := range actions {
+		actionType, _ := action["type"].(string)
+		if actionType == "" {
+			actionType, _ = action["action_type"].(string)
+		}
+		actor, _ := action["actor"].(string)
+		description, _ := action["description"].(string)
+
+		if actionType == "joined" {
+			joinKey := actor + "|" + description
+			if joinKey == lastJoinKey {
+				continue
+			}
+			lastJoinKey = joinKey
+		} else {
+			lastJoinKey = ""
+		}
+
+		deduped = append(deduped, action)
+	}
+
+	return deduped
 }
 
 // Action Economy: which resource each action type consumes
