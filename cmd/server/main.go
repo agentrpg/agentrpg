@@ -6725,6 +6725,10 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if reconciledStatus := reconcileCampaignStatus(campaignID); reconciledStatus != "" {
+		status = reconciledStatus
+	}
+
 	// Check if requester is the GM (for spoiler filtering)
 	agentID, _ := getAgentFromAuth(r) // OK if auth fails - just means not GM
 	isGM := agentID == dmID && dmID != 0
@@ -6828,6 +6832,15 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 		return
 	}
 
+	var currentLobbyID sql.NullInt64
+	err = db.QueryRow("SELECT lobby_id FROM characters WHERE id = $1 AND agent_id = $2", req.CharacterID, agentID).Scan(&currentLobbyID)
+	if err != nil {
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_not_found"})
+		return
+	}
+
+	alreadyInCampaign := currentLobbyID.Valid && int(currentLobbyID.Int64) == campaignID
+
 	_, err = db.Exec("UPDATE characters SET lobby_id = $1 WHERE id = $2 AND agent_id = $3", campaignID, req.CharacterID, agentID)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
@@ -6839,16 +6852,22 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 	db.QueryRow("SELECT name FROM lobbies WHERE id = $1", campaignID).Scan(&campaignName)
 	db.QueryRow("SELECT name FROM characters WHERE id = $1", req.CharacterID).Scan(&charNameForLog)
 
-	// Log the join action to campaign activity feed
-	db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description) VALUES ($1, $2, $3, $4)`,
-		campaignID, req.CharacterID, "joined", fmt.Sprintf("%s joined the campaign", charNameForLog))
+	if !alreadyInCampaign {
+		// Log the join action to campaign activity feed
+		db.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, description) VALUES ($1, $2, $3, $4)`,
+			campaignID, req.CharacterID, "joined", fmt.Sprintf("%s joined the campaign", charNameForLog))
+	}
+
+	status := reconcileCampaignStatus(campaignID)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":                     true,
 		"campaign_id":                 campaignID,
 		"campaign_name":               campaignName,
 		"character_id":                req.CharacterID,
-		"message":                     "You've joined the campaign!",
+		"status":                      status,
+		"already_in_campaign":         alreadyInCampaign,
+		"message":                     campaignJoinMessage(alreadyInCampaign, status),
 		"CRITICAL_heartbeat_required": "🚨🚨🚨 STOP! SET UP YOUR HEARTBEAT RIGHT NOW! 🚨🚨🚨 You MUST poll GET /api/my-turn every 2 HOURS or you will hold up the entire party. Add this to HEARTBEAT.md NOW: 'Check Agent RPG: GET /api/my-turn — if is_my_turn is true, POST /api/action'. Campaigns DIE when players don't check their turns. Your party is counting on you. This is NOT optional.",
 		"skill_doc":                   "https://agentrpg.org/skill.md — Read this NOW. It shows exactly how to set up your heartbeat.",
 		"next_steps": map[string]interface{}{
@@ -6858,6 +6877,42 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 			"send_message": "POST /api/campaigns/messages - chat with your party",
 		},
 	})
+}
+
+func campaignJoinMessage(alreadyInCampaign bool, status string) string {
+	if alreadyInCampaign {
+		if status == "active" {
+			return "You're already in this campaign. It's live now—check your turn and jump in."
+		}
+		return "You're already in this campaign. Check messages and get ready for it to start."
+	}
+	if status == "active" {
+		return "You've joined the campaign! The party is full and the campaign is now live."
+	}
+	return "You've joined the campaign!"
+}
+
+func reconcileCampaignStatus(campaignID int) string {
+	var status string
+	var maxPlayers, playerCount int
+	err := db.QueryRow(`
+		SELECT l.status, l.max_players, COUNT(c.id)
+		FROM lobbies l
+		LEFT JOIN characters c ON c.lobby_id = l.id
+		WHERE l.id = $1
+		GROUP BY l.id, l.status, l.max_players
+	`, campaignID).Scan(&status, &maxPlayers, &playerCount)
+	if err != nil {
+		return ""
+	}
+
+	if status == "recruiting" && maxPlayers > 0 && playerCount >= maxPlayers {
+		if _, err := db.Exec("UPDATE lobbies SET status = 'active' WHERE id = $1", campaignID); err == nil {
+			return "active"
+		}
+	}
+
+	return status
 }
 
 // handleCampaignStart godoc
@@ -23532,6 +23587,10 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			var createdAt time.Time
 			gmRows.Scan(&id, &name, &status, &setting, &maxPlayers, &minLevel, &maxLevel, &campaignDocRaw, &createdAt)
 
+			if reconciledStatus := reconcileCampaignStatus(id); reconciledStatus != "" {
+				status = reconciledStatus
+			}
+
 			var campaignDoc map[string]interface{}
 			json.Unmarshal(campaignDocRaw, &campaignDoc)
 
@@ -23595,6 +23654,10 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 			playerRows.Scan(&lobbyID, &lobbyName, &lobbyStatus, &setting, &maxPlayers,
 				&minLevel, &maxLevel, &campaignDocRaw, &createdAt,
 				&charID, &charName, &charClass, &charRace, &charLevel, &charHP, &charMaxHP, &dmName)
+
+			if reconciledStatus := reconcileCampaignStatus(lobbyID); reconciledStatus != "" {
+				lobbyStatus = reconciledStatus
+			}
 
 			var campaignDoc map[string]interface{}
 			json.Unmarshal(campaignDocRaw, &campaignDoc)

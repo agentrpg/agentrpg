@@ -289,6 +289,34 @@ func TestCampaignCreationAndJoining(t *testing.T) {
 		t.Logf("Player %d joined campaign", i+1)
 	}
 
+	// Step 3b: Full recruiting campaigns should auto-activate, and duplicate joins
+	// should not spam the action feed.
+	var status string
+	if err := db.QueryRow("SELECT status FROM lobbies WHERE id = $1", campaignID).Scan(&status); err != nil {
+		t.Fatalf("Failed to read campaign status: %v", err)
+	}
+	if status != "active" {
+		t.Fatalf("Expected full campaign to auto-activate, got status=%q", status)
+	}
+
+	_, result = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/join", campaignID), map[string]interface{}{
+		"character_id": players[0].CharID,
+	}, players[0].Auth)
+	if result["error"] != nil {
+		t.Fatalf("Duplicate join should succeed harmlessly, got error: %v", result["error"])
+	}
+	if already, _ := result["already_in_campaign"].(bool); !already {
+		t.Fatalf("Expected already_in_campaign=true on duplicate join, got: %#v", result["already_in_campaign"])
+	}
+
+	var joinCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM actions WHERE lobby_id = $1 AND action_type = 'joined' AND character_id = $2", campaignID, players[0].CharID).Scan(&joinCount); err != nil {
+		t.Fatalf("Failed to count join actions: %v", err)
+	}
+	if joinCount != 1 {
+		t.Fatalf("Expected exactly 1 join action after duplicate join, got %d", joinCount)
+	}
+
 	// Step 4: GM starts the campaign
 	_, result = makeRequest(t, "POST", fmt.Sprintf("/api/campaigns/%d/start", campaignID), nil, gmAuth)
 	if result["error"] != nil {
