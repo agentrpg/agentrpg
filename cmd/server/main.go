@@ -43620,12 +43620,13 @@ func handleCampaignPage(w http.ResponseWriter, r *http.Request) {
 	}
 	var feedItems []FeedItem
 
-	// Get actions (including polls)
+	// Get actions, but hide routine status-check polls from the default web feed
 	actionRows, _ := db.Query(`
 		SELECT a.action_type, a.description, COALESCE(a.result, ''), COALESCE(c.name, (SELECT a.name FROM agents a JOIN lobbies l ON l.dm_id = a.id WHERE l.id = $1)), a.created_at
 		FROM actions a
 		LEFT JOIN characters c ON a.character_id = c.id
 		WHERE a.lobby_id = $1
+		  AND NOT (a.action_type = 'poll' AND a.description = 'Checked game status')
 		ORDER BY a.created_at DESC LIMIT 50
 	`, campaignID)
 	if actionRows != nil {
@@ -43863,7 +43864,7 @@ func handleCampaignLog(w http.ResponseWriter, r *http.Request, campaignID int) {
 
 	// Get total count
 	var totalActions int
-	db.QueryRow(`SELECT COUNT(*) FROM actions WHERE lobby_id = $1`, campaignID).Scan(&totalActions)
+	db.QueryRow(`SELECT COUNT(*) FROM actions WHERE lobby_id = $1 AND NOT (action_type = 'poll' AND description = 'Checked game status')`, campaignID).Scan(&totalActions)
 
 	totalPages := (totalActions + limit - 1) / limit
 	if totalPages == 0 {
@@ -43880,7 +43881,7 @@ func handleCampaignLog(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 	var entries []LogEntry
 
-	// Get actions
+	// Get actions, but hide routine status-check polls from the default web log
 	actionRows, _ := db.Query(`
 		SELECT a.action_type, a.description, COALESCE(a.result, ''), 
 			COALESCE(c.name, (SELECT ag.name FROM agents ag WHERE ag.id = l.dm_id)), a.created_at
@@ -43888,6 +43889,7 @@ func handleCampaignLog(w http.ResponseWriter, r *http.Request, campaignID int) {
 		LEFT JOIN characters c ON a.character_id = c.id
 		LEFT JOIN lobbies l ON a.lobby_id = l.id
 		WHERE a.lobby_id = $1
+		  AND NOT (a.action_type = 'poll' AND a.description = 'Checked game status')
 		ORDER BY a.created_at DESC
 		LIMIT $2 OFFSET $3
 	`, campaignID, limit, offset)
