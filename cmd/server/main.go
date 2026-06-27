@@ -44270,6 +44270,14 @@ func handleUniversePage(w http.ResponseWriter, r *http.Request) {
       <p class="description">Wondrous items, potions, and artifacts.</p>
     </a>
   </div>
+
+  <div class="category-card">
+    <a href="/universe/campaign-templates">
+      <h3><span class="icon">🎭</span> Campaign Templates</h3>
+      <span class="count">Starter adventures and premade worlds</span>
+      <p class="description">Ready-made campaign frames for GMs who want to start fast.</p>
+    </a>
+  </div>
 </div>
 
 <script>
@@ -44500,6 +44508,108 @@ func handleUniverseDetailPage(w http.ResponseWriter, r *http.Request) {
 
 	case "magic-items":
 		content = fmt.Sprintf(`<h1>%s</h1><p class="muted">Coming soon! This section is under development.</p><p><a href="/universe">← Back to Universe</a></p>`, strings.Title(strings.ReplaceAll(category, "-", " ")))
+
+	case "campaign-templates":
+		if len(parts) > 1 {
+			slug := parts[1]
+			var name, description, setting, themes, recommendedLevels, startingScene string
+			var sessionEstimate int
+			var initialQuestsJSON, initialNPCsJSON sql.NullString
+			err := db.QueryRow(`
+				SELECT name, description, setting, themes, recommended_levels, session_count_estimate,
+				       COALESCE(starting_scene, ''), initial_quests, initial_npcs
+				FROM campaign_templates
+				WHERE slug = $1
+			`, slug).Scan(&name, &description, &setting, &themes, &recommendedLevels, &sessionEstimate, &startingScene, &initialQuestsJSON, &initialNPCsJSON)
+			if err != nil {
+				http.Error(w, "Campaign template not found", http.StatusNotFound)
+				return
+			}
+
+			var quests []map[string]interface{}
+			var npcs []map[string]interface{}
+			if initialQuestsJSON.Valid && initialQuestsJSON.String != "" {
+				_ = json.Unmarshal([]byte(initialQuestsJSON.String), &quests)
+			}
+			if initialNPCsJSON.Valid && initialNPCsJSON.String != "" {
+				_ = json.Unmarshal([]byte(initialNPCsJSON.String), &npcs)
+			}
+
+			var detail strings.Builder
+			detail.WriteString(fmt.Sprintf(`<h1>🎭 %s</h1>`, template.HTMLEscapeString(name)))
+			detail.WriteString(fmt.Sprintf(`<p class="muted">%s • %d estimated session%s</p>`, template.HTMLEscapeString(recommendedLevels), sessionEstimate, pluralize(sessionEstimate, "", "s")))
+			detail.WriteString(fmt.Sprintf(`<div class="note"><strong>Themes:</strong> %s<br><strong>Setting:</strong> %s</div>`, template.HTMLEscapeString(themes), template.HTMLEscapeString(setting)))
+			detail.WriteString(fmt.Sprintf(`<p>%s</p>`, template.HTMLEscapeString(description)))
+			if strings.TrimSpace(startingScene) != "" {
+				detail.WriteString(fmt.Sprintf(`<h2>Starting Scene</h2><p>%s</p>`, template.HTMLEscapeString(startingScene)))
+			}
+			if len(quests) > 0 {
+				detail.WriteString(`<h2>Opening Quests</h2><ul>`)
+				for _, q := range quests {
+					title, _ := q["title"].(string)
+					desc, _ := q["description"].(string)
+					if title == "" && desc == "" {
+						continue
+					}
+					if desc != "" {
+						detail.WriteString(fmt.Sprintf(`<li><strong>%s</strong> — %s</li>`, template.HTMLEscapeString(title), template.HTMLEscapeString(desc)))
+					} else {
+						detail.WriteString(fmt.Sprintf(`<li><strong>%s</strong></li>`, template.HTMLEscapeString(title)))
+					}
+				}
+				detail.WriteString(`</ul>`)
+			}
+			if len(npcs) > 0 {
+				detail.WriteString(`<h2>Starting NPCs</h2><ul>`)
+				for _, npc := range npcs {
+					npcName, _ := npc["name"].(string)
+					role, _ := npc["role"].(string)
+					if npcName == "" {
+						continue
+					}
+					if role != "" {
+						detail.WriteString(fmt.Sprintf(`<li><strong>%s</strong> — %s</li>`, template.HTMLEscapeString(npcName), template.HTMLEscapeString(role)))
+					} else {
+						detail.WriteString(fmt.Sprintf(`<li><strong>%s</strong></li>`, template.HTMLEscapeString(npcName)))
+					}
+				}
+				detail.WriteString(`</ul>`)
+			}
+			detail.WriteString(`<div class="note"><strong>How to use it:</strong> create a new campaign with this template's slug through the API, or use this page as a human-readable starter kit.</div>`)
+			detail.WriteString(`<p><a href="/universe/campaign-templates">← Back to Campaign Templates</a></p>`)
+			content = detail.String()
+		} else {
+			rows, err := db.Query(`
+				SELECT slug, name, description, themes, recommended_levels, session_count_estimate
+				FROM campaign_templates
+				ORDER BY name
+			`)
+			var list strings.Builder
+			list.WriteString(`<h1>🎭 Campaign Templates</h1><p class="muted">Starter adventures and premade worlds for faster GM setup.</p>`)
+			list.WriteString(`<div class="note"><strong>Why this page exists:</strong> the API already had campaign templates, but the site was linking humans to a route that fell back to the generic Universe page. This page makes that link real and readable.</div>`)
+			list.WriteString(`<div class="category-grid">`)
+			if err == nil && rows != nil {
+				for rows.Next() {
+					var slug, name, description, themes, recommendedLevels string
+					var sessionEstimate int
+					rows.Scan(&slug, &name, &description, &themes, &recommendedLevels, &sessionEstimate)
+					list.WriteString(fmt.Sprintf(
+						`<div class="category-card"><a href="/universe/campaign-templates/%s"><h3>%s</h3><span class="count">%s • %d estimated session%s</span><p class="description">%s</p><p class="muted" style="margin-top:0.75em">%s</p></a></div>`,
+						template.HTMLEscapeString(slug),
+						template.HTMLEscapeString(name),
+						template.HTMLEscapeString(recommendedLevels),
+						sessionEstimate,
+						pluralize(sessionEstimate, "", "s"),
+						template.HTMLEscapeString(description),
+						template.HTMLEscapeString(themes),
+					))
+				}
+				rows.Close()
+			}
+			list.WriteString(`</div>`)
+			list.WriteString(`<p class="muted" style="margin-top:1em">API path: <code>/api/campaign-templates</code>. Creation path: POST <code>/api/campaigns</code> with <code>template_slug</code>.</p>`)
+			content = list.String()
+		}
 
 	default:
 		http.Redirect(w, r, "/universe", http.StatusFound)
