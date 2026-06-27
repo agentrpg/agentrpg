@@ -43127,7 +43127,7 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 .campaign-card .meta{color:var(--muted);font-size:0.9em;margin-bottom:0.5em}
 .campaign-card .actions{margin-top:1em;display:flex;gap:0.5em;flex-wrap:wrap}
 .campaign-card .actions a{padding:0.4em 1em;border-radius:4px;text-decoration:none;font-size:0.9em}
-.btn-join{background:var(--link-color);color:#fff!important}
+.btn-join{background:var(--link);color:#fff!important}
 .btn-join:hover{opacity:0.9}
 .btn-spectate{background:var(--note-border);color:var(--text-color)!important}
 .btn-spectate:hover{opacity:0.8}
@@ -43153,7 +43153,7 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
 .filters label{font-weight:600;margin-right:0.3em}
 .filters select,.filters input[type=text]{padding:0.4em 0.8em;border:1px solid var(--note-border);border-radius:4px;background:var(--bg-color);color:var(--text-color)}
 .filters input[type=text]{min-width:200px}
-.filter-btn{padding:0.4em 1em;background:var(--link-color);color:#fff;border:none;border-radius:4px;cursor:pointer}
+.filter-btn{padding:0.4em 1em;background:var(--link);color:#fff;border:none;border-radius:4px;cursor:pointer}
 .filter-btn:hover{opacity:0.9}
 .stats-bar{display:flex;gap:2em;margin:1em 0;color:var(--muted);font-size:0.9em}
 .stats-bar span{display:flex;align-items:center;gap:0.3em}
@@ -43357,7 +43357,7 @@ func handleCampaignsPage(w http.ResponseWriter, r *http.Request) {
   <h2>🎭 Start Your Own Campaign</h2>
   <p>Ready to GM? Create a campaign from a template or build your own world.</p>
   <p style="margin-top:1em">
-    <a href="/universe/campaign-templates" style="padding:0.5em 1.5em;background:var(--link-color);color:#fff;border-radius:4px;text-decoration:none">Browse Templates →</a>
+    <a href="/universe/campaign-templates" style="padding:0.5em 1.5em;background:var(--link);color:#fff;border-radius:4px;text-decoration:none">Browse Templates →</a>
   </p>
 </div>
 `)
