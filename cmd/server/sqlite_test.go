@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/agentrpg/agentrpg/game"
 	_ "github.com/mattn/go-sqlite3"
@@ -121,6 +122,94 @@ func TestSQLiteSaveDisadvantageAndNames(t *testing.T) {
 	}
 	if got := getCharacterName(999); got != "" {
 		t.Fatalf("getCharacterName(999) = %q, want empty string for missing character", got)
+	}
+}
+
+func TestNormalizeConditionList(t *testing.T) {
+	input := []string{`["dodging"`, `"dodging"]`, "Dodging", "prone", "prone", ""}
+	got := normalizeConditionList(input)
+
+	if len(got) != 2 {
+		t.Fatalf("expected 2 normalized conditions, got %d: %#v", len(got), got)
+	}
+	if got[0] != "dodging" || got[1] != "prone" {
+		t.Fatalf("unexpected normalized conditions: %#v", got)
+	}
+}
+
+func TestParseConditionsStringJSON(t *testing.T) {
+	got := normalizeConditionList(parseConditionsString(`["dodging","prone","dodging"]`))
+	if len(got) != 2 {
+		t.Fatalf("expected 2 parsed conditions, got %d: %#v", len(got), got)
+	}
+}
+
+func TestDisplayedMaxPlayers(t *testing.T) {
+	if got := displayedMaxPlayers(3, 4); got != 4 {
+		t.Fatalf("displayedMaxPlayers(3, 4) = %d, want 4", got)
+	}
+	if got := displayedMaxPlayers(4, 3); got != 4 {
+		t.Fatalf("displayedMaxPlayers(4, 3) = %d, want 4", got)
+	}
+}
+
+func setupSQLiteActionTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatalf("open sqlite db: %v", err)
+	}
+
+	schema := `
+CREATE TABLE actions (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	lobby_id INTEGER,
+	character_id INTEGER,
+	action_type TEXT,
+	description TEXT,
+	created_at DATETIME
+);`
+	if _, err := testDB.Exec(schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+
+	db = testDB
+	t.Cleanup(func() {
+		_ = testDB.Close()
+		db = originalDB
+	})
+
+	return testDB
+}
+
+func TestHasCharacterActedSinceLastNarration(t *testing.T) {
+	testDB := setupSQLiteActionTestDB(t)
+	now := time.Now().UTC()
+
+	if _, err := testDB.Exec(
+		`INSERT INTO actions (lobby_id, character_id, action_type, description, created_at) VALUES (?, ?, ?, ?, ?)`,
+		1, 11, "help", "first action", now.Add(-2*time.Minute),
+	); err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+
+	acted, actionType, description, _ := hasCharacterActedSinceLastNarration(11, 1)
+	if !acted || actionType != "help" || description != "first action" {
+		t.Fatalf("expected unresolved action, got acted=%v type=%q desc=%q", acted, actionType, description)
+	}
+
+	if _, err := testDB.Exec(
+		`INSERT INTO actions (lobby_id, character_id, action_type, description, created_at) VALUES (?, NULL, ?, ?, ?)`,
+		1, "narration", "GM resolves the beat", now.Add(-1*time.Minute),
+	); err != nil {
+		t.Fatalf("insert narration: %v", err)
+	}
+
+	acted, _, _, _ = hasCharacterActedSinceLastNarration(11, 1)
+	if acted {
+		t.Fatal("expected narration to clear unresolved player action")
 	}
 }
 

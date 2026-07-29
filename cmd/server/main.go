@@ -3559,8 +3559,7 @@ func hasCondition(charID int, condition string) bool {
 	if err != nil {
 		return false
 	}
-	var conditions []string
-	json.Unmarshal(conditionsJSON, &conditions)
+	conditions := normalizeConditionList(parseConditionsJSON(conditionsJSON))
 	condition = strings.ToLower(condition)
 	for _, c := range conditions {
 		if strings.ToLower(c) == condition {
@@ -3574,9 +3573,7 @@ func hasCondition(charID int, condition string) bool {
 func getCharConditions(charID int) []string {
 	var conditionsJSON []byte
 	db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&conditionsJSON)
-	var conditions []string
-	json.Unmarshal(conditionsJSON, &conditions)
-	return conditions
+	return normalizeConditionList(parseConditionsJSON(conditionsJSON))
 }
 
 // removeCondition removes a specific condition from a character (v0.8.41)
@@ -3600,6 +3597,131 @@ func removeCondition(charID int, condition string) bool {
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
 	}
 	return removed
+}
+
+func parseConditionsJSON(raw []byte) []string {
+	var conditions []string
+	if len(raw) == 0 {
+		return conditions
+	}
+	if err := json.Unmarshal(raw, &conditions); err == nil {
+		return conditions
+	}
+	return parseConditionsString(string(raw))
+}
+
+func parseConditionsString(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" || raw == "null" {
+		return []string{}
+	}
+
+	var conditions []string
+	if err := json.Unmarshal([]byte(raw), &conditions); err == nil {
+		return conditions
+	}
+
+	parts := strings.Split(raw, ",")
+	parsed := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		part = strings.Trim(part, "[]\"")
+		if part == "" {
+			continue
+		}
+		parsed = append(parsed, part)
+	}
+	return parsed
+}
+
+func normalizeConditionList(conditions []string) []string {
+	if len(conditions) == 0 {
+		return []string{}
+	}
+	normalized := make([]string, 0, len(conditions))
+	seen := make(map[string]bool)
+	for _, condition := range conditions {
+		condition = strings.TrimSpace(condition)
+		condition = strings.Trim(condition, "[]\"")
+		if condition == "" {
+			continue
+		}
+		key := strings.ToLower(condition)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		normalized = append(normalized, condition)
+	}
+	return normalized
+}
+
+func isMeaningfulActionType(actionType string) bool {
+	switch strings.ToLower(strings.TrimSpace(actionType)) {
+	case "", "poll", "joined":
+		return false
+	default:
+		return true
+	}
+}
+
+func lastNarrationTime(lobbyID int) time.Time {
+	var ts sql.NullTime
+	db.QueryRow(`
+		SELECT created_at
+		FROM actions
+		WHERE lobby_id = $1 AND action_type = 'narration'
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, lobbyID).Scan(&ts)
+	if ts.Valid {
+		return ts.Time
+	}
+	return time.Time{}
+}
+
+func hasCharacterActedSinceLastNarration(charID, lobbyID int) (bool, string, string, time.Time) {
+	narrationAt := lastNarrationTime(lobbyID)
+
+	var actionType, description sql.NullString
+	var createdAt sql.NullTime
+	query := `
+		SELECT action_type, COALESCE(description, ''), created_at
+		FROM actions
+		WHERE lobby_id = $1
+		  AND character_id = $2
+		  AND action_type NOT IN ('poll', 'joined')
+	`
+	args := []interface{}{lobbyID, charID}
+	if !narrationAt.IsZero() {
+		query += ` AND created_at > $3`
+		args = append(args, narrationAt)
+	}
+	query += `
+		ORDER BY created_at DESC
+		LIMIT 1
+	`
+	err := db.QueryRow(query, args...).Scan(&actionType, &description, &createdAt)
+	if err != nil {
+		return false, "", "", time.Time{}
+	}
+	return true, actionType.String, description.String, createdAt.Time
+}
+
+func shouldAllowExplorationFollowup(actionType string) bool {
+	switch strings.ToLower(strings.TrimSpace(actionType)) {
+	case "speak", "interact", "drop":
+		return true
+	default:
+		return false
+	}
+}
+
+func displayedMaxPlayers(maxPlayers, playerCount int) int {
+	if playerCount > maxPlayers {
+		return playerCount
+	}
+	return maxPlayers
 }
 
 // removeOneWithShadowsInvisibility checks for and removes the invisible:one_with_shadows condition (v1.0.4)
@@ -6402,6 +6524,10 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 			var name, status string
 			var dmName sql.NullString
 			rows.Scan(&id, &name, &status, &maxPlayers, &dmName, &minLevel, &maxLevel, &playerCount)
+			if reconciledStatus := reconcileCampaignStatus(id); reconciledStatus != "" {
+				status = reconciledStatus
+			}
+			maxPlayers = displayedMaxPlayers(maxPlayers, playerCount)
 			levelReq := formatLevelRequirement(minLevel, maxLevel)
 			campaigns = append(campaigns, map[string]interface{}{
 				"id": id, "name": name, "status": status,
@@ -6754,6 +6880,7 @@ func handleCampaignByID(w http.ResponseWriter, r *http.Request) {
 		}
 		characters = append(characters, charData)
 	}
+	maxPlayers = displayedMaxPlayers(maxPlayers, len(characters))
 
 	// Parse and filter campaign document
 	var campaignDoc map[string]interface{}
@@ -6909,6 +7036,12 @@ func reconcileCampaignStatus(campaignID int) string {
 	if status == "recruiting" && maxPlayers > 0 && playerCount >= maxPlayers {
 		if _, err := db.Exec("UPDATE lobbies SET status = 'active' WHERE id = $1", campaignID); err == nil {
 			return "active"
+		}
+	}
+
+	if status == "active" && playerCount == 0 {
+		if _, err := db.Exec("UPDATE lobbies SET status = 'recruiting' WHERE id = $1", campaignID); err == nil {
+			return "recruiting"
 		}
 	}
 
@@ -7112,18 +7245,15 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 		// Parse conditions for display
 		activeConditions := []string{}
 		if conditions.Valid && conditions.String != "" {
-			for _, c := range strings.Split(conditions.String, ",") {
-				c = strings.TrimSpace(c)
-				if c != "" {
-					// Clean up condition names for display
-					if strings.HasPrefix(c, "exhaustion:") {
-						activeConditions = append(activeConditions, c)
-					} else if strings.Contains(c, ":") {
-						// Strip IDs from conditions like "charmed:5" -> "charmed"
-						activeConditions = append(activeConditions, strings.Split(c, ":")[0])
-					} else {
-						activeConditions = append(activeConditions, c)
-					}
+			for _, c := range normalizeConditionList(parseConditionsString(conditions.String)) {
+				// Clean up condition names for display
+				if strings.HasPrefix(c, "exhaustion:") {
+					activeConditions = append(activeConditions, c)
+				} else if strings.Contains(c, ":") {
+					// Strip IDs from conditions like "charmed:5" -> "charmed"
+					activeConditions = append(activeConditions, strings.Split(c, ":")[0])
+				} else {
+					activeConditions = append(activeConditions, c)
 				}
 			}
 		}
@@ -10597,6 +10727,19 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	awaitingGMNarration := false
+	awaitingGMNarrationMessage := ""
+	if !inCombat {
+		if acted, actionType, actionDesc, actedAt := hasCharacterActedSinceLastNarration(charID, lobbyID); acted {
+			awaitingGMNarration = true
+			isMyTurn = false
+			awaitingGMNarrationMessage = fmt.Sprintf("You already acted (%s) at %s. Wait for GM narration before taking another major action.", actionType, actedAt.UTC().Format(time.RFC3339))
+			if strings.TrimSpace(actionDesc) != "" {
+				awaitingGMNarrationMessage = fmt.Sprintf("You already acted (%s: %s) at %s. Wait for GM narration before taking another major action.", actionType, actionDesc, actedAt.UTC().Format(time.RFC3339))
+			}
+		}
+	}
+
 	// Build character info
 	xpToNext := getXPForNextLevel(level) - charXP
 
@@ -11106,6 +11249,10 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 				"description": "I swing my sword at the nearest enemy",
 			},
 		},
+	}
+	if awaitingGMNarration {
+		response["turn_state"] = "waiting_for_gm"
+		response["turn_state_message"] = awaitingGMNarrationMessage
 	}
 
 	// Add combat info if in combat
@@ -12278,6 +12425,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		FROM actions a
 		LEFT JOIN characters c ON a.character_id = c.id
 		WHERE a.lobby_id = $1
+		  AND a.action_type NOT IN ('poll', 'joined')
 		ORDER BY a.created_at DESC
 		LIMIT 1
 	`, campaignID).Scan(&lastActionID, &lastCharID, &lastCharName, &lastActionType, &lastDesc, &lastResult, &lastActionTime)
@@ -12451,7 +12599,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 					"Environmental hazards worsen each round",
 				},
 			}
-		} else if lastAction != nil {
+		} else if lastAction != nil && strings.ToLower(lastActionType) != "narration" {
 			needsAttention = true
 			whatToDoNext = map[string]interface{}{
 				"instruction":          fmt.Sprintf("Narrate %s's action, then check if it's a monster's turn.", lastCharName),
@@ -12467,7 +12615,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Exploration mode
-		if lastAction != nil {
+		if lastAction != nil && strings.ToLower(lastActionType) != "narration" {
 			needsAttention = true
 			whatToDoNext = map[string]interface{}{
 				"instruction":          fmt.Sprintf("Narrate the result of %s's action.", lastCharName),
@@ -12922,8 +13070,16 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(overdueDeadlines) > 0 {
 		response["overdue_deadlines"] = overdueDeadlines
-		response["needs_attention"] = true // Overdue deadlines need immediate attention
+		needsAttention = true // Overdue deadlines need immediate attention
 	}
+
+	for _, task := range gmTasks {
+		if strings.Contains(task, "🚨") || strings.Contains(task, "⚠️") {
+			needsAttention = true
+			break
+		}
+	}
+	response["needs_attention"] = needsAttention
 
 	// Add combat info if in combat
 	if inCombat {
@@ -23601,6 +23757,7 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 			// Get players in this campaign
 			players := getCampaignPlayers(id)
+			maxPlayers = displayedMaxPlayers(maxPlayers, len(players))
 
 			// Get recent messages
 			messages := getRecentCampaignMessages(id, 24)
@@ -23671,6 +23828,7 @@ func handleHeartbeat(w http.ResponseWriter, r *http.Request) {
 
 			// Get other players
 			players := getCampaignPlayers(lobbyID)
+			maxPlayers = displayedMaxPlayers(maxPlayers, len(players))
 
 			// Get recent messages
 			messages := getRecentCampaignMessages(lobbyID, 24)
@@ -24246,6 +24404,22 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	err = db.QueryRow("SELECT active FROM combat_state WHERE lobby_id = $1", lobbyID).Scan(&inCombat)
 	if err != nil {
 		inCombat = false
+	}
+
+	if !inCombat && !shouldAllowExplorationFollowup(req.Action) {
+		if acted, actionType, actionDesc, actedAt := hasCharacterActedSinceLastNarration(charID, lobbyID); acted {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":      false,
+				"error":        "awaiting_narration",
+				"message":      "You already took an action in this exploration beat. Wait for GM narration before acting again.",
+				"last_action":  actionType,
+				"description":  actionDesc,
+				"acted_at":     actedAt.UTC().Format(time.RFC3339),
+				"retry_after":  "After the GM narrates the scene forward",
+				"how_to_check": "GET /api/my-turn",
+			})
+			return
+		}
 	}
 
 	// Calculate effective movement cost (prone mechanics - 5e PHB p190-191)
@@ -26086,9 +26260,10 @@ func resolveAction(action, description string, charID int) string {
 		// Add dodge condition
 		var existing []byte
 		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existing)
-		var conds []string
-		json.Unmarshal(existing, &conds)
-		conds = append(conds, "dodging")
+		conds := normalizeConditionList(parseConditionsJSON(existing))
+		if !hasCondition(charID, "dodging") {
+			conds = append(conds, "dodging")
+		}
 		updated, _ := json.Marshal(conds)
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updated, charID)
 		return "Dodging. Attacks against you have disadvantage until your next turn."
@@ -27402,9 +27577,10 @@ func resolveAction(action, description string, charID int) string {
 		// Add dodge condition
 		var existingPD []byte
 		db.QueryRow("SELECT COALESCE(conditions, '[]') FROM characters WHERE id = $1", charID).Scan(&existingPD)
-		var pdConds []string
-		json.Unmarshal(existingPD, &pdConds)
-		pdConds = append(pdConds, "dodging")
+		pdConds := normalizeConditionList(parseConditionsJSON(existingPD))
+		if !hasCondition(charID, "dodging") {
+			pdConds = append(pdConds, "dodging")
+		}
 		updatedPD, _ := json.Marshal(pdConds)
 		db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", updatedPD, charID)
 
