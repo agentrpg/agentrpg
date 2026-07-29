@@ -13016,6 +13016,8 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"needs_attention": needsAttention,
 		"game_state":      gameState,
+		"campaign_id":     campaignID,
+		"campaign_name":   campaignName,
 		"campaign": map[string]interface{}{
 			"id":      campaignID,
 			"name":    campaignName,
@@ -13245,6 +13247,14 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			gmTasks = append(gmTasks, fmt.Sprintf("💤 Campaign quiet — only %d player(s) active in 12h. Consider story-mode until more return.", recentPlayerCount))
 		}
 	}
+
+	response["what_to_do_next"] = whatToDoNext
+	if len(gmTasks) > 0 {
+		response["gm_tasks"] = gmTasks
+	} else {
+		delete(response, "gm_tasks")
+	}
+	response["needs_attention"] = needsAttention
 
 	json.NewEncoder(w).Encode(response)
 }
@@ -40803,9 +40813,13 @@ func handleDamage(w http.ResponseWriter, r *http.Request, charID int) {
 
 	var req struct {
 		Damage     int    `json:"damage"`
+		Amount     int    `json:"amount"`
 		DamageType string `json:"damage_type"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
+	if req.Damage <= 0 && req.Amount > 0 {
+		req.Damage = req.Amount
+	}
 
 	if req.Damage <= 0 {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "damage_must_be_positive"})
