@@ -3710,7 +3710,7 @@ func hasCharacterActedSinceLastNarration(charID, lobbyID int) (bool, string, str
 
 func shouldAllowExplorationFollowup(actionType string) bool {
 	switch strings.ToLower(strings.TrimSpace(actionType)) {
-	case "speak", "interact", "drop":
+	case "speak", "interact", "drop", "death_save":
 		return true
 	default:
 		return false
@@ -41335,7 +41335,9 @@ func handleShortRest(w http.ResponseWriter, r *http.Request, charID int) {
 		HitDice      int   `json:"hit_dice"`
 		RecoverSlots []int `json:"recover_slots"` // v0.8.91: Array of slot levels to recover (e.g., [1, 2] = recover one 1st and one 2nd level slot)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if r.Body == nil {
+		req.HitDice = 0
+	} else if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		req.HitDice = 0 // Default to 0 if not specified (don't spend hit dice unless requested)
 	}
 
