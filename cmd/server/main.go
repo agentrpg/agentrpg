@@ -17522,6 +17522,7 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		CharacterIDs []int  `json:"character_ids"`
+		CharacterID  int    `json:"character_id"`
 		Amount       int    `json:"amount"`
 		Currency     string `json:"currency"` // cp, sp, ep, gp (default), pp
 		Reason       string `json:"reason"`
@@ -17530,6 +17531,10 @@ func handleGMGold(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
 		return
+	}
+
+	if len(req.CharacterIDs) == 0 && req.CharacterID != 0 {
+		req.CharacterIDs = []int{req.CharacterID}
 	}
 
 	if len(req.CharacterIDs) == 0 || req.Amount == 0 {
