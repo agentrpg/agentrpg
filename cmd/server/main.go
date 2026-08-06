@@ -36,7 +36,7 @@ import (
 
 	"github.com/agentrpg/agentrpg/game"
 
-	_ "github.com/lib/pq"
+	"github.com/lib/pq"
 )
 
 //go:embed docs/swagger/swagger.json
@@ -347,6 +347,8 @@ func setupRoutes() {
 	http.HandleFunc("/api/mod/assign-email", handleModAssignEmail)
 	http.HandleFunc("/api/mod/reset-password", handleModResetPassword)
 	http.HandleFunc("/api/mod/delete-campaign", handleModDeleteCampaign)
+	http.HandleFunc("/api/mod/archive-campaign", handleModArchiveCampaign)
+	http.HandleFunc("/api/mod/resolve-feature-requests", handleModResolveFeatureRequests)
 	http.HandleFunc("/api/campaigns", handleCampaigns)
 	http.HandleFunc("/api/mod/list-users", handleModListUsers)
 	http.HandleFunc("/api/mod/delete-user", handleModDeleteUser)
@@ -1308,6 +1310,7 @@ func initDB() {
 		log.Printf("Schema error: %v", err)
 	} else {
 		log.Println("Database schema initialized")
+		cleanupDuplicateCharacterConditions()
 	}
 }
 
@@ -3656,6 +3659,38 @@ func normalizeConditionList(conditions []string) []string {
 	return normalized
 }
 
+// cleanupDuplicateCharacterConditions repairs legacy rows once the service
+// starts. It is idempotent and preserves distinct parameterized conditions.
+func cleanupDuplicateCharacterConditions() {
+	rows, err := db.Query("SELECT id, COALESCE(conditions, '[]') FROM characters")
+	if err != nil {
+		log.Printf("Condition cleanup skipped: %v", err)
+		return
+	}
+	defer rows.Close()
+
+	updated := 0
+	for rows.Next() {
+		var id int
+		var raw []byte
+		if err := rows.Scan(&id, &raw); err != nil {
+			continue
+		}
+		conditions := parseConditionsJSON(raw)
+		normalized := normalizeConditionList(conditions)
+		if len(normalized) == len(conditions) {
+			continue
+		}
+		encoded, _ := json.Marshal(normalized)
+		if _, err := db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", encoded, id); err == nil {
+			updated++
+		}
+	}
+	if updated > 0 {
+		log.Printf("Removed duplicate conditions from %d character(s)", updated)
+	}
+}
+
 func isMeaningfulActionType(actionType string) bool {
 	switch strings.ToLower(strings.TrimSpace(actionType)) {
 	case "", "poll", "joined":
@@ -5729,6 +5764,91 @@ func handleModDeleteCampaign(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleModArchiveCampaign hides an empty campaign without destroying its
+// audit trail. Parties with characters cannot be archived through this path.
+func handleModArchiveCampaign(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	_, _, isMod := checkModerator(r)
+	if !isMod {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
+		return
+	}
+	var req struct {
+		CampaignID int `json:"campaign_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CampaignID == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "campaign_id_required"})
+		return
+	}
+	result, err := db.Exec(`
+		UPDATE lobbies SET status = 'archived'
+		WHERE id = $1 AND NOT EXISTS (
+			SELECT 1 FROM characters WHERE lobby_id = $1
+		)
+	`, req.CampaignID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "archive_failed", "details": err.Error()})
+		return
+	}
+	updated, _ := result.RowsAffected()
+	if updated == 0 {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "campaign_missing_or_not_empty"})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "campaign_id": req.CampaignID, "status": "archived"})
+}
+
+// handleModResolveFeatureRequests closes a batch of duplicate or completed
+// reports while retaining their original evidence for auditability.
+func handleModResolveFeatureRequests(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != "POST" {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		json.NewEncoder(w).Encode(map[string]string{"error": "method_not_allowed"})
+		return
+	}
+	_, _, isMod := checkModerator(r)
+	if !isMod {
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"error": "not_authorized"})
+		return
+	}
+	var req struct {
+		RequestIDs []int  `json:"request_ids"`
+		Status     string `json:"status"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.RequestIDs) == 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "request_ids_required"})
+		return
+	}
+	if req.Status == "" {
+		req.Status = "resolved"
+	}
+	if req.Status != "resolved" && req.Status != "closed" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_status"})
+		return
+	}
+	result, err := db.Exec(`UPDATE feature_requests SET status = $1, updated_at = NOW() WHERE id = ANY($2)`, req.Status, pq.Array(req.RequestIDs))
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "update_failed", "details": err.Error()})
+		return
+	}
+	updated, _ := result.RowsAffected()
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "status": req.Status, "updated": updated})
+}
+
 // handleModListUsers allows moderators to list all users
 func handleModListUsers(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -6967,6 +7087,28 @@ func handleCampaignJoin(w http.ResponseWriter, r *http.Request, campaignID int) 
 	}
 
 	alreadyInCampaign := currentLobbyID.Valid && int(currentLobbyID.Int64) == campaignID
+	if !alreadyInCampaign {
+		var maxPlayers, playerCount int
+		if err := db.QueryRow(`
+			SELECT l.max_players, COUNT(c.id)
+			FROM lobbies l LEFT JOIN characters c ON c.lobby_id = l.id
+			WHERE l.id = $1
+			GROUP BY l.id, l.max_players
+		`, campaignID).Scan(&maxPlayers, &playerCount); err != nil {
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_not_found"})
+			return
+		}
+		if maxPlayers > 0 && playerCount >= maxPlayers {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":        "campaign_full",
+				"campaign_id":  campaignID,
+				"max_players":  maxPlayers,
+				"player_count": playerCount,
+				"message":      "This campaign is full.",
+			})
+			return
+		}
+	}
 
 	_, err = db.Exec("UPDATE characters SET lobby_id = $1 WHERE id = $2 AND agent_id = $3", campaignID, req.CharacterID, agentID)
 	if err != nil {
@@ -24332,6 +24474,17 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		CloseRange             bool   `json:"close_range"`              // v1.0.1: set true if within 5ft of hostile creature (ranged attacks have disadvantage, PHB p195)
 	}
 	json.NewDecoder(r.Body).Decode(&req)
+	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
+	req.Description = strings.TrimSpace(req.Description)
+	if req.Action == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "action_required",
+			"message": "Provide an action, such as attack, dodge, cast, or help.",
+		})
+		return
+	}
 
 	var charID, lobbyID int
 	var race string
@@ -24697,8 +24850,8 @@ func resolveAction(action, description string, charID int) string {
 	var class string
 	var subclass sql.NullString
 	var conditionsJSON []byte
-	var weaponProfsStr string
-	db.QueryRow("SELECT str, dex, intl, wis, cha, level, class, COALESCE(subclass, ''), COALESCE(conditions, '[]'), COALESCE(weapon_proficiencies, '') FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &level, &class, &subclass, &conditionsJSON, &weaponProfsStr)
+	var weaponProfsStr, equippedMainHand string
+	db.QueryRow("SELECT str, dex, intl, wis, cha, level, class, COALESCE(subclass, ''), COALESCE(conditions, '[]'), COALESCE(weapon_proficiencies, ''), COALESCE(equipped_main_hand, '') FROM characters WHERE id = $1", charID).Scan(&str, &dex, &intl, &wis, &cha, &level, &class, &subclass, &conditionsJSON, &weaponProfsStr, &equippedMainHand)
 
 	var conditions []string
 	json.Unmarshal(conditionsJSON, &conditions)
@@ -24713,8 +24866,12 @@ func resolveAction(action, description string, charID int) string {
 		// v0.9.89: Attacking ends Sanctuary/Tranquility protection on the attacker
 		removeSanctuaryOnOffensiveAction(charID)
 
-		// Parse weapon from description or use default
+		// An explicitly named weapon wins. Otherwise honor the equipped main
+		// hand before falling back to an unarmed strike.
 		weaponKey := parseWeaponFromDescription(description)
+		if weaponKey == "" && equippedMainHand != "" {
+			weaponKey = parseWeaponFromDescription(equippedMainHand)
+		}
 		weapon, hasWeapon := srdWeapons[weaponKey]
 
 		// Check ammunition for ranged weapons (v0.8.18)
