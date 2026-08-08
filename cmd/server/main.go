@@ -3667,9 +3667,12 @@ func cleanupDuplicateCharacterConditions() {
 		log.Printf("Condition cleanup skipped: %v", err)
 		return
 	}
-	defer rows.Close()
 
-	updated := 0
+	type conditionRepair struct {
+		id         int
+		conditions []byte
+	}
+	repairs := make([]conditionRepair, 0)
 	for rows.Next() {
 		var id int
 		var raw []byte
@@ -3682,7 +3685,16 @@ func cleanupDuplicateCharacterConditions() {
 			continue
 		}
 		encoded, _ := json.Marshal(normalized)
-		if _, err := db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", encoded, id); err == nil {
+		repairs = append(repairs, conditionRepair{id: id, conditions: encoded})
+	}
+	if err := rows.Close(); err != nil {
+		log.Printf("Condition cleanup read failed: %v", err)
+		return
+	}
+
+	updated := 0
+	for _, repair := range repairs {
+		if _, err := db.Exec("UPDATE characters SET conditions = $1 WHERE id = $2", repair.conditions, repair.id); err == nil {
 			updated++
 		}
 	}
