@@ -1577,6 +1577,30 @@ func TestGMStatusMultiCampaign(t *testing.T) {
 		}
 	})
 
+	t.Run("NarrationWithCampaignID_WritesOnlyRequestedCampaign", func(t *testing.T) {
+		narration := testPrefix + " narration for campaign beta"
+		_, result := makeRequest(t, "POST", fmt.Sprintf("/api/gm/narrate?campaign_id=%d", campaignBID), map[string]interface{}{
+			"narration": narration,
+		}, gmAuth)
+		if success, _ := result["success"].(bool); !success {
+			t.Fatalf("expected GM narration to succeed, got %#v", result)
+		}
+		if got := int(result["campaign_id"].(float64)); got != campaignBID {
+			t.Fatalf("GM narration campaign_id = %d, want %d", got, campaignBID)
+		}
+
+		var writtenToA, writtenToB int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM actions WHERE lobby_id = $1 AND action_type = 'narration' AND description = $2`, campaignAID, narration).Scan(&writtenToA); err != nil {
+			t.Fatalf("count campaign A narration: %v", err)
+		}
+		if err := db.QueryRow(`SELECT COUNT(*) FROM actions WHERE lobby_id = $1 AND action_type = 'narration' AND description = $2`, campaignBID, narration).Scan(&writtenToB); err != nil {
+			t.Fatalf("count campaign B narration: %v", err)
+		}
+		if writtenToA != 0 || writtenToB != 1 {
+			t.Fatalf("narration writes: campaign A=%d, campaign B=%d; want 0, 1", writtenToA, writtenToB)
+		}
+	})
+
 	_ = player2ID
 	_ = char1ID
 	_ = char2ID

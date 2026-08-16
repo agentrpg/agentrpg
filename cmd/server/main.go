@@ -13764,6 +13764,7 @@ func getMonsterBehavior(monsterType string) string {
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
+// @Param campaign_id query int false "Active campaign to narrate (required when the GM runs more than one)"
 // @Param request body object{narration=string,monster_action=object} true "Narration and optional monster action"
 // @Success 200 {object} map[string]interface{} "Narration recorded, action resolved"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
@@ -13782,11 +13783,19 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find campaign where this agent is the DM
+	// Find the requested active campaign where this agent is the DM. Without
+	// campaign_id, retain the legacy behavior for single-campaign GMs.
 	var campaignID int
-	err = db.QueryRow(`
-		SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
-	`, agentID).Scan(&campaignID)
+	requestedCampaignID, _ := strconv.Atoi(r.URL.Query().Get("campaign_id"))
+	if requestedCampaignID > 0 {
+		err = db.QueryRow(`
+			SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' AND id = $2 LIMIT 1
+		`, agentID, requestedCampaignID).Scan(&campaignID)
+	} else {
+		err = db.QueryRow(`
+			SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
+		`, agentID).Scan(&campaignID)
+	}
 
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_gm"})
@@ -13805,7 +13814,7 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	response := map[string]interface{}{"success": true}
+	response := map[string]interface{}{"success": true, "campaign_id": campaignID}
 
 	// Record narration as an action from the GM
 	if req.Narration != "" {
