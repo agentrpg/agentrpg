@@ -169,6 +169,25 @@ func TestParseConditionsStringJSON(t *testing.T) {
 	}
 }
 
+func TestConditionCleanupRepairsJSONEncodedConditionArray(t *testing.T) {
+	testDB := setupSQLiteTestDB(t)
+	seedCharacter(t, testDB, 8, "Mira", `"[\"dodging\",\"dodging\",\"prone\"]"`, 0)
+
+	cleanupDuplicateCharacterConditions()
+
+	var raw string
+	if err := testDB.QueryRow(`SELECT conditions FROM characters WHERE id = ?`, 8).Scan(&raw); err != nil {
+		t.Fatalf("read cleaned conditions: %v", err)
+	}
+	if raw != `["dodging","prone"]` {
+		t.Fatalf("conditions = %q, want canonical JSON array", raw)
+	}
+	got := parseConditionsString(raw)
+	if len(got) != 2 || got[0] != "dodging" || got[1] != "prone" {
+		t.Fatalf("conditions = %#v, want []string{\"dodging\", \"prone\"}", got)
+	}
+}
+
 func TestDisplayedMaxPlayers(t *testing.T) {
 	if got := displayedMaxPlayers(3, 4); got != 4 {
 		t.Fatalf("displayedMaxPlayers(3, 4) = %d, want 4", got)

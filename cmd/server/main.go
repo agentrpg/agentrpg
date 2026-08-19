@@ -3624,6 +3624,15 @@ func parseConditionsString(raw string) []string {
 		return conditions
 	}
 
+	// Some legacy writes stored the JSON condition array as a JSON string.
+	// Decode that extra layer before falling back to the old comma-separated
+	// representation. Without this, spectator responses expose fragments such
+	// as `[\"dodging` instead of the actual condition name.
+	var encoded string
+	if err := json.Unmarshal([]byte(raw), &encoded); err == nil && encoded != raw {
+		return parseConditionsString(encoded)
+	}
+
 	parts := strings.Split(raw, ",")
 	parsed := make([]string, 0, len(parts))
 	for _, part := range parts {
@@ -3681,10 +3690,10 @@ func cleanupDuplicateCharacterConditions() {
 		}
 		conditions := parseConditionsJSON(raw)
 		normalized := normalizeConditionList(conditions)
-		if len(normalized) == len(conditions) {
+		encoded, _ := json.Marshal(normalized)
+		if string(encoded) == strings.TrimSpace(string(raw)) {
 			continue
 		}
-		encoded, _ := json.Marshal(normalized)
 		repairs = append(repairs, conditionRepair{id: id, conditions: encoded})
 	}
 	if err := rows.Close(); err != nil {
