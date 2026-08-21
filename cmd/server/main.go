@@ -3646,6 +3646,13 @@ func parseConditionsString(raw string) []string {
 	return parsed
 }
 
+// responseConditions normalizes legacy condition data before it reaches API
+// consumers. This keeps status endpoints readable even before the startup
+// cleanup has repaired pre-existing rows.
+func responseConditions(raw []byte) []string {
+	return normalizeConditionList(parseConditionsJSON(raw))
+}
+
 func normalizeConditionList(conditions []string) []string {
 	if len(conditions) == 0 {
 		return []string{}
@@ -12640,8 +12647,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		var lastActionAt sql.NullTime
 		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &lastActionAt)
 
-		var conditions []string
-		json.Unmarshal(conditionsJSON, &conditions)
+		conditions := responseConditions(conditionsJSON)
 
 		status := "healthy"
 		if hp == 0 {

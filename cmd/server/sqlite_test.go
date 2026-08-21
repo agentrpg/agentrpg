@@ -137,6 +137,19 @@ func TestNormalizeConditionList(t *testing.T) {
 	}
 }
 
+func TestResponseConditionsDeduplicatesStatusData(t *testing.T) {
+	got := responseConditions([]byte(`["dodging","dodging","prone","Dodging"]`))
+	want := []string{"dodging", "prone"}
+	if len(got) != len(want) {
+		t.Fatalf("responseConditions() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("responseConditions() = %#v, want %#v", got, want)
+		}
+	}
+}
+
 func TestCleanupDuplicateCharacterConditions(t *testing.T) {
 	testDB := setupSQLiteTestDB(t)
 	seedCharacter(t, testDB, 7, "Bramble", `["dodging","dodging","prone","prone"]`, 0)
