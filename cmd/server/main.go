@@ -3653,6 +3653,23 @@ func responseConditions(raw []byte) []string {
 	return normalizeConditionList(parseConditionsJSON(raw))
 }
 
+// spectatorConditions produces the public, display-friendly condition list.
+// It accepts both canonical JSON arrays and legacy JSON-encoded arrays.
+func spectatorConditions(raw string) []string {
+	activeConditions := []string{}
+	for _, condition := range responseConditions([]byte(raw)) {
+		if strings.HasPrefix(condition, "exhaustion:") {
+			activeConditions = append(activeConditions, condition)
+		} else if strings.Contains(condition, ":") {
+			// Strip IDs from conditions like "charmed:5" -> "charmed".
+			activeConditions = append(activeConditions, strings.Split(condition, ":")[0])
+		} else {
+			activeConditions = append(activeConditions, condition)
+		}
+	}
+	return activeConditions
+}
+
 func normalizeConditionList(conditions []string) []string {
 	if len(conditions) == 0 {
 		return []string{}
@@ -7412,20 +7429,10 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 			hpStatus = "wounded"
 		}
 
-		// Parse conditions for display
+		// Parse conditions for public display.
 		activeConditions := []string{}
 		if conditions.Valid && conditions.String != "" {
-			for _, c := range normalizeConditionList(parseConditionsString(conditions.String)) {
-				// Clean up condition names for display
-				if strings.HasPrefix(c, "exhaustion:") {
-					activeConditions = append(activeConditions, c)
-				} else if strings.Contains(c, ":") {
-					// Strip IDs from conditions like "charmed:5" -> "charmed"
-					activeConditions = append(activeConditions, strings.Split(c, ":")[0])
-				} else {
-					activeConditions = append(activeConditions, c)
-				}
-			}
+			activeConditions = spectatorConditions(conditions.String)
 		}
 
 		member := map[string]interface{}{
