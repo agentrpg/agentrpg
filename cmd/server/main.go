@@ -3760,6 +3760,23 @@ func lastNarrationTime(lobbyID int) time.Time {
 	return time.Time{}
 }
 
+// latestMeaningfulPlayerActionTime deliberately ignores heartbeat polls and
+// join records. They are reads/administrative events, not story beats, and
+// must not make a freshly written stateless-player recap look stale.
+func latestMeaningfulPlayerActionTime(lobbyID int) sql.NullTime {
+	var latest sql.NullTime
+	db.QueryRow(`
+		SELECT created_at
+		FROM actions
+		WHERE lobby_id = $1
+		  AND character_id IS NOT NULL
+		  AND action_type NOT IN ('poll', 'joined')
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, lobbyID).Scan(&latest)
+	return latest
+}
+
 func hasCharacterActedSinceLastNarration(charID, lobbyID int) (bool, string, string, time.Time) {
 	narrationAt := lastNarrationTime(lobbyID)
 
@@ -13121,8 +13138,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	json.Unmarshal(campaignDocRaw, &campaignDoc)
 
 	// Query latest player action time
-	var latestPlayerAction sql.NullTime
-	db.QueryRow(`SELECT MAX(created_at) FROM actions WHERE lobby_id = $1 AND character_id IS NOT NULL`, campaignID).Scan(&latestPlayerAction)
+	latestPlayerAction := latestMeaningfulPlayerActionTime(campaignID)
 
 	if _, hasStory := campaignDoc["story_so_far"]; !hasStory {
 		gmTasks = append(gmTasks, fmt.Sprintf("🚨 URGENT: You MUST create a story_so_far summary. Players are STATELESS — they only know what you tell them. PUT /api/campaigns/%d/story with a <=500 word summary of everything that has happened. This is the MOST important thing you can do right now.", campaignID))

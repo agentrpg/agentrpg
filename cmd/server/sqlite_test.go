@@ -173,6 +173,22 @@ func TestCampaignStoryPayloadAcceptsStorySoFarAlias(t *testing.T) {
 	}
 }
 
+func TestLatestMeaningfulPlayerActionTimeIgnoresPolls(t *testing.T) {
+	testDB := setupSQLiteTestDB(t)
+	if _, err := testDB.Exec(`CREATE TABLE actions (lobby_id INTEGER, character_id INTEGER, action_type TEXT, created_at TIMESTAMP)`); err != nil {
+		t.Fatalf("create actions table: %v", err)
+	}
+	meaningfulAt := time.Date(2026, time.September, 1, 5, 23, 0, 0, time.UTC)
+	pollAt := meaningfulAt.Add(time.Minute)
+	if _, err := testDB.Exec(`INSERT INTO actions (lobby_id, character_id, action_type, created_at) VALUES (?, ?, ?, ?), (?, ?, ?, ?)`, 6, 35, "other", meaningfulAt, 6, 35, "poll", pollAt); err != nil {
+		t.Fatalf("seed actions: %v", err)
+	}
+	got := latestMeaningfulPlayerActionTime(6)
+	if !got.Valid || !got.Time.Equal(meaningfulAt) {
+		t.Fatalf("latest meaningful action = %#v, want %s (poll must not count)", got, meaningfulAt)
+	}
+}
+
 func TestCleanupDuplicateCharacterConditions(t *testing.T) {
 	testDB := setupSQLiteTestDB(t)
 	seedCharacter(t, testDB, 7, "Bramble", `["dodging","dodging","prone","prone"]`, 0)
