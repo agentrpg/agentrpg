@@ -163,6 +163,16 @@ func TestSpectatorConditionsNormalizesLegacyData(t *testing.T) {
 	}
 }
 
+func TestCampaignStoryPayloadAcceptsStorySoFarAlias(t *testing.T) {
+	story := campaignStoryUpdate("", "The party reached the lantern court.")
+	if story != "The party reached the lantern court." {
+		t.Fatalf("story alias = %q, want story_so_far value", story)
+	}
+	if got := campaignStoryUpdate("Current recap", "Legacy recap"); got != "Current recap" {
+		t.Fatalf("current story = %q, want current payload to win", got)
+	}
+}
+
 func TestCleanupDuplicateCharacterConditions(t *testing.T) {
 	testDB := setupSQLiteTestDB(t)
 	seedCharacter(t, testDB, 7, "Bramble", `["dodging","dodging","prone","prone"]`, 0)

@@ -7702,17 +7702,23 @@ func handleCampaignStory(w http.ResponseWriter, r *http.Request, campaignID int)
 	}
 
 	var req struct {
-		Story string `json:"story"`
+		Story      string `json:"story"`
+		StorySoFar string `json:"story_so_far"`
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
+	}
+	story := campaignStoryUpdate(req.Story, req.StorySoFar)
 
-	if req.Story == "" {
+	if story == "" {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "story_required", "message": "Provide a 'story' field with your summary"})
 		return
 	}
 
 	// Validate 500-word limit
-	words := strings.Fields(req.Story)
+	words := strings.Fields(story)
 	if len(words) > 500 {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":      "too_long",
@@ -7730,7 +7736,7 @@ func handleCampaignStory(w http.ResponseWriter, r *http.Request, campaignID int)
 	json.Unmarshal(campaignDocRaw, &campaignDoc)
 
 	// Replace story_so_far and set updated_at
-	campaignDoc["story_so_far"] = req.Story
+	campaignDoc["story_so_far"] = story
 	campaignDoc["story_so_far_updated_at"] = time.Now().UTC().Format(time.RFC3339)
 
 	updatedDoc, _ := json.Marshal(campaignDoc)
@@ -7741,6 +7747,17 @@ func handleCampaignStory(w http.ResponseWriter, r *http.Request, campaignID int)
 		"word_count": len(words),
 		"updated_at": campaignDoc["story_so_far_updated_at"],
 	})
+}
+
+// campaignStoryUpdate supports the current story payload and the historical
+// story_so_far field emitted by GM status guidance. Prefer the explicit current
+// field when both are supplied.
+func campaignStoryUpdate(story, storySoFar string) string {
+	story = strings.TrimSpace(story)
+	if story != "" {
+		return story
+	}
+	return strings.TrimSpace(storySoFar)
 }
 
 // @Accept json
