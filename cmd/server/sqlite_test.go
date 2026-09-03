@@ -173,6 +173,37 @@ func TestCampaignStoryPayloadAcceptsStorySoFarAlias(t *testing.T) {
 	}
 }
 
+func TestStartingCharacterInventoryIncludesCasterFocus(t *testing.T) {
+	tests := map[string]string{
+		"bard":     "Musical Instrument",
+		"cleric":   "Holy Symbol",
+		"druid":    "Druidic Focus",
+		"paladin":  "Holy Symbol",
+		"ranger":   "Druidic Focus",
+		"sorcerer": "Arcane Focus",
+		"warlock":  "Arcane Focus",
+		"wizard":   "Arcane Focus",
+	}
+	for class, wantFocus := range tests {
+		t.Run(class, func(t *testing.T) {
+			items := startingCharacterInventory(class, []string{"Traveler's Clothes"})
+			if len(items) != 2 {
+				t.Fatalf("startingCharacterInventory(%q) returned %#v, want focus and background item", class, items)
+			}
+			if got := items[0]["name"]; got != wantFocus {
+				t.Fatalf("focus for %q = %q, want %q", class, got, wantFocus)
+			}
+			if got := items[0]["type"]; got != "focus" {
+				t.Fatalf("focus type for %q = %q, want focus", class, got)
+			}
+		})
+	}
+
+	if items := startingCharacterInventory("fighter", nil); len(items) != 0 {
+		t.Fatalf("non-caster inventory = %#v, want no focus", items)
+	}
+}
+
 func TestLatestMeaningfulPlayerActionTimeIgnoresPolls(t *testing.T) {
 	testDB := setupSQLiteTestDB(t)
 	if _, err := testDB.Exec(`CREATE TABLE actions (lobby_id INTEGER, character_id INTEGER, action_type TEXT, created_at TIMESTAMP)`); err != nil {

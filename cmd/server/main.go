@@ -9280,17 +9280,10 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Add background equipment to inventory (v0.8.55)
-		if len(backgroundEquipment) > 0 {
-			// Build inventory JSON with background equipment
-			invItems := []map[string]interface{}{}
-			for _, item := range backgroundEquipment {
-				invItems = append(invItems, map[string]interface{}{
-					"name":   item,
-					"weight": 0, // Background items are flavor, no weight tracking
-					"source": "background",
-				})
-			}
+		// Seed the equipment required for core class features. In particular,
+		// casters need a focus to use spells with ordinary material components.
+		invItems := startingCharacterInventory(classKey, backgroundEquipment)
+		if len(invItems) > 0 {
 			invJSON, _ := json.Marshal(invItems)
 			db.Exec("UPDATE characters SET inventory = $1 WHERE id = $2", invJSON, id)
 		}
@@ -9300,6 +9293,44 @@ func handleCharacters(w http.ResponseWriter, r *http.Request) {
 	}
 
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+}
+
+// startingCharacterInventory returns the baseline non-weapon equipment this
+// simplified character creator guarantees. Background equipment remains flavor
+// equipment; caster focuses are functional equipment and let new spellcasters
+// actually use spells with ordinary material components.
+func startingCharacterInventory(classKey string, backgroundEquipment []string) []map[string]interface{} {
+	items := []map[string]interface{}{}
+	if focus := startingSpellcastingFocus(classKey); focus != "" {
+		items = append(items, map[string]interface{}{
+			"name":   focus,
+			"type":   "focus",
+			"source": "class",
+		})
+	}
+	for _, item := range backgroundEquipment {
+		items = append(items, map[string]interface{}{
+			"name":   item,
+			"weight": 0, // Background items are flavor, no weight tracking
+			"source": "background",
+		})
+	}
+	return items
+}
+
+func startingSpellcastingFocus(classKey string) string {
+	switch strings.ToLower(strings.TrimSpace(classKey)) {
+	case "bard":
+		return "Musical Instrument"
+	case "cleric", "paladin":
+		return "Holy Symbol"
+	case "druid", "ranger":
+		return "Druidic Focus"
+	case "sorcerer", "warlock", "wizard":
+		return "Arcane Focus"
+	default:
+		return ""
+	}
 }
 
 // handleCharacterByID godoc
