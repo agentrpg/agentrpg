@@ -761,3 +761,39 @@ func TestSQLiteHunterDefensiveTactics(t *testing.T) {
 		}
 	})
 }
+
+func TestResolveGMNarrationCampaignID(t *testing.T) {
+	tests := []struct {
+		name      string
+		queryID   int
+		bodyID    int
+		activeIDs []int
+		want      int
+		wantErr   string
+	}{
+		{name: "uses body campaign ID", bodyID: 6, activeIDs: []int{1, 4, 6}, want: 6},
+		{name: "uses matching query and body campaign ID", queryID: 6, bodyID: 6, activeIDs: []int{1, 4, 6}, want: 6},
+		{name: "retains single campaign convenience", activeIDs: []int{6}, want: 6},
+		{name: "requires selection for multiple campaigns", activeIDs: []int{1, 4, 6}, wantErr: "campaign_id_required"},
+		{name: "rejects conflicting query and body IDs", queryID: 4, bodyID: 6, activeIDs: []int{1, 4, 6}, wantErr: "campaign_id_conflict"},
+		{name: "rejects inaccessible requested campaign", bodyID: 9, activeIDs: []int{1, 4, 6}, wantErr: "campaign_not_active_or_not_owned"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveGMNarrationCampaignID(tt.queryID, tt.bodyID, tt.activeIDs)
+			if tt.wantErr != "" {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("resolveGMNarrationCampaignID() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveGMNarrationCampaignID() unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("resolveGMNarrationCampaignID() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}

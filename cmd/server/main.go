@@ -13843,6 +13843,42 @@ func getMonsterBehavior(monsterType string) string {
 	return "Unknown creature type. Use your judgment."
 }
 
+type gmNarrateRequest struct {
+	CampaignID    int    `json:"campaign_id"`
+	Narration     string `json:"narration"`
+	MonsterAction *struct {
+		Monster     string `json:"monster"`
+		Action      string `json:"action"`
+		Target      string `json:"target"`
+		Description string `json:"description"`
+	} `json:"monster_action"`
+	AdvanceTurn bool `json:"advance_turn"`
+}
+
+// resolveGMNarrationCampaignID makes campaign routing deterministic. A GM may
+// omit campaign_id only when they own exactly one active campaign.
+func resolveGMNarrationCampaignID(queryID, bodyID int, activeIDs []int) (int, error) {
+	if queryID > 0 && bodyID > 0 && queryID != bodyID {
+		return 0, fmt.Errorf("campaign_id_conflict")
+	}
+	requestedID := queryID
+	if requestedID == 0 {
+		requestedID = bodyID
+	}
+	if requestedID == 0 {
+		if len(activeIDs) == 1 {
+			return activeIDs[0], nil
+		}
+		return 0, fmt.Errorf("campaign_id_required")
+	}
+	for _, activeID := range activeIDs {
+		if requestedID == activeID {
+			return requestedID, nil
+		}
+	}
+	return 0, fmt.Errorf("campaign_not_active_or_not_owned")
+}
+
 // handleGMNarrate godoc
 // @Summary Submit GM narration and monster actions
 // @Description GM submits narrative text and optionally runs a monster's action. Server resolves monster attacks.
@@ -13850,9 +13886,10 @@ func getMonsterBehavior(monsterType string) string {
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param campaign_id query int false "Active campaign to narrate (required when the GM runs more than one)"
-// @Param request body object{narration=string,monster_action=object} true "Narration and optional monster action"
+// @Param campaign_id query int false "Active campaign to narrate; body campaign_id is also accepted. Required when the GM runs more than one."
+// @Param request body object{campaign_id=integer,narration=string,monster_action=object} true "Narration and optional monster action"
 // @Success 200 {object} map[string]interface{} "Narration recorded, action resolved"
+// @Failure 400 {object} map[string]interface{} "Missing, conflicting, or unavailable campaign ID"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 403 {object} map[string]interface{} "Not the GM"
 // @Router /gm/narrate [post]
@@ -13869,36 +13906,60 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find the requested active campaign where this agent is the DM. Without
-	// campaign_id, retain the legacy behavior for single-campaign GMs.
-	var campaignID int
-	requestedCampaignID, _ := strconv.Atoi(r.URL.Query().Get("campaign_id"))
-	if requestedCampaignID > 0 {
-		err = db.QueryRow(`
-			SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' AND id = $2 LIMIT 1
-		`, agentID, requestedCampaignID).Scan(&campaignID)
-	} else {
-		err = db.QueryRow(`
-			SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
-		`, agentID).Scan(&campaignID)
+	var req gmNarrateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
+		return
 	}
 
+	queryCampaignID := 0
+	if rawQueryCampaignID := strings.TrimSpace(r.URL.Query().Get("campaign_id")); rawQueryCampaignID != "" {
+		queryCampaignID, err = strconv.Atoi(rawQueryCampaignID)
+		if err != nil || queryCampaignID <= 0 {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_campaign_id"})
+			return
+		}
+	}
+
+	rows, err := db.Query(`SELECT id FROM lobbies WHERE dm_id = $1 AND status = 'active' ORDER BY id`, agentID)
 	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_lookup_failed"})
+		return
+	}
+	defer rows.Close()
+	activeCampaignIDs := []int{}
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_lookup_failed"})
+			return
+		}
+		activeCampaignIDs = append(activeCampaignIDs, id)
+	}
+	if err := rows.Err(); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "campaign_lookup_failed"})
+		return
+	}
+	if len(activeCampaignIDs) == 0 {
+		w.WriteHeader(http.StatusForbidden)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_gm"})
 		return
 	}
 
-	var req struct {
-		Narration     string `json:"narration"`
-		MonsterAction *struct {
-			Monster     string `json:"monster"`
-			Action      string `json:"action"`
-			Target      string `json:"target"`
-			Description string `json:"description"`
-		} `json:"monster_action"`
-		AdvanceTurn bool `json:"advance_turn"`
+	campaignID, resolveErr := resolveGMNarrationCampaignID(queryCampaignID, req.CampaignID, activeCampaignIDs)
+	if resolveErr != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   resolveErr.Error(),
+			"message": "Specify one active campaign_id in the query or JSON body; the two values must agree.",
+		})
+		return
 	}
-	json.NewDecoder(r.Body).Decode(&req)
 
 	response := map[string]interface{}{"success": true, "campaign_id": campaignID}
 
