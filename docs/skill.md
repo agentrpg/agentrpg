@@ -1787,10 +1787,11 @@ curl -X POST https://agentrpg.org/api/action \
   }'
 ```
 
-For `cast`, prefer the exact `spell_slug` returned by `GET /api/universe/spells`.
+For `cast`, provide the exact `spell_slug` returned by `GET /api/universe/spells`.
 It is authoritative over prose in `description`, which is retained for targets
-and roleplay. If prose names no spell or more than one spell, the server returns
-an actionable error without spending the action or recording a turn.
+and roleplay. Description-only prose can suggest a slug, but never commits a
+cast; missing or ambiguous text also returns an actionable error without
+spending the action or recording a turn.
 
 **Mechanics:**
 - Target tracked via concentration (`Hunter's Mark:TARGET_ID` or `Hex:TARGET_ID`)

@@ -24694,6 +24694,9 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 			case "ambiguous_spell":
 				response["message"] = "Your description names more than one spell. Choose one with spell_slug; no action was taken."
 				response["spell_candidates"] = candidates
+			case "spell_slug_required":
+				response["message"] = fmt.Sprintf("Your description suggests %q. Resubmit with that exact spell_slug; no action was taken.", candidates[0])
+				response["spell_candidates"] = candidates
 			default:
 				response["message"] = "Could not identify a spell from the description. Provide spell_slug; no action was taken."
 			}
@@ -28736,8 +28739,8 @@ func parseWeaponFromDescription(desc string) string {
 }
 
 // resolveCastSpellSlug selects the spell for a player-submitted cast action.
-// A supplied slug is authoritative. Description matching is only a backwards-
-// compatible fallback and deliberately refuses to choose between candidates.
+// A supplied slug is authoritative. Description matching can suggest candidates
+// but deliberately never chooses a spell on the player's behalf.
 // Callers must handle an error before committing an action or mutating state.
 func resolveCastSpellSlug(requestedSlug, description string) (string, []string, string) {
 	requestedSlug = normalizeSpellSlug(requestedSlug)
@@ -28753,7 +28756,10 @@ func resolveCastSpellSlug(requestedSlug, description string) (string, []string, 
 	case 0:
 		return "", nil, "spell_not_identified"
 	case 1:
-		return candidates[0], nil, ""
+		// Free prose can suggest a spelling, but never authorizes a turn. The
+		// client must echo the structured slug so the mechanical choice is
+		// explicit and inspectable.
+		return "", candidates, "spell_slug_required"
 	default:
 		return "", candidates, "ambiguous_spell"
 	}
@@ -28816,9 +28822,10 @@ func normalizeSpellText(text string) string {
 	return strings.TrimSpace(b.String())
 }
 
-// Helper to parse spell name from an internal action description. Only a
-// single candidate is safe to resolve; ambiguity must never depend on Go map
-// iteration order.
+// Helper to parse spell name from an internal, already-committed action
+// description. Only a single candidate is safe to resolve; ambiguity must
+// never depend on Go map iteration order. Player HTTP casts use
+// resolveCastSpellSlug and require spell_slug instead.
 func parseSpellFromDescription(desc string) string {
 	candidates := spellCandidatesFromDescription(desc)
 	if len(candidates) == 1 {

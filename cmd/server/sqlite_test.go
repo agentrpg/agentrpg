@@ -848,14 +848,16 @@ func TestResolveCastSpellSlug(t *testing.T) {
 			wantErr:     "unknown_spell_slug",
 		},
 		{
-			name:        "description fallback accepts one whole spell title",
+			name:        "description-only spell suggestion is non-committing",
 			description: "I cast Hunter's Mark on the wolf.",
-			wantSlug:    "hunters-mark",
+			wantErr:     "spell_slug_required",
+			wantChoices: []string{"hunters-mark"},
 		},
 		{
-			name:        "word boundaries keep daylight from matching light",
+			name:        "word boundaries give daylight one stable suggestion",
 			description: "cast daylight to fill the hall",
-			wantSlug:    "daylight",
+			wantErr:     "spell_slug_required",
+			wantChoices: []string{"daylight"},
 		},
 		{
 			name:        "missing spell does not produce a fallback action",
