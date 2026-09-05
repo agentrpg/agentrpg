@@ -13923,6 +13923,15 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_json"})
 		return
 	}
+	if validationErr := validateGMNarrateRequest(req); validationErr != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   validationErr,
+			"message": "Provide a non-empty narration so the campaign records a readable GM beat.",
+		})
+		return
+	}
 
 	queryCampaignID := 0
 	if rawQueryCampaignID := strings.TrimSpace(r.URL.Query().Get("campaign_id")); rawQueryCampaignID != "" {
@@ -13971,16 +13980,6 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	if validationErr := validateGMNarrateRequest(req); validationErr != "" {
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   validationErr,
-			"message": "Provide a non-empty narration so the campaign records a readable GM beat.",
-		})
-		return
-	}
-
 	response := map[string]interface{}{"success": true, "campaign_id": campaignID}
 
 	// Record narration as an action from the GM
