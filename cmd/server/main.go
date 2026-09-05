@@ -24634,7 +24634,7 @@ func resetReaction(charID int) {
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{action=string,description=string,target=string,movement_cost=int,toward_frightened_source=bool} true "Action details"
+// @Param request body object{action=string,description=string,spell_slug=string,target=string,movement_cost=int,toward_frightened_source=bool} true "Action details"
 // @Success 200 {object} map[string]interface{} "Action result with dice rolls"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 400 {object} map[string]interface{} "No active game or resource exhausted"
@@ -24655,6 +24655,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action                 string `json:"action"`
 		Description            string `json:"description"`
+		SpellSlug              string `json:"spell_slug"` // Exact spell slug for cast actions; takes precedence over description.
 		Target                 string `json:"target"`
 		MovementCost           int    `json:"movement_cost"`            // feet of movement for move actions
 		TowardFrightenedSource bool   `json:"toward_frightened_source"` // v0.8.64: set true if moving toward source of fear (blocks movement)
@@ -24671,6 +24672,35 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 			"message": "Provide an action, such as attack, dodge, cast, or help.",
 		})
 		return
+	}
+
+	// A cast must identify one spell before we inspect turn state or consume an
+	// action. Descriptions remain useful for targets and narration, but a
+	// supplied spell_slug is the authoritative mechanics input. This prevents a
+	// partial or ambiguous phrase from silently becoming a different spell and
+	// costing the player a turn.
+	if req.Action == "cast" {
+		spellSlug, candidates, selectionErr := resolveCastSpellSlug(req.SpellSlug, req.Description)
+		if selectionErr != "" {
+			w.WriteHeader(http.StatusBadRequest)
+			response := map[string]interface{}{
+				"success": false,
+				"error":   selectionErr,
+				"hint":    "Set spell_slug to one exact slug from GET /api/universe/spells; keep description for target and roleplay.",
+			}
+			switch selectionErr {
+			case "unknown_spell_slug":
+				response["message"] = fmt.Sprintf("Unknown spell_slug %q. Use an exact slug from GET /api/universe/spells.", req.SpellSlug)
+			case "ambiguous_spell":
+				response["message"] = "Your description names more than one spell. Choose one with spell_slug; no action was taken."
+				response["spell_candidates"] = candidates
+			default:
+				response["message"] = "Could not identify a spell from the description. Provide spell_slug; no action was taken."
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		req.SpellSlug = spellSlug
 	}
 
 	var charID, lobbyID int
@@ -24819,7 +24849,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		resourceUsed = resourceType
 	}
 
-	result := resolveAction(req.Action, req.Description, charID)
+	result := resolveAction(req.Action, req.Description, charID, req.SpellSlug)
 
 	// Consume the resource (only in combat)
 	if inCombat && resourceUsed != "" && resourceUsed != "free" {
@@ -25031,7 +25061,7 @@ func getAttackModifiers(charID int, targetConditions []string, isRanged bool, ta
 	return hasAdvantage, hasDisadvantage
 }
 
-func resolveAction(action, description string, charID int) string {
+func resolveAction(action, description string, charID int, castSpellSlug ...string) string {
 	// Get character stats for modifiers (including weapon proficiencies for attack checks)
 	var str, dex, intl, wis, cha, level int
 	var class string
@@ -25891,8 +25921,16 @@ func resolveAction(action, description string, charID int) string {
 			return "Cannot cast spells while in Wild Shape form. Druids gain Beast Spells at level 18 (PHB p67)"
 		}
 
-		// Parse spell from description
-		spellKey := parseSpellFromDescription(description)
+		// The HTTP action handler validates castSpellSlug before an action is
+		// committed. Internal callers that predate structured spell slugs retain
+		// the safe, unique-description fallback.
+		spellKey := ""
+		if len(castSpellSlug) > 0 {
+			spellKey = castSpellSlug[0]
+		}
+		if spellKey == "" {
+			spellKey = parseSpellFromDescription(description)
+		}
 
 		// v0.9.89: Check if this is an offensive spell (deals damage or has save DC)
 		// Casting offensive spells ends Sanctuary/Tranquility protection
@@ -28697,14 +28735,94 @@ func parseWeaponFromDescription(desc string) string {
 	return ""
 }
 
-// Helper to parse spell name from action description
-func parseSpellFromDescription(desc string) string {
-	desc = strings.ToLower(desc)
-	for key := range srdSpellsMemory {
-		spellName := strings.ReplaceAll(key, "_", " ")
-		if strings.Contains(desc, spellName) || strings.Contains(desc, key) {
-			return key
+// resolveCastSpellSlug selects the spell for a player-submitted cast action.
+// A supplied slug is authoritative. Description matching is only a backwards-
+// compatible fallback and deliberately refuses to choose between candidates.
+// Callers must handle an error before committing an action or mutating state.
+func resolveCastSpellSlug(requestedSlug, description string) (string, []string, string) {
+	requestedSlug = normalizeSpellSlug(requestedSlug)
+	if requestedSlug != "" {
+		if _, ok := srdSpellsMemory[requestedSlug]; ok {
+			return requestedSlug, nil, ""
 		}
+		return "", nil, "unknown_spell_slug"
+	}
+
+	candidates := spellCandidatesFromDescription(description)
+	switch len(candidates) {
+	case 0:
+		return "", nil, "spell_not_identified"
+	case 1:
+		return candidates[0], nil, ""
+	default:
+		return "", candidates, "ambiguous_spell"
+	}
+}
+
+// normalizeSpellSlug accepts the conventional dashed spelling and its common
+// underscore/space variants, but only exact known slugs are ever accepted.
+func normalizeSpellSlug(slug string) string {
+	slug = strings.ToLower(strings.TrimSpace(slug))
+	slug = strings.ReplaceAll(slug, "_", "-")
+	return strings.Join(strings.Fields(slug), "-")
+}
+
+// spellCandidatesFromDescription returns every whole spell title mentioned in
+// a description. It compares words rather than substrings, so "daylight" does
+// not also select "light". Results are sorted to make API errors stable.
+func spellCandidatesFromDescription(description string) []string {
+	normalizedDescription := " " + normalizeSpellText(description) + " "
+	seen := make(map[string]bool)
+	candidates := make([]string, 0)
+
+	for slug, spell := range srdSpellsMemory {
+		names := []string{slug}
+		if spell.Name != "" {
+			names = append(names, spell.Name)
+		}
+		for _, name := range names {
+			normalizedName := normalizeSpellText(name)
+			if normalizedName == "" {
+				continue
+			}
+			if strings.Contains(normalizedDescription, " "+normalizedName+" ") {
+				if !seen[slug] {
+					seen[slug] = true
+					candidates = append(candidates, slug)
+				}
+				break
+			}
+		}
+	}
+
+	sort.Strings(candidates)
+	return candidates
+}
+
+// normalizeSpellText makes spell titles and free-form prose comparable while
+// retaining word boundaries. Apostrophes, hyphens, and underscores are spaces.
+func normalizeSpellText(text string) string {
+	var b strings.Builder
+	lastWasSpace := true
+	for _, r := range strings.ToLower(text) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastWasSpace = false
+		} else if !lastWasSpace {
+			b.WriteByte(' ')
+			lastWasSpace = true
+		}
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// Helper to parse spell name from an internal action description. Only a
+// single candidate is safe to resolve; ambiguity must never depend on Go map
+// iteration order.
+func parseSpellFromDescription(desc string) string {
+	candidates := spellCandidatesFromDescription(desc)
+	if len(candidates) == 1 {
+		return candidates[0]
 	}
 	return ""
 }

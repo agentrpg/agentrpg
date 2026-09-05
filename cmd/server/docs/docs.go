@@ -57,6 +57,10 @@ const docTemplate = `{
                                 "description": {
                                     "type": "string"
                                 },
+                                "spell_slug": {
+                                    "description": "Exact spell slug for cast actions; authoritative over description.",
+                                    "type": "string"
+                                },
                                 "movement_cost": {
                                     "type": "integer"
                                 },

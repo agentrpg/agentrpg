@@ -808,3 +808,77 @@ func TestResolveGMNarrationCampaignID(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveCastSpellSlug(t *testing.T) {
+	originalSpells := srdSpellsMemory
+	srdSpellsMemory = map[string]SRDSpell{
+		"daylight":      {Name: "Daylight"},
+		"fireball":      {Name: "Fireball"},
+		"fire-bolt":     {Name: "Fire Bolt"},
+		"hunters-mark":  {Name: "Hunter's Mark"},
+		"light":         {Name: "Light"},
+		"magic-missile": {Name: "Magic Missile"},
+	}
+	t.Cleanup(func() { srdSpellsMemory = originalSpells })
+
+	tests := []struct {
+		name        string
+		requested   string
+		description string
+		wantSlug    string
+		wantErr     string
+		wantChoices []string
+	}{
+		{
+			name:        "structured slug is authoritative over prose",
+			requested:   "magic-missile",
+			description: "cast fireball at the ogre",
+			wantSlug:    "magic-missile",
+		},
+		{
+			name:        "slug accepts underscore spelling",
+			requested:   "fire_bolt",
+			description: "cast something at the ogre",
+			wantSlug:    "fire-bolt",
+		},
+		{
+			name:        "unknown structured slug is rejected",
+			requested:   "fire-boltt",
+			description: "cast fireball",
+			wantErr:     "unknown_spell_slug",
+		},
+		{
+			name:        "description fallback accepts one whole spell title",
+			description: "I cast Hunter's Mark on the wolf.",
+			wantSlug:    "hunters-mark",
+		},
+		{
+			name:        "word boundaries keep daylight from matching light",
+			description: "cast daylight to fill the hall",
+			wantSlug:    "daylight",
+		},
+		{
+			name:        "missing spell does not produce a fallback action",
+			description: "cast a protective spell",
+			wantErr:     "spell_not_identified",
+		},
+		{
+			name:        "multiple spells require an explicit structured slug",
+			description: "cast fire bolt or fireball at the ogre",
+			wantErr:     "ambiguous_spell",
+			wantChoices: []string{"fire-bolt", "fireball"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSlug, gotChoices, gotErr := resolveCastSpellSlug(tt.requested, tt.description)
+			if gotSlug != tt.wantSlug || gotErr != tt.wantErr {
+				t.Fatalf("resolveCastSpellSlug() = (%q, %q), want (%q, %q)", gotSlug, gotErr, tt.wantSlug, tt.wantErr)
+			}
+			if fmt.Sprint(gotChoices) != fmt.Sprint(tt.wantChoices) {
+				t.Fatalf("resolveCastSpellSlug() candidates = %v, want %v", gotChoices, tt.wantChoices)
+			}
+		})
+	}
+}
