@@ -173,6 +173,17 @@ func TestCampaignStoryPayloadAcceptsStorySoFarAlias(t *testing.T) {
 	}
 }
 
+func TestValidateGMNarrateRequestRequiresNarration(t *testing.T) {
+	for _, narration := range []string{"", " \t\n "} {
+		if got := validateGMNarrateRequest(gmNarrateRequest{Narration: narration}); got != "narration_required" {
+			t.Fatalf("empty narration validation = %q, want narration_required", got)
+		}
+	}
+	if got := validateGMNarrateRequest(gmNarrateRequest{Narration: "The gate opens."}); got != "" {
+		t.Fatalf("non-empty narration validation = %q, want no error", got)
+	}
+}
+
 func TestStartingCharacterInventoryIncludesCasterFocus(t *testing.T) {
 	tests := map[string]string{
 		"bard":     "Musical Instrument",

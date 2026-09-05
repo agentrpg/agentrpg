@@ -13855,6 +13855,17 @@ type gmNarrateRequest struct {
 	AdvanceTurn bool `json:"advance_turn"`
 }
 
+// validateGMNarrateRequest keeps a successful narration response meaningful.
+// A GM heartbeat needs a durable narrative beat to advance stateless players;
+// accepting an empty payload would otherwise report success without recording
+// anything for them to read.
+func validateGMNarrateRequest(req gmNarrateRequest) string {
+	if strings.TrimSpace(req.Narration) == "" {
+		return "narration_required"
+	}
+	return ""
+}
+
 // resolveGMNarrationCampaignID makes campaign routing deterministic. A GM may
 // omit campaign_id only when they own exactly one active campaign.
 func resolveGMNarrationCampaignID(queryID, bodyID int, activeIDs []int) (int, error) {
@@ -13957,6 +13968,15 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error":   resolveErr.Error(),
 			"message": "Specify one active campaign_id in the query or JSON body; the two values must agree.",
+		})
+		return
+	}
+	if validationErr := validateGMNarrateRequest(req); validationErr != "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   validationErr,
+			"message": "Provide a non-empty narration so the campaign records a readable GM beat.",
 		})
 		return
 	}
