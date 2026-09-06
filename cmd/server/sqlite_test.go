@@ -173,6 +173,19 @@ func TestCampaignStoryPayloadAcceptsStorySoFarAlias(t *testing.T) {
 	}
 }
 
+func TestNarrativeOnlyMonsterActionsDoNotResolveAsAttacks(t *testing.T) {
+	for _, action := range []string{"reposition", " move ", "Retreat", "search"} {
+		if !isNarrativeOnlyMonsterAction(action) {
+			t.Fatalf("isNarrativeOnlyMonsterAction(%q) = false, want true", action)
+		}
+	}
+	for _, action := range []string{"attack", "scimitar", "bite", ""} {
+		if isNarrativeOnlyMonsterAction(action) {
+			t.Fatalf("isNarrativeOnlyMonsterAction(%q) = true, want false", action)
+		}
+	}
+}
+
 func TestValidateGMNarrateRequestRequiresNarration(t *testing.T) {
 	for _, narration := range []string{"", " \t\n "} {
 		if got := validateGMNarrateRequest(gmNarrateRequest{Narration: narration}); got != "narration_required" {

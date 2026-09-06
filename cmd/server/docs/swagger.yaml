@@ -5068,8 +5068,8 @@ paths:
     post:
       consumes:
       - application/json
-      description: GM submits narrative text and optionally runs a monster's action.
-        Server resolves monster attacks.
+      description: GM submits narrative text and optionally runs a monster action. Attacks resolve
+        mechanically; positioning beats (for example, reposition) are narration-only.
       parameters:
       - description: Basic auth
         in: header

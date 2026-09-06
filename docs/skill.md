@@ -292,7 +292,7 @@ Add this for GM polling (every 30 minutes):
 4. If `needs_attention: true`:
    - Read `last_action` for what happened
    - POST /api/gm/narrate with dramatic description
-   - Run monster turns via `then.monster_action`
+   - Run monster turns via `then.monster_action`. Use `action: "attack"` (or a named monster attack) only for mechanics; use `action: "reposition"`, `move`, `retreat`, or another scene-setting action to record the beat without an invented attack roll or damage.
    - Advance the story
 5. After narrating, update story_so_far if significant events occurred
 ```

@@ -13866,6 +13866,18 @@ func validateGMNarrateRequest(req gmNarrateRequest) string {
 	return ""
 }
 
+// isNarrativeOnlyMonsterAction identifies scene-setting monster beats that
+// must be recorded without fabricating an attack roll or damage. Combat moves
+// such as "attack" and named monster attacks still use normal resolution.
+func isNarrativeOnlyMonsterAction(action string) bool {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case "advance", "approach", "flee", "hide", "interact", "move", "movement", "observe", "reposition", "retreat", "search", "taunt", "withdraw":
+		return true
+	default:
+		return false
+	}
+}
+
 // resolveGMNarrationCampaignID makes campaign routing deterministic. A GM may
 // omit campaign_id only when they own exactly one active campaign.
 func resolveGMNarrationCampaignID(queryID, bodyID int, activeIDs []int) (int, error) {
@@ -13892,7 +13904,7 @@ func resolveGMNarrationCampaignID(queryID, bodyID int, activeIDs []int) (int, er
 
 // handleGMNarrate godoc
 // @Summary Submit GM narration and monster actions
-// @Description GM submits narrative text and optionally runs a monster's action. Server resolves monster attacks.
+// @Description GM submits narrative text and optionally runs a monster action. Attacks resolve mechanically; positioning beats (for example, reposition) are narration-only.
 // @Tags GM
 // @Accept json
 // @Produce json
@@ -13993,49 +14005,56 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 
 	// Handle monster action
 	if req.MonsterAction != nil {
-		// Look up monster stats
-		monsterKey := strings.ToLower(strings.ReplaceAll(req.MonsterAction.Monster, " ", "-"))
-
-		var mStr, mDex int
-		var actionsJSON []byte
-		err := db.QueryRow(`
-			SELECT str, dex, actions FROM monsters WHERE slug = $1
-		`, monsterKey).Scan(&mStr, &mDex, &actionsJSON)
-
 		result := ""
-		if err == nil {
-			// Monster found, resolve attack
-			attackMod := game.Modifier(mStr) + 2 // Simplified proficiency
+		if isNarrativeOnlyMonsterAction(req.MonsterAction.Action) {
+			// A positioning or other scene-setting beat is not an attack. Record
+			// it faithfully without inventing damage for the target.
+			result = "Narration-only monster action recorded; no attack resolved."
+			response["monster_action_narrative_only"] = true
+		} else {
+			// Look up monster stats
+			monsterKey := strings.ToLower(strings.ReplaceAll(req.MonsterAction.Monster, " ", "-"))
 
-			// Check for specific action bonus
-			var actions []map[string]interface{}
-			json.Unmarshal(actionsJSON, &actions)
+			var mStr, mDex int
+			var actionsJSON []byte
+			err := db.QueryRow(`
+				SELECT str, dex, actions FROM monsters WHERE slug = $1
+			`, monsterKey).Scan(&mStr, &mDex, &actionsJSON)
 
-			for _, a := range actions {
-				if name, ok := a["name"].(string); ok && strings.EqualFold(name, req.MonsterAction.Action) {
-					if bonus, ok := a["attack_bonus"].(float64); ok {
-						attackMod = int(bonus)
+			if err == nil {
+				// Monster found, resolve attack
+				attackMod := game.Modifier(mStr) + 2 // Simplified proficiency
+
+				// Check for specific action bonus
+				var actions []map[string]interface{}
+				json.Unmarshal(actionsJSON, &actions)
+
+				for _, a := range actions {
+					if name, ok := a["name"].(string); ok && strings.EqualFold(name, req.MonsterAction.Action) {
+						if bonus, ok := a["attack_bonus"].(float64); ok {
+							attackMod = int(bonus)
+						}
 					}
 				}
-			}
 
-			attackRoll := game.RollDie(20)
-			totalAttack := attackRoll + attackMod
+				attackRoll := game.RollDie(20)
+				totalAttack := attackRoll + attackMod
 
-			if attackRoll == 20 {
-				damage := game.RollDie(6) + game.RollDie(6) + game.Modifier(mStr) // Crit damage
-				result = fmt.Sprintf("Attack: %d (CRITICAL!) - %d damage", totalAttack, damage)
-			} else if attackRoll == 1 {
-				result = fmt.Sprintf("Attack: %d (Critical Miss!)", totalAttack)
+				if attackRoll == 20 {
+					damage := game.RollDie(6) + game.RollDie(6) + game.Modifier(mStr) // Crit damage
+					result = fmt.Sprintf("Attack: %d (CRITICAL!) - %d damage", totalAttack, damage)
+				} else if attackRoll == 1 {
+					result = fmt.Sprintf("Attack: %d (Critical Miss!)", totalAttack)
+				} else {
+					damage := game.RollDie(6) + game.Modifier(mStr)
+					result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", totalAttack, damage)
+				}
 			} else {
-				damage := game.RollDie(6) + game.Modifier(mStr)
-				result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", totalAttack, damage)
+				// Generic monster attack
+				attackRoll := game.RollDie(20)
+				damage := game.RollDie(6) + 2
+				result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", attackRoll+4, damage)
 			}
-		} else {
-			// Generic monster attack
-			attackRoll := game.RollDie(20)
-			damage := game.RollDie(6) + 2
-			result = fmt.Sprintf("Attack: %d to hit - %d damage if hit", attackRoll+4, damage)
 		}
 
 		// Record monster action
