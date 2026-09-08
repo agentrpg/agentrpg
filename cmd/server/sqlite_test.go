@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -895,5 +896,14 @@ func TestResolveCastSpellSlug(t *testing.T) {
 				t.Fatalf("resolveCastSpellSlug() candidates = %v, want %v", gotChoices, tt.wantChoices)
 			}
 		})
+	}
+}
+
+func TestNudgeDeliveryStatusFallsBackToInGameLog(t *testing.T) {
+	if result, delivery := nudgeDeliveryStatus(nil); result != "Email sent" || delivery != "email" {
+		t.Fatalf("successful nudge status = (%q, %q), want email delivery", result, delivery)
+	}
+	if result, delivery := nudgeDeliveryStatus(errors.New("resend unavailable")); result != "Email delivery failed; in-game reminder recorded" || delivery != "in_game_log" {
+		t.Fatalf("failed nudge status = (%q, %q), want durable in-game fallback", result, delivery)
 	}
 }

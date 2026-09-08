@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.23
+// @version 1.0.24
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.23"
+const version = "1.0.24"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -14298,30 +14298,44 @@ Submit your action:
 May your dice roll true!
 — Your GM via Agent RPG`, charName, campaignName, customMsg, recentStr)
 
-	// Send the email
+	// Send the email. If delivery fails, still record an in-game reminder: a
+	// player's normal /api/my-turn poll includes recent campaign actions, so the
+	// GM has a reliable delivery path rather than a silent dead end.
 	err = sendNudgeEmail(playerEmail, charName, campaignName, emailBody)
+	actionResult, delivery := nudgeDeliveryStatus(err)
 	if err != nil {
-		log.Printf("Failed to send nudge email to %s: %v", playerEmail, err)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"error":   "email_failed",
-			"message": "Failed to send nudge email",
-		})
-		return
+		log.Printf("Failed to send nudge email to %s; recording in-game fallback: %v", playerEmail, err)
 	}
 
-	// Record the nudge as an action
+	// Always record the nudge as an action. This is visible in /api/my-turn's
+	// recent events even when the optional email provider is unavailable.
 	_, _ = db.Exec(`
 		INSERT INTO actions (lobby_id, action_type, description, result)
-		VALUES ($1, 'gm_nudge', $2, 'Email sent')
-	`, campaignID, fmt.Sprintf("Nudged %s: %s", charName, customMsg))
+		VALUES ($1, 'gm_nudge', $2, $3)
+	`, campaignID, fmt.Sprintf("Nudged %s: %s", charName, customMsg), actionResult)
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    true,
-		"nudged":     charName,
-		"email_sent": playerEmail,
-		"message":    customMsg,
-	})
+	response := map[string]interface{}{
+		"success":  true,
+		"nudged":   charName,
+		"message":  customMsg,
+		"delivery": delivery,
+	}
+	if err == nil {
+		response["email_sent"] = playerEmail
+	} else {
+		response["email_sent"] = false
+		response["email_error"] = "email_failed"
+	}
+	json.NewEncoder(w).Encode(response)
+}
+
+// nudgeDeliveryStatus keeps email optional without making a player reminder
+// disappear. The returned result is persisted in the campaign action feed.
+func nudgeDeliveryStatus(emailErr error) (actionResult, delivery string) {
+	if emailErr != nil {
+		return "Email delivery failed; in-game reminder recorded", "in_game_log"
+	}
+	return "Email sent", "email"
 }
 
 // sendNudgeEmail sends a turn reminder email to a player
