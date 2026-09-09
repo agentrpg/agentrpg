@@ -907,3 +907,34 @@ func TestNudgeDeliveryStatusFallsBackToInGameLog(t *testing.T) {
 		t.Fatalf("failed nudge status = (%q, %q), want durable in-game fallback", result, delivery)
 	}
 }
+
+func TestClearCombatInitiativeRemovesStaleTurnData(t *testing.T) {
+	testDB := setupSQLiteTestDB(t)
+	if _, err := testDB.Exec(`
+		CREATE TABLE combat_state (
+			lobby_id INTEGER PRIMARY KEY,
+			round_number INTEGER,
+			current_turn_index INTEGER,
+			turn_order TEXT,
+			active BOOLEAN,
+			turn_started_at DATETIME
+		);
+		INSERT INTO combat_state (lobby_id, round_number, current_turn_index, turn_order, active)
+		VALUES (6, 176, 1, '[{"name":"Ink Wraith"}]', true);`); err != nil {
+		t.Fatalf("seed combat state: %v", err)
+	}
+
+	if err := clearCombatInitiative(6); err != nil {
+		t.Fatalf("clearCombatInitiative: %v", err)
+	}
+
+	var round, turnIndex int
+	var turnOrder string
+	var active bool
+	if err := testDB.QueryRow(`SELECT round_number, current_turn_index, turn_order, active FROM combat_state WHERE lobby_id = 6`).Scan(&round, &turnIndex, &turnOrder, &active); err != nil {
+		t.Fatalf("read cleared combat state: %v", err)
+	}
+	if active || round != 0 || turnIndex != 0 || turnOrder != "[]" {
+		t.Fatalf("combat state = active:%v round:%d turn_index:%d turn_order:%s; want cleared initiative", active, round, turnIndex, turnOrder)
+	}
+}

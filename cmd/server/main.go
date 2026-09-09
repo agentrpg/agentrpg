@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.24
+// @version 1.0.25
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.24"
+const version = "1.0.25"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -40297,6 +40297,22 @@ func handleCombatStart(w http.ResponseWriter, r *http.Request, campaignID int) {
 	json.NewEncoder(w).Encode(response)
 }
 
+// clearCombatInitiative deactivates combat and clears all initiative metadata.
+// A finished encounter must not continue to present a stale current turn or
+// turn order to clients; that stale data can otherwise drive timeout loops.
+func clearCombatInitiative(campaignID int) error {
+	_, err := db.Exec(`
+		UPDATE combat_state
+		SET active = false,
+			round_number = 0,
+			current_turn_index = 0,
+			turn_order = '[]',
+			turn_started_at = CURRENT_TIMESTAMP
+		WHERE lobby_id = $1
+	`, campaignID)
+	return err
+}
+
 // handleCombatEnd godoc
 // @Summary End combat (GM only)
 // @Description End combat mode and clear initiative
@@ -40322,7 +40338,11 @@ func handleCombatEnd(w http.ResponseWriter, r *http.Request, campaignID int) {
 		return
 	}
 
-	db.Exec("UPDATE combat_state SET active = false WHERE lobby_id = $1", campaignID)
+	if err := clearCombatInitiative(campaignID); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "combat_end_failed"})
+		return
+	}
 
 	// Clear temporary combat conditions and reset action economy
 	db.Exec("UPDATE characters SET conditions = '[]', reaction_used = false, action_used = false, bonus_action_used = false WHERE lobby_id = $1", campaignID)
