@@ -3738,7 +3738,7 @@ func cleanupDuplicateCharacterConditions() {
 
 func isMeaningfulActionType(actionType string) bool {
 	switch strings.ToLower(strings.TrimSpace(actionType)) {
-	case "", "poll", "joined":
+	case "", "poll", "joined", "following":
 		return false
 	default:
 		return true
@@ -3760,9 +3760,10 @@ func lastNarrationTime(lobbyID int) time.Time {
 	return time.Time{}
 }
 
-// latestMeaningfulPlayerActionTime deliberately ignores heartbeat polls and
-// join records. They are reads/administrative events, not story beats, and
-// must not make a freshly written stateless-player recap look stale.
+// latestMeaningfulPlayerActionTime deliberately ignores heartbeat polls, join
+// records, and automatic following records. They are reads/administrative
+// events, not story beats, and must not make a freshly written stateless-player
+// recap look stale.
 func latestMeaningfulPlayerActionTime(lobbyID int) sql.NullTime {
 	var latest sql.NullTime
 	db.QueryRow(`
@@ -3770,7 +3771,7 @@ func latestMeaningfulPlayerActionTime(lobbyID int) sql.NullTime {
 		FROM actions
 		WHERE lobby_id = $1
 		  AND character_id IS NOT NULL
-		  AND action_type NOT IN ('poll', 'joined')
+		  AND action_type NOT IN ('poll', 'joined', 'following')
 		ORDER BY created_at DESC
 		LIMIT 1
 	`, lobbyID).Scan(&latest)
@@ -3787,7 +3788,7 @@ func hasCharacterActedSinceLastNarration(charID, lobbyID int) (bool, string, str
 		FROM actions
 		WHERE lobby_id = $1
 		  AND character_id = $2
-		  AND action_type NOT IN ('poll', 'joined')
+		  AND action_type NOT IN ('poll', 'joined', 'following')
 	`
 	args := []interface{}{lobbyID, charID}
 	if !narrationAt.IsZero() {
@@ -12667,7 +12668,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		FROM actions a
 		LEFT JOIN characters c ON a.character_id = c.id
 		WHERE a.lobby_id = $1
-		  AND a.action_type NOT IN ('poll', 'joined')
+		  AND a.action_type NOT IN ('poll', 'joined', 'following')
 		ORDER BY a.created_at DESC
 		LIMIT 1
 	`, campaignID).Scan(&lastActionID, &lastCharID, &lastCharName, &lastActionType, &lastDesc, &lastResult, &lastActionTime)
@@ -12696,7 +12697,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	rows, _ := db.Query(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
 			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, ''),
-			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type NOT IN ('poll', 'joined')) as last_action_at
+			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type NOT IN ('poll', 'joined', 'following')) as last_action_at
 		FROM characters c
 		WHERE c.lobby_id = $1
 	`, campaignID)
@@ -13422,7 +13423,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			JOIN characters c ON a.character_id = c.id 
 			WHERE a.lobby_id = $1 
 			AND a.created_at > NOW() - INTERVAL '4 hours'
-			AND a.action_type NOT IN ('poll', 'joined')
+			AND a.action_type NOT IN ('poll', 'joined', 'following')
 		`, campaignID).Scan(&activePlayerCount)
 
 		// Count players active in last 12 hours (for dormancy check)
@@ -13433,7 +13434,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			JOIN characters c ON a.character_id = c.id 
 			WHERE a.lobby_id = $1 
 			AND a.created_at > NOW() - INTERVAL '12 hours'
-			AND a.action_type NOT IN ('poll', 'joined')
+			AND a.action_type NOT IN ('poll', 'joined', 'following')
 		`, campaignID).Scan(&recentPlayerCount)
 
 		// Count actions since last combat ended (or since campaign start)
@@ -13441,7 +13442,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		db.QueryRow(`
 			SELECT COUNT(*) FROM actions 
 			WHERE lobby_id = $1 
-			AND action_type NOT IN ('poll', 'joined', 'narration')
+			AND action_type NOT IN ('poll', 'joined', 'following', 'narration')
 			AND created_at > COALESCE(
 				(SELECT MAX(created_at) FROM actions WHERE lobby_id = $1 AND action_type = 'combat_end'),
 				(SELECT created_at FROM lobbies WHERE id = $1)
@@ -40750,7 +40751,7 @@ func handleExplorationStatus(w http.ResponseWriter, r *http.Request, campaignID 
 	rows, err := db.Query(`
 		SELECT c.id, c.name, 
 			COALESCE(
-				(SELECT MAX(a.created_at) FROM actions a WHERE a.character_id = c.id AND a.action_type NOT IN ('poll', 'joined')),
+				(SELECT MAX(a.created_at) FROM actions a WHERE a.character_id = c.id AND a.action_type NOT IN ('poll', 'joined', 'following')),
 				c.created_at
 			) as last_action
 		FROM characters c
@@ -40870,7 +40871,7 @@ func handleExplorationSkip(w http.ResponseWriter, r *http.Request, campaignID in
 	var lastActionAt sql.NullTime
 	db.QueryRow(`
 		SELECT MAX(created_at) FROM actions 
-		WHERE character_id = $1 AND action_type NOT IN ('poll', 'joined')
+		WHERE character_id = $1 AND action_type NOT IN ('poll', 'joined', 'following')
 	`, req.CharacterID).Scan(&lastActionAt)
 
 	inactiveMinutes := 0
