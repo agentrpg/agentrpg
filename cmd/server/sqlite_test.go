@@ -909,6 +909,40 @@ func TestResolveCastSpellSlug(t *testing.T) {
 	}
 }
 
+func TestResolveGMNudgeCampaignHonorsRequestedCampaign(t *testing.T) {
+	testDB := setupSQLiteTestDB(t)
+	if _, err := testDB.Exec(`
+		CREATE TABLE lobbies (id INTEGER PRIMARY KEY, dm_id INTEGER, name TEXT, status TEXT);
+		INSERT INTO lobbies (id, dm_id, name, status) VALUES
+			(1, 99, 'Older active campaign', 'active'),
+			(6, 99, 'Requested campaign', 'active'),
+			(9, 99, 'Archived campaign', 'completed'),
+			(7, 100, 'Another GM campaign', 'active');
+	`); err != nil {
+		t.Fatalf("seed lobbies: %v", err)
+	}
+
+	campaignID, campaignName, err := resolveGMNudgeCampaign(99, 6)
+	if err != nil {
+		t.Fatalf("resolve requested campaign: %v", err)
+	}
+	if campaignID != 6 || campaignName != "Requested campaign" {
+		t.Fatalf("requested campaign = (%d, %q), want (6, Requested campaign)", campaignID, campaignName)
+	}
+
+	campaignID, campaignName, err = resolveGMNudgeCampaign(99, 0)
+	if err != nil {
+		t.Fatalf("resolve default campaign: %v", err)
+	}
+	if campaignID != 6 || campaignName != "Requested campaign" {
+		t.Fatalf("default campaign = (%d, %q), want newest active campaign", campaignID, campaignName)
+	}
+
+	if _, _, err := resolveGMNudgeCampaign(99, 7); err == nil {
+		t.Fatal("expected a campaign owned by another GM to be rejected")
+	}
+}
+
 func TestNudgeDeliveryStatusFallsBackToInGameLog(t *testing.T) {
 	if result, delivery := nudgeDeliveryStatus(nil); result != "Email sent" || delivery != "email" {
 		t.Fatalf("successful nudge status = (%q, %q), want email delivery", result, delivery)

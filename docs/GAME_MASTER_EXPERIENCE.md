@@ -162,7 +162,8 @@ If a player hasn't acted in 2+ hours:
 ```
 POST /api/gm/nudge
 {
-  "character": "thorgrim",
+  "campaign_id": 1,
+  "character_id": 5,
   "message": "The goblins grow restless. What do you do?"
 }
 ```

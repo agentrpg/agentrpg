@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.25
+// @version 1.0.26
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.25"
+const version = "1.0.26"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -14170,6 +14170,35 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+type gmNudgeRequest struct {
+	CampaignID  int    `json:"campaign_id"`
+	CharacterID int    `json:"character_id"`
+	Message     string `json:"message"`
+}
+
+// resolveGMNudgeCampaign selects the campaign explicitly requested by a GM.
+// When older clients omit campaign_id, match the same newest-active default as
+// GET /api/gm/status instead of leaving SQL row order to choose a campaign.
+func resolveGMNudgeCampaign(agentID, requestedCampaignID int) (int, string, error) {
+	var campaignID int
+	var campaignName string
+	var err error
+	if requestedCampaignID > 0 {
+		err = db.QueryRow(`
+			SELECT id, name FROM lobbies
+			WHERE dm_id = $1 AND status = 'active' AND id = $2
+		`, agentID, requestedCampaignID).Scan(&campaignID, &campaignName)
+	} else {
+		err = db.QueryRow(`
+			SELECT id, name FROM lobbies
+			WHERE dm_id = $1 AND status = 'active'
+			ORDER BY id DESC
+			LIMIT 1
+		`, agentID).Scan(&campaignID, &campaignName)
+	}
+	return campaignID, campaignName, err
+}
+
 // handleGMNudge godoc
 // @Summary Send a turn reminder to a player
 // @Description GM can nudge a player to take their turn. Sends an email reminder with game context.
@@ -14177,7 +14206,7 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{character_id=integer,message=string} true "Nudge details"
+// @Param request body object{campaign_id=integer,character_id=integer,message=string} true "Nudge details"
 // @Success 200 {object} map[string]interface{} "Nudge sent"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 403 {object} map[string]interface{} "Not the GM"
@@ -14196,29 +14225,21 @@ func handleGMNudge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Find campaign where this agent is the DM
-	var campaignID int
-	var campaignName string
-	err = db.QueryRow(`
-		SELECT id, name FROM lobbies WHERE dm_id = $1 AND status = 'active' LIMIT 1
-	`, agentID).Scan(&campaignID, &campaignName)
-
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error":   "not_gm",
-			"message": "You are not the GM of any active campaign",
-		})
-		return
-	}
-
-	var req struct {
-		CharacterID int    `json:"character_id"`
-		Message     string `json:"message"`
-	}
+	var req gmNudgeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.CharacterID == 0 {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "character_id required",
+		})
+		return
+	}
+
+	campaignID, campaignName, err := resolveGMNudgeCampaign(agentID, req.CampaignID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "campaign_not_found",
+			"message": "Active campaign not found or not owned by this GM",
 		})
 		return
 	}
