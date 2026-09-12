@@ -1,7 +1,7 @@
 package main
 
 // @title Agent RPG API
-// @version 1.0.26
+// @version 1.0.27
 // @description D&D 5e for AI agents. Backend handles mechanics, agents handle roleplay.
 // @contact.name Agent RPG
 // @contact.url https://agentrpg.org/about
@@ -42,7 +42,7 @@ import (
 //go:embed docs/swagger/swagger.json
 var swaggerJSON []byte
 
-const version = "1.0.26"
+const version = "1.0.27"
 
 // Build time set via ldflags: -ldflags "-X main.buildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 var buildTime = "dev"
@@ -3743,6 +3743,13 @@ func isMeaningfulActionType(actionType string) bool {
 	default:
 		return true
 	}
+}
+
+// isFollowingParty reports whether the system's latest action for a character
+// has already placed them on automatic follow. A later meaningful player
+// action re-enables normal inactivity tracking.
+func isFollowingParty(lastMeaningfulAction, lastFollowing sql.NullTime) bool {
+	return lastFollowing.Valid && (!lastMeaningfulAction.Valid || !lastFollowing.Time.Before(lastMeaningfulAction.Time))
 }
 
 func lastNarrationTime(lobbyID int) time.Time {
@@ -12697,7 +12704,8 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	rows, _ := db.Query(`
 		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
 			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, ''),
-			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type NOT IN ('poll', 'joined', 'following')) as last_action_at
+			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type NOT IN ('poll', 'joined', 'following')) as last_action_at,
+			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type = 'following') as last_following_at
 		FROM characters c
 		WHERE c.lobby_id = $1
 	`, campaignID)
@@ -12717,8 +12725,8 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		var id, level, hp, maxHP, ac int
 		var name, class, race, concentrating string
 		var conditionsJSON []byte
-		var lastActionAt sql.NullTime
-		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &lastActionAt)
+		var lastActionAt, lastFollowingAt sql.NullTime
+		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &lastActionAt, &lastFollowingAt)
 
 		conditions := responseConditions(conditionsJSON)
 
@@ -12752,7 +12760,21 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 			"name": name,
 			"id":   id,
 		}
-		if lastActionAt.Valid {
+		if isFollowingParty(lastActionAt, lastFollowingAt) {
+			if lastActionAt.Valid {
+				activityInfo["last_action_at"] = lastActionAt.Time.Format(time.RFC3339)
+			} else {
+				activityInfo["last_action_at"] = nil
+			}
+			activityInfo["following_since"] = lastFollowingAt.Time.Format(time.RFC3339)
+			activityInfo["inactive_hours"] = 0
+			activityInfo["inactive_status"] = "following"
+			activityInfo["countdowns"] = map[string]string{
+				"combat_skip_in":      "not needed (following party)",
+				"exploration_skip_in": "not needed (following party)",
+				"abandon_in":          "not needed (following party)",
+			}
+		} else if lastActionAt.Valid {
 			inactiveDuration := time.Since(lastActionAt.Time)
 			inactiveHours := inactiveDuration.Hours()
 			activityInfo["last_action_at"] = lastActionAt.Time.Format(time.RFC3339)
@@ -40770,11 +40792,12 @@ func handleExplorationStatus(w http.ResponseWriter, r *http.Request, campaignID 
 	var inactivePlayers []InactivePlayer
 
 	rows, err := db.Query(`
-		SELECT c.id, c.name, 
+		SELECT c.id, c.name,
 			COALESCE(
 				(SELECT MAX(a.created_at) FROM actions a WHERE a.character_id = c.id AND a.action_type NOT IN ('poll', 'joined', 'following')),
 				c.created_at
-			) as last_action
+			) as last_action,
+			(SELECT MAX(a.created_at) FROM actions a WHERE a.character_id = c.id AND a.action_type = 'following') as last_following_at
 		FROM characters c
 		WHERE c.lobby_id = $1
 	`, campaignID)
@@ -40784,7 +40807,11 @@ func handleExplorationStatus(w http.ResponseWriter, r *http.Request, campaignID 
 			var id int
 			var name string
 			var lastAction time.Time
-			rows.Scan(&id, &name, &lastAction)
+			var lastFollowing sql.NullTime
+			rows.Scan(&id, &name, &lastAction, &lastFollowing)
+			if isFollowingParty(sql.NullTime{Time: lastAction, Valid: true}, lastFollowing) {
+				continue
+			}
 
 			inactiveDuration := time.Since(lastAction)
 			inactiveHours := int(inactiveDuration.Hours())
@@ -40888,16 +40915,33 @@ func handleExplorationSkip(w http.ResponseWriter, r *http.Request, campaignID in
 		return
 	}
 
-	// Calculate inactive duration
-	var lastActionAt sql.NullTime
+	// Calculate inactivity from a meaningful player action. A prior automatic
+	// follow is terminal until the player acts again, so repeated skip calls are
+	// safe no-ops instead of continually creating stale GM work.
+	var lastActionAt, lastFollowingAt sql.NullTime
 	db.QueryRow(`
-		SELECT MAX(created_at) FROM actions 
-		WHERE character_id = $1 AND action_type NOT IN ('poll', 'joined', 'following')
-	`, req.CharacterID).Scan(&lastActionAt)
+		SELECT
+			MAX(created_at) FILTER (WHERE action_type NOT IN ('poll', 'joined', 'following')),
+			MAX(created_at) FILTER (WHERE action_type = 'following')
+		FROM actions
+		WHERE character_id = $1
+	`, req.CharacterID).Scan(&lastActionAt, &lastFollowingAt)
 
 	inactiveMinutes := 0
 	if lastActionAt.Valid {
 		inactiveMinutes = int(time.Since(lastActionAt.Time).Minutes())
+	}
+	if isFollowingParty(lastActionAt, lastFollowingAt) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":           true,
+			"skipped":           charName,
+			"character_id":      req.CharacterID,
+			"inactive_minutes":  inactiveMinutes,
+			"already_following": true,
+			"action_recorded":   "following",
+			"message":           fmt.Sprintf("%s is already following the party", charName),
+		})
+		return
 	}
 
 	// Record the skip as a "following" action

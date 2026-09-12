@@ -246,6 +246,20 @@ func TestLatestMeaningfulPlayerActionTimeIgnoresNonNarrativeHousekeeping(t *test
 	}
 }
 
+func TestIsFollowingPartyRequiresFollowAfterMeaningfulAction(t *testing.T) {
+	meaningful := time.Date(2026, time.September, 11, 20, 0, 0, 0, time.UTC)
+	following := meaningful.Add(time.Hour)
+	if !isFollowingParty(sql.NullTime{Time: meaningful, Valid: true}, sql.NullTime{Time: following, Valid: true}) {
+		t.Fatal("latest automatic follow should suppress another skip")
+	}
+	if isFollowingParty(sql.NullTime{Time: following, Valid: true}, sql.NullTime{Time: meaningful, Valid: true}) {
+		t.Fatal("a player action after automatic follow should re-enable inactivity tracking")
+	}
+	if !isFollowingParty(sql.NullTime{}, sql.NullTime{Time: following, Valid: true}) {
+		t.Fatal("a followed never-acting player should not be skipped repeatedly")
+	}
+}
+
 func TestIsMeaningfulActionTypeExcludesFollowing(t *testing.T) {
 	if isMeaningfulActionType("following") {
 		t.Fatal("following is system housekeeping, not a story beat")
