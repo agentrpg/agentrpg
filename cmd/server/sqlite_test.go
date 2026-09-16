@@ -260,6 +260,15 @@ func TestIsFollowingPartyRequiresFollowAfterMeaningfulAction(t *testing.T) {
 	}
 }
 
+func TestIsFollowingPartyDoesNotExpireForAbandonedCharacter(t *testing.T) {
+	meaningful := time.Date(2026, time.September, 1, 20, 0, 0, 0, time.UTC)
+	following := meaningful.Add(13 * time.Hour)
+
+	if !isFollowingParty(sql.NullTime{Time: meaningful, Valid: true}, sql.NullTime{Time: following, Valid: true}) {
+		t.Fatal("a following record must stay effective after twelve hours until a new meaningful action occurs")
+	}
+}
+
 func TestIsMeaningfulActionTypeExcludesFollowing(t *testing.T) {
 	if isMeaningfulActionType("following") {
 		t.Fatal("following is system housekeeping, not a story beat")

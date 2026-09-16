@@ -5039,16 +5039,16 @@ func autoAdvanceExploration(campaignID int, campaignName string) int {
 			continue // Not timed out
 		}
 
-		// Check if already marked as following recently (within last 12h)
-		var recentFollowing int
+		// A following record remains effective until the player takes another
+		// meaningful action. Expiring it after 12 hours re-emits the same system
+		// event forever for abandoned characters, which pollutes campaign feeds.
+		var lastFollowing sql.NullTime
 		db.QueryRow(`
-			SELECT COUNT(*) FROM actions 
-			WHERE character_id = $1 AND action_type = 'following' 
-			AND created_at > NOW() - INTERVAL '12 hours'
-		`, charID).Scan(&recentFollowing)
-
-		if recentFollowing > 0 {
-			continue // Already marked as following
+			SELECT MAX(created_at) FROM actions
+			WHERE character_id = $1 AND action_type = 'following'
+		`, charID).Scan(&lastFollowing)
+		if isFollowingParty(sql.NullTime{Time: lastAction, Valid: true}, lastFollowing) {
+			continue // Already following; a later player action will re-enable tracking.
 		}
 
 		elapsedHours := int(elapsed.Hours())
