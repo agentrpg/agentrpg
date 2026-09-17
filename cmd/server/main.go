@@ -3752,6 +3752,25 @@ func isFollowingParty(lastMeaningfulAction, lastFollowing sql.NullTime) bool {
 	return lastFollowing.Valid && (!lastMeaningfulAction.Valid || !lastFollowing.Time.Before(lastMeaningfulAction.Time))
 }
 
+// characterHPStatus provides the concise party-status label used by GM and
+// spectator reads. A character at 0 HP who has made three successful death
+// saves is unconscious but stable, not dying.
+func characterHPStatus(hp, maxHP int, isStable bool) string {
+	if hp == 0 {
+		if isStable {
+			return "stable"
+		}
+		return "dying"
+	}
+	if hp <= maxHP/4 {
+		return "critical"
+	}
+	if hp <= maxHP/2 {
+		return "wounded"
+	}
+	return "healthy"
+}
+
 func lastNarrationTime(lobbyID int) time.Time {
 	var ts sql.NullTime
 	db.QueryRow(`
@@ -12702,8 +12721,8 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 
 	// Get party status with last action time per character
 	rows, _ := db.Query(`
-		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
-			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, ''),
+	SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
+			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, ''), COALESCE(c.is_stable, false),
 			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type NOT IN ('poll', 'joined', 'following')) as last_action_at,
 			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type = 'following') as last_following_at
 		FROM characters c
@@ -12724,20 +12743,14 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, level, hp, maxHP, ac int
 		var name, class, race, concentrating string
+		var isStable bool
 		var conditionsJSON []byte
 		var lastActionAt, lastFollowingAt sql.NullTime
-		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &lastActionAt, &lastFollowingAt)
+		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &isStable, &lastActionAt, &lastFollowingAt)
 
 		conditions := responseConditions(conditionsJSON)
 
-		status := "healthy"
-		if hp == 0 {
-			status = "dying"
-		} else if hp <= maxHP/4 {
-			status = "critical"
-		} else if hp <= maxHP/2 {
-			status = "wounded"
-		}
+		status := characterHPStatus(hp, maxHP, isStable)
 
 		charInfo := map[string]interface{}{
 			"id":     id,
