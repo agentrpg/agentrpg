@@ -1017,3 +1017,21 @@ func TestClearCombatInitiativeRemovesStaleTurnData(t *testing.T) {
 		t.Fatalf("combat state = active:%v round:%d turn_index:%d turn_order:%s; want cleared initiative", active, round, turnIndex, turnOrder)
 	}
 }
+
+func TestOtherActionNarrativeValidationAndLegacyResultAlias(t *testing.T) {
+	if got := actionNarrative("  description wins  ", "legacy result"); got != "description wins" {
+		t.Fatalf("actionNarrative() = %q, want trimmed description", got)
+	}
+	if got := actionNarrative(" \t", "  preserve this narrative  "); got != "preserve this narrative" {
+		t.Fatalf("actionNarrative() = %q, want trimmed legacy result", got)
+	}
+	if !actionRequiresNarrative(" OTHER ") {
+		t.Fatal("other actions must require a narrative")
+	}
+	if actionRequiresNarrative("dodge") {
+		t.Fatal("mechanical actions should retain their optional description")
+	}
+	if actionNarrative("", "") != "" {
+		t.Fatal("empty narrative inputs should remain empty for validation")
+	}
+}

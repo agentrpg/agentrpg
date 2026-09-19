@@ -24717,6 +24717,22 @@ func resetReaction(charID int) {
 	db.Exec("UPDATE characters SET reaction_used = false WHERE id = $1", charID)
 }
 
+// actionNarrative normalizes the current description field and the legacy
+// result field used by earlier action clients. A supplied description wins so
+// the API remains predictable when clients send both fields.
+func actionNarrative(description, legacyResult string) string {
+	if description = strings.TrimSpace(description); description != "" {
+		return description
+	}
+	return strings.TrimSpace(legacyResult)
+}
+
+// actionRequiresNarrative identifies actions that have no mechanical default
+// and must not silently consume a turn with an empty action log.
+func actionRequiresNarrative(action string) bool {
+	return strings.ToLower(strings.TrimSpace(action)) == "other"
+}
+
 // handleAction godoc
 // @Summary Submit an action
 // @Description Submit a game action. Server resolves mechanics (dice rolls, damage, etc.). Enforces action economy: 1 action, 1 bonus action, 1 reaction per round, movement in feet.
@@ -24745,6 +24761,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action                 string `json:"action"`
 		Description            string `json:"description"`
+		Result                 string `json:"result"`     // Backward-compatible narrative alias used by earlier action clients.
 		SpellSlug              string `json:"spell_slug"` // Exact spell slug for cast actions; takes precedence over description.
 		Target                 string `json:"target"`
 		MovementCost           int    `json:"movement_cost"`            // feet of movement for move actions
@@ -24753,13 +24770,23 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
-	req.Description = strings.TrimSpace(req.Description)
+	req.Description = actionNarrative(req.Description, req.Result)
 	if req.Action == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": false,
 			"error":   "action_required",
 			"message": "Provide an action, such as attack, dodge, cast, or help.",
+		})
+		return
+	}
+	if actionRequiresNarrative(req.Action) && req.Description == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"error":   "description_required",
+			"message": "Provide a non-empty description for an other action; no action was taken.",
+			"hint":    "Use description (or the legacy result field) for your narrative.",
 		})
 		return
 	}
