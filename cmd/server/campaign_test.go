@@ -222,6 +222,28 @@ func TestCampaignCreationAndJoining(t *testing.T) {
 	campaignID := int(result["campaign_id"].(float64))
 	t.Logf("Campaign created: ID=%d", campaignID)
 
+	// Campaign listings must expose their creation time so clients can tell a
+	// newly-created recruiting table from an abandoned one without guessing.
+	_, campaignList := makeRequest(t, "GET", "/api/campaigns", nil, "")
+	listed := false
+	for _, rawCampaign := range campaignList["campaigns"].([]interface{}) {
+		campaign, ok := rawCampaign.(map[string]interface{})
+		if !ok || int(campaign["id"].(float64)) != campaignID {
+			continue
+		}
+		listed = true
+		createdAt, ok := campaign["created_at"].(string)
+		if !ok || createdAt == "" {
+			t.Fatalf("campaign list omitted created_at: %#v", campaign)
+		}
+		if _, err := time.Parse(time.RFC3339, createdAt); err != nil {
+			t.Fatalf("campaign created_at must be RFC3339, got %q: %v", createdAt, err)
+		}
+	}
+	if !listed {
+		t.Fatalf("created campaign %d was missing from campaign list", campaignID)
+	}
+
 	// Step 3: Register players and create characters
 	players := make([]struct {
 		ID       int

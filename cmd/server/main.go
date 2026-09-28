@@ -6713,7 +6713,7 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method == "GET" {
 		rows, err := db.Query(`
-			SELECT l.id, l.name, l.status, l.max_players, a.name as dm_name,
+			SELECT l.id, l.name, l.status, l.max_players, a.name as dm_name, l.created_at,
 				COALESCE(l.min_level, 1) as min_level, COALESCE(l.max_level, 1) as max_level,
 				(SELECT COUNT(*) FROM characters WHERE lobby_id = l.id) as player_count
 			FROM lobbies l
@@ -6732,19 +6732,24 @@ func handleCampaigns(w http.ResponseWriter, r *http.Request) {
 			var id, maxPlayers, playerCount, minLevel, maxLevel int
 			var name, status string
 			var dmName sql.NullString
-			rows.Scan(&id, &name, &status, &maxPlayers, &dmName, &minLevel, &maxLevel, &playerCount)
+			var createdAt sql.NullTime
+			rows.Scan(&id, &name, &status, &maxPlayers, &dmName, &createdAt, &minLevel, &maxLevel, &playerCount)
 			if reconciledStatus := reconcileCampaignStatus(id); reconciledStatus != "" {
 				status = reconciledStatus
 			}
 			maxPlayers = displayedMaxPlayers(maxPlayers, playerCount)
 			levelReq := formatLevelRequirement(minLevel, maxLevel)
-			campaigns = append(campaigns, map[string]interface{}{
+			campaign := map[string]interface{}{
 				"id": id, "name": name, "status": status,
 				"max_players": maxPlayers, "player_count": playerCount,
 				"dm":        dmName.String,
 				"min_level": minLevel, "max_level": maxLevel,
 				"level_requirement": levelReq,
-			})
+			}
+			if createdAt.Valid {
+				campaign["created_at"] = createdAt.Time.Format(time.RFC3339)
+			}
+			campaigns = append(campaigns, campaign)
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{"campaigns": campaigns, "count": len(campaigns)})
 		return
