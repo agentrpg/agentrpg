@@ -32,6 +32,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/agentrpg/agentrpg/game"
@@ -49,6 +50,21 @@ var buildTime = "dev"
 var serverStartTime string
 
 var db *sql.DB
+
+// characterActionLocks keeps simultaneous heartbeat retries for the same
+// character from slipping between the exploration-beat check and action
+// recording. A successful retry is returned as an idempotent receipt below.
+// The map is intentionally keyed by campaign and character so unrelated
+// players can still act concurrently.
+var characterActionLocks sync.Map // map[string]*sync.Mutex
+
+func lockCharacterAction(lobbyID, charID int) func() {
+	key := fmt.Sprintf("%d:%d", lobbyID, charID)
+	value, _ := characterActionLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := value.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
+}
 
 // Fantasy code words for email verification
 var fantasyAdjectives = []string{
@@ -3830,6 +3846,34 @@ func hasCharacterActedSinceLastNarration(charID, lobbyID int) (bool, string, str
 		return false, "", "", time.Time{}
 	}
 	return true, actionType.String, description.String, createdAt.Time
+}
+
+// actionReplaySinceLastNarration identifies an exact retry of a recorded
+// exploration action. Clients can safely retry after a timeout without being
+// told their already-recorded action was rejected.
+func actionReplaySinceLastNarration(charID, lobbyID int, actionType, description string) (bool, string, time.Time) {
+	narrationAt := lastNarrationTime(lobbyID)
+
+	var result sql.NullString
+	var createdAt sql.NullTime
+	query := `
+		SELECT COALESCE(result, ''), created_at
+		FROM actions
+		WHERE lobby_id = $1
+		  AND character_id = $2
+		  AND action_type = $3
+		  AND COALESCE(description, '') = $4
+	`
+	args := []interface{}{lobbyID, charID, actionType, description}
+	if !narrationAt.IsZero() {
+		query += ` AND created_at > $5`
+		args = append(args, narrationAt)
+	}
+	query += ` ORDER BY created_at DESC LIMIT 1`
+	if err := db.QueryRow(query, args...).Scan(&result, &createdAt); err != nil {
+		return false, "", time.Time{}
+	}
+	return true, result.String, createdAt.Time
 }
 
 func shouldAllowExplorationFollowup(actionType string) bool {
@@ -11527,6 +11571,8 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 	if awaitingGMNarration {
 		response["turn_state"] = "waiting_for_gm"
 		response["turn_state_message"] = awaitingGMNarrationMessage
+		response["awaiting_narration"] = true
+		response["action_blocked_reason"] = "awaiting_narration"
 	}
 
 	// Add combat info if in combat
@@ -24841,6 +24887,12 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Heartbeats can overlap when a client retries after a slow response. Keep
+	// the check and subsequent recording for one character serialized so the
+	// caller gets a durable outcome rather than a contradictory turn failure.
+	unlockCharacterAction := lockCharacterAction(lobbyID, charID)
+	defer unlockCharacterAction()
+
 	// CHECK: Incapacitated condition blocks ALL actions (except death saves)
 	if req.Action != "death_save" && isIncapacitated(charID) {
 		conditions := getCharConditions(charID)
@@ -24918,6 +24970,21 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 
 	if !inCombat && !shouldAllowExplorationFollowup(req.Action) {
 		if acted, actionType, actionDesc, actedAt := hasCharacterActedSinceLastNarration(charID, lobbyID); acted {
+			if actionType == req.Action && actionDesc == req.Description {
+				if replayed, result, replayedAt := actionReplaySinceLastNarration(charID, lobbyID, req.Action, req.Description); replayed {
+					replay := map[string]interface{}{
+						"success":          true,
+						"already_recorded": true,
+						"message":          "This exploration action was already recorded; returning its receipt.",
+						"acted_at":         replayedAt.UTC().Format(time.RFC3339),
+					}
+					if result != "" {
+						replay["result"] = result
+					}
+					json.NewEncoder(w).Encode(replay)
+					return
+				}
+			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":      false,
 				"error":        "awaiting_narration",

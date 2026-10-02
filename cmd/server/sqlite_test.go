@@ -366,6 +366,7 @@ CREATE TABLE actions (
 	character_id INTEGER,
 	action_type TEXT,
 	description TEXT,
+	result TEXT,
 	created_at DATETIME
 );`
 	if _, err := testDB.Exec(schema); err != nil {
@@ -407,6 +408,35 @@ func TestHasCharacterActedSinceLastNarration(t *testing.T) {
 	acted, _, _, _ = hasCharacterActedSinceLastNarration(11, 1)
 	if acted {
 		t.Fatal("expected narration to clear unresolved player action")
+	}
+}
+
+func TestActionReplaySinceLastNarration(t *testing.T) {
+	testDB := setupSQLiteActionTestDB(t)
+	now := time.Now().UTC()
+	if _, err := testDB.Exec(
+		`INSERT INTO actions (lobby_id, character_id, action_type, description, result, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		1, 11, "other", "I hold the bridge.", "Action recorded.", now,
+	); err != nil {
+		t.Fatalf("insert action: %v", err)
+	}
+
+	matched, result, actedAt := actionReplaySinceLastNarration(11, 1, "other", "I hold the bridge.")
+	if !matched || result != "Action recorded." || !actedAt.Equal(now) {
+		t.Fatalf("expected recorded action replay, got matched=%v result=%q actedAt=%s", matched, result, actedAt)
+	}
+	if matched, _, _ := actionReplaySinceLastNarration(11, 1, "other", "I take the bridge."); matched {
+		t.Fatal("different action description must not be treated as a replay")
+	}
+
+	if _, err := testDB.Exec(
+		`INSERT INTO actions (lobby_id, character_id, action_type, description, created_at) VALUES (?, NULL, ?, ?, ?)`,
+		1, "narration", "The bridge holds.", now.Add(time.Minute),
+	); err != nil {
+		t.Fatalf("insert narration: %v", err)
+	}
+	if matched, _, _ := actionReplaySinceLastNarration(11, 1, "other", "I hold the bridge."); matched {
+		t.Fatal("a new narration must end the prior exploration beat")
 	}
 }
 
