@@ -40567,7 +40567,6 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
 		return
 	}
-
 	// Clear start-of-turn conditions for current character (ending their turn)
 	currentID := entries[turnIndex].ID
 
@@ -40773,6 +40772,16 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
 		return
 	}
+	if turnIndex < 0 || turnIndex >= len(entries) || entries[turnIndex].ID < 0 {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "not_player_turn"})
+		return
+	}
+	if !turnStartedAt.Valid || time.Since(turnStartedAt.Time) < 4*time.Hour {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "turn_not_timed_out"})
+		return
+	}
 
 	skippedName := entries[turnIndex].Name
 	skippedID := entries[turnIndex].ID
@@ -40783,12 +40792,6 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 		elapsedMinutes = int(time.Since(turnStartedAt.Time).Minutes())
 	}
 
-	// Record the skip as an action
-	db.Exec(`
-		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
-		VALUES ($1, $2, 'turn_skipped', 'Turn skipped by GM due to timeout', $3)
-	`, campaignID, skippedID, fmt.Sprintf("Inactive for %d minutes", elapsedMinutes))
-
 	// Advance turn
 	turnIndex++
 	newRound := false
@@ -40797,11 +40800,30 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 		round++
 		newRound = true
 
-		// Reset reactions for all characters in campaign (start of new round)
-		db.Exec(`UPDATE characters SET reaction_used = false WHERE lobby_id = $1`, campaignID)
 	}
 
-	db.Exec("UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = NOW() WHERE lobby_id = $3", turnIndex, round, campaignID)
+	// The auto-skip worker may advance the turn after the read above. Only
+	// commit this skip if the exact turn we inspected is still current.
+	advanced, err := advanceCombatSkipIfCurrent(campaignID, (turnIndex-1+len(entries))%len(entries), turnIndex, round, turnStartedAt.Time)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "skip_failed"})
+		return
+	}
+	if !advanced {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "turn_already_advanced"})
+		return
+	}
+	if newRound {
+		// Reset reactions only after the turn transition is committed.
+		db.Exec(`UPDATE characters SET reaction_used = false WHERE lobby_id = $1`, campaignID)
+	}
+	// Record only a committed skip, never a stale request.
+	db.Exec(`
+		INSERT INTO actions (lobby_id, character_id, action_type, description, result)
+		VALUES ($1, $2, 'turn_skipped', 'Turn skipped by GM due to timeout', $3)
+	`, campaignID, skippedID, fmt.Sprintf("Inactive for %d minutes", elapsedMinutes))
 
 	// Reset action economy for the new active character
 	newActiveID := entries[turnIndex].ID
@@ -40867,6 +40889,20 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 
 	json.NewEncoder(w).Encode(response)
+}
+
+// advanceCombatSkipIfCurrent prevents a GM skip racing the automatic timeout
+// worker from advancing the following combatant's turn instead.
+func advanceCombatSkipIfCurrent(campaignID, oldIndex, newIndex, round int, startedAt time.Time) (bool, error) {
+	result, err := db.Exec(`
+		UPDATE combat_state SET current_turn_index = $1, round_number = $2, turn_started_at = $3
+		WHERE lobby_id = $4 AND current_turn_index = $5 AND turn_started_at = $6 AND active = true
+	`, newIndex, round, time.Now().UTC(), campaignID, oldIndex, startedAt)
+	if err != nil {
+		return false, err
+	}
+	updated, err := result.RowsAffected()
+	return err == nil && updated == 1, err
 }
 
 // handleExplorationStatus godoc

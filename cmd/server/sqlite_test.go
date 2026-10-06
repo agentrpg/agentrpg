@@ -40,6 +40,41 @@ CREATE TABLE characters (
 	return testDB
 }
 
+func TestSQLiteCombatSkipRejectsStaleTurn(t *testing.T) {
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = testDB
+	t.Cleanup(func() { _ = testDB.Close(); db = originalDB })
+	if _, err := db.Exec(`CREATE TABLE combat_state (
+		lobby_id INTEGER PRIMARY KEY, current_turn_index INTEGER,
+		round_number INTEGER, turn_started_at TIMESTAMP, active BOOLEAN
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now().Add(-5 * time.Hour).UTC().Truncate(time.Second)
+	if _, err := db.Exec(`INSERT INTO combat_state VALUES (6, 3, 1, ?, true)`, started); err != nil {
+		t.Fatal(err)
+	}
+	advanced, err := advanceCombatSkipIfCurrent(6, 3, 0, 2, started)
+	if err != nil || !advanced {
+		t.Fatalf("expected first skip to advance: advanced=%v err=%v", advanced, err)
+	}
+	advanced, err = advanceCombatSkipIfCurrent(6, 3, 0, 2, started)
+	if err != nil || advanced {
+		t.Fatalf("stale retry must not advance: advanced=%v err=%v", advanced, err)
+	}
+	var index, round int
+	if err := db.QueryRow(`SELECT current_turn_index, round_number FROM combat_state WHERE lobby_id = 6`).Scan(&index, &round); err != nil {
+		t.Fatal(err)
+	}
+	if index != 0 || round != 2 {
+		t.Fatalf("unexpected combat state after retry: index=%d round=%d", index, round)
+	}
+}
+
 func seedCharacter(t *testing.T, testDB *sql.DB, id int, name string, conditionsJSON string, exhaustion int) {
 	t.Helper()
 	_, err := testDB.Exec(
