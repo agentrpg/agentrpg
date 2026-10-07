@@ -12574,6 +12574,23 @@ func getMovementSpeed(race string) int {
 	return 30 // default
 }
 
+// actionableCombatCharacterID returns the current player turn, or zero when
+// the turn belongs to a monster or the stored turn order is unusable.
+func actionableCombatCharacterID(turnOrderJSON []byte, turnIndex int) int {
+	var turns []struct {
+		ID        int  `json:"id"`
+		IsMonster bool `json:"is_monster"`
+	}
+	if err := json.Unmarshal(turnOrderJSON, &turns); err != nil || turnIndex < 0 || turnIndex >= len(turns) {
+		return 0
+	}
+	turn := turns[turnIndex]
+	if turn.IsMonster || turn.ID <= 0 {
+		return 0
+	}
+	return turn.ID
+}
+
 // handleGMStatus godoc
 // @Summary Get GM status and guidance
 // @Description Returns everything the GM needs to know: what happened, who's waiting, what to do next, monster tactics.
@@ -12790,6 +12807,10 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	mustAdvance := false
 	var mustAdvanceReason string
 	var mustAdvancePlayers []string
+	currentCombatCharacterID := 0
+	if inCombat {
+		currentCombatCharacterID = actionableCombatCharacterID(turnOrderJSON, turnIndex)
+	}
 
 	for rows.Next() {
 		var id, level, hp, maxHP, ac int
@@ -12871,7 +12892,12 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 				countdowns["exploration_skip_in"] = "overdue"
 				countdowns["combat_skip_in"] = "overdue"
 				activityInfo["inactive_status"] = "abandoned"
-				mustAdvancePlayers = append(mustAdvancePlayers, name)
+				// An abandoned party member outside the current turn cannot be
+				// skipped here. In particular, removed combatants must not leave
+				// a permanent, misleading GM task behind.
+				if !inCombat || currentCombatCharacterID == id {
+					mustAdvancePlayers = append(mustAdvancePlayers, name)
+				}
 			}
 			activityInfo["countdowns"] = countdowns
 		} else {
@@ -12887,7 +12913,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		playerActivity = append(playerActivity, activityInfo)
 	}
 
-	// Set must_advance if any player exceeds 24h threshold
+	// Only request an advance when an abandoned player has an actionable turn.
 	if len(mustAdvancePlayers) > 0 {
 		mustAdvance = true
 		mustAdvanceReason = fmt.Sprintf("MUST ADVANCE: %v inactive 24h+. Story cannot wait. Skip or default their actions and move forward.", mustAdvancePlayers)
