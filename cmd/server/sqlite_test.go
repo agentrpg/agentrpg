@@ -75,6 +75,36 @@ func TestSQLiteCombatSkipRejectsStaleTurn(t *testing.T) {
 	}
 }
 
+func TestSQLiteNarratedCombatTurnResetsClock(t *testing.T) {
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = testDB
+	t.Cleanup(func() { _ = testDB.Close(); db = originalDB })
+	if _, err := db.Exec(`CREATE TABLE combat_state (
+		lobby_id INTEGER PRIMARY KEY, current_turn_index INTEGER,
+		turn_started_at TIMESTAMP, active BOOLEAN
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO combat_state VALUES (6, 1, ?, true)`, time.Now().Add(-3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := advanceNarratedCombatTurn(6); err != nil {
+		t.Fatal(err)
+	}
+	var index int
+	var started time.Time
+	if err := db.QueryRow(`SELECT current_turn_index, turn_started_at FROM combat_state WHERE lobby_id = 6`).Scan(&index, &started); err != nil {
+		t.Fatal(err)
+	}
+	if index != 2 || time.Since(started) > time.Minute {
+		t.Fatalf("narrated turn should start now: index=%d started=%s", index, started)
+	}
+}
+
 func seedCharacter(t *testing.T, testDB *sql.DB, id int, name string, conditionsJSON string, exhaustion int) {
 	t.Helper()
 	_, err := testDB.Exec(

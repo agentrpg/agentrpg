@@ -14029,6 +14029,16 @@ func resolveGMNarrationCampaignID(queryID, bodyID int, activeIDs []int) (int, er
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 403 {object} map[string]interface{} "Not the GM"
 // @Router /gm/narrate [post]
+func advanceNarratedCombatTurn(campaignID int) error {
+	_, err := db.Exec(`
+		UPDATE combat_state
+		SET current_turn_index = current_turn_index + 1,
+		    turn_started_at = CURRENT_TIMESTAMP
+		WHERE lobby_id = $1 AND active = true
+	`, campaignID)
+	return err
+}
+
 func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -14183,11 +14193,15 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 
 	// Advance turn if requested
 	if req.AdvanceTurn {
-		_, err = db.Exec(`
-			UPDATE combat_state 
-			SET current_turn_index = current_turn_index + 1
-			WHERE lobby_id = $1
-		`, campaignID)
+		// A narration that advances initiative starts a fresh turn. Keeping the
+		// previous turn's clock makes the next player immediately appear overdue
+		// and can trigger a premature nudge or automatic skip.
+		err = advanceNarratedCombatTurn(campaignID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "turn_advance_failed"})
+			return
+		}
 
 		// Check if we need to wrap around and increment round
 		var turnIndex int
