@@ -40,6 +40,54 @@ CREATE TABLE characters (
 	return testDB
 }
 
+func TestSQLiteStabilizeConsumesActionAndUpdatesOnlyDyingPatient(t *testing.T) {
+	if got := getActionResourceType("stabilize"); got != "action" {
+		t.Fatalf("stabilize resource = %q, want action", got)
+	}
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = testDB
+	t.Cleanup(func() { _ = testDB.Close(); db = originalDB })
+	_, err = db.Exec(`CREATE TABLE characters (
+		id INTEGER PRIMARY KEY, wis INTEGER, level INTEGER,
+		skill_proficiencies TEXT, expertise TEXT, hp INTEGER,
+		is_stable BOOLEAN DEFAULT false, is_dead BOOLEAN DEFAULT false,
+		death_save_successes INTEGER, death_save_failures INTEGER
+	);
+	INSERT INTO characters (id, wis, level, skill_proficiencies, expertise, hp) VALUES (1, 30, 1, 'medicine', '', 9);
+	INSERT INTO characters (id, wis, level, skill_proficiencies, expertise, hp, death_save_successes, death_save_failures)
+		VALUES (2, 10, 1, '', '', 0, 2, 1);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := resolveStabilizeAction(1, 2, "Patient")
+	if err != nil || result == "" {
+		t.Fatalf("stabilize result=%q err=%v", result, err)
+	}
+	var stable bool
+	var hp, successes, failures int
+	if err := db.QueryRow(`SELECT is_stable, hp, death_save_successes, death_save_failures FROM characters WHERE id = 2`).
+		Scan(&stable, &hp, &successes, &failures); err != nil {
+		t.Fatal(err)
+	}
+	if !stable || hp != 0 || successes != 2 || failures != 1 {
+		t.Fatalf("first aid must stabilize without healing or clearing saves: stable=%v hp=%d saves=%d/%d", stable, hp, successes, failures)
+	}
+	if _, err := db.Exec(`UPDATE characters SET is_stable = false, hp = 5, death_save_successes = 0 WHERE id = 2`); err != nil {
+		t.Fatal(err)
+	}
+	_, err = resolveStabilizeAction(1, 2, "Patient")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT is_stable FROM characters WHERE id = 2`).Scan(&stable); err != nil || stable {
+		t.Fatalf("healed patient must not become stable at positive HP: stable=%v err=%v", stable, err)
+	}
+}
+
 func TestSQLiteCombatSkipRejectsStaleTurn(t *testing.T) {
 	originalDB := db
 	testDB, err := sql.Open("sqlite3", ":memory:")

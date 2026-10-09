@@ -24600,7 +24600,7 @@ func getActionResourceType(actionType string) string {
 	actionType = strings.ToLower(actionType)
 	switch actionType {
 	// Standard actions (consume your action)
-	case "attack", "cast", "dash", "disengage", "dodge", "help", "hide", "ready", "search", "use_item", "death_save", "grapple", "shove":
+	case "attack", "cast", "dash", "disengage", "dodge", "help", "hide", "ready", "search", "use_item", "stabilize", "death_save", "grapple", "shove":
 		return "action"
 	// Bonus actions (consume bonus action - class/spell specific)
 	case "bonus_attack", "cunning_action", "offhand_attack", "second_wind", "action_surge", "rage", "bonus_cast", "frenzy_attack", "flurry_of_blows", "patient_defense", "step_of_the_wind":
@@ -24831,7 +24831,7 @@ func actionRequiresNarrative(action string) bool {
 // @Accept json
 // @Produce json
 // @Param Authorization header string true "Basic auth"
-// @Param request body object{action=string,description=string,spell_slug=string,target=string,movement_cost=int,toward_frightened_source=bool} true "Action details"
+// @Param request body object{action=string,description=string,spell_slug=string,target=string,target_character_id=int,movement_cost=int,toward_frightened_source=bool} true "Action details"
 // @Success 200 {object} map[string]interface{} "Action result with dice rolls"
 // @Failure 401 {object} map[string]interface{} "Unauthorized"
 // @Failure 400 {object} map[string]interface{} "No active game or resource exhausted"
@@ -24855,6 +24855,7 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		Result                 string `json:"result"`     // Backward-compatible narrative alias used by earlier action clients.
 		SpellSlug              string `json:"spell_slug"` // Exact spell slug for cast actions; takes precedence over description.
 		Target                 string `json:"target"`
+		TargetCharacterID      int    `json:"target_character_id"`      // Explicit party member for stabilize.
 		MovementCost           int    `json:"movement_cost"`            // feet of movement for move actions
 		TowardFrightenedSource bool   `json:"toward_frightened_source"` // v0.8.64: set true if moving toward source of fear (blocks movement)
 		CloseRange             bool   `json:"close_range"`              // v1.0.1: set true if within 5ft of hostile creature (ranged attacks have disadvantage, PHB p195)
@@ -24932,6 +24933,25 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	// caller gets a durable outcome rather than a contradictory turn failure.
 	unlockCharacterAction := lockCharacterAction(lobbyID, charID)
 	defer unlockCharacterAction()
+
+	// Validate first aid before spending the actor's action. Never infer the
+	// patient from prose: a wrong or stale target must be a harmless error.
+	stabilizeTargetName := ""
+	if req.Action == "stabilize" {
+		var hp int
+		var stable, dead bool
+		err := db.QueryRow(`SELECT name, hp, COALESCE(is_stable, false), COALESCE(is_dead, false)
+			FROM characters WHERE id = $1 AND lobby_id = $2`, req.TargetCharacterID, lobbyID).
+			Scan(&stabilizeTargetName, &hp, &stable, &dead)
+		if req.TargetCharacterID <= 0 || err != nil || hp != 0 || stable || dead || req.TargetCharacterID == charID {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false, "error": "invalid_stabilize_target",
+				"message": "target_character_id must name a different, living, dying party member at 0 HP; no action was taken.",
+			})
+			return
+		}
+	}
 
 	// CHECK: Incapacitated condition blocks ALL actions (except death saves)
 	if req.Action != "death_save" && isIncapacitated(charID) {
@@ -25081,7 +25101,18 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 		resourceUsed = resourceType
 	}
 
-	result := resolveAction(req.Action, req.Description, charID, req.SpellSlug)
+	result := ""
+	if req.Action == "stabilize" {
+		result, err = resolveStabilizeAction(charID, req.TargetCharacterID, stabilizeTargetName)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "stabilize_failed", "message": "First aid could not be recorded; no action was taken."})
+			return
+		}
+		req.Description = fmt.Sprintf("Stabilize %s (character %d): %s", stabilizeTargetName, req.TargetCharacterID, req.Description)
+	} else {
+		result = resolveAction(req.Action, req.Description, charID, req.SpellSlug)
+	}
 
 	// Consume the resource (only in combat)
 	if inCombat && resourceUsed != "" && resourceUsed != "free" {
@@ -25155,6 +25186,50 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(response)
+}
+
+// resolveStabilizeAction applies a DC 10 Wisdom (Medicine) check. Only a
+// successful check changes the patient; it does not restore HP. The conditional
+// update prevents a late check from changing someone already healed or stable.
+func resolveStabilizeAction(actorID, targetID int, targetName string) (string, error) {
+	var wisdom, level int
+	var skills, expertise string
+	if err := db.QueryRow(`SELECT wis, level, COALESCE(skill_proficiencies, ''), COALESCE(expertise, '')
+		FROM characters WHERE id = $1`, actorID).Scan(&wisdom, &level, &skills, &expertise); err != nil {
+		return "", err
+	}
+	mod := game.Modifier(wisdom)
+	proficient := false
+	for _, skill := range strings.Split(skills, ",") {
+		proficient = proficient || strings.EqualFold(strings.TrimSpace(skill), "medicine")
+	}
+	if proficient {
+		mod += game.ProficiencyBonus(level)
+	}
+	for _, skill := range strings.Split(expertise, ",") {
+		if strings.EqualFold(strings.TrimSpace(skill), "medicine") {
+			mod += game.ProficiencyBonus(level)
+			break
+		}
+	}
+	roll := game.RollDie(20)
+	total := roll + mod
+	if total < 10 {
+		return fmt.Sprintf("Medicine check for %s: %d %+d = %d vs DC 10; failed. They remain dying.", targetName, roll, mod, total), nil
+	}
+	res, err := db.Exec(`UPDATE characters SET is_stable = true WHERE id = $1 AND hp = 0
+		AND COALESCE(is_stable, false) = false AND COALESCE(is_dead, false) = false`, targetID)
+	if err != nil {
+		return "", err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if changed == 0 {
+		return fmt.Sprintf("Medicine check for %s: %d %+d = %d vs DC 10; target already recovered or stabilized. No state changed.", targetName, roll, mod, total), nil
+	}
+	return fmt.Sprintf("Medicine check for %s: %d %+d = %d vs DC 10; success. They are stable at 0 HP and no longer make death saves.", targetName, roll, mod, total), nil
 }
 
 // Check if character has a condition that grants advantage/disadvantage
