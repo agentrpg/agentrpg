@@ -3771,7 +3771,10 @@ func isFollowingParty(lastMeaningfulAction, lastFollowing sql.NullTime) bool {
 // characterHPStatus provides the concise party-status label used by GM and
 // spectator reads. A character at 0 HP who has made three successful death
 // saves is unconscious but stable, not dying.
-func characterHPStatus(hp, maxHP int, isStable bool) string {
+func characterHPStatus(hp, maxHP int, isStable, isDead bool) string {
+	if isDead {
+		return "dead"
+	}
 	if hp == 0 {
 		if isStable {
 			return "stable"
@@ -12790,7 +12793,7 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	// Get party status with last action time per character
 	rows, _ := db.Query(`
 	SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.ac,
-			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, ''), COALESCE(c.is_stable, false),
+			COALESCE(c.conditions, '[]'), COALESCE(c.concentrating_on, ''), COALESCE(c.is_stable, false), COALESCE(c.is_dead, false),
 			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type NOT IN ('poll', 'joined', 'following')) as last_action_at,
 			(SELECT MAX(created_at) FROM actions WHERE character_id = c.id AND action_type = 'following') as last_following_at
 		FROM characters c
@@ -12815,14 +12818,14 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var id, level, hp, maxHP, ac int
 		var name, class, race, concentrating string
-		var isStable bool
+		var isStable, isDead bool
 		var conditionsJSON []byte
 		var lastActionAt, lastFollowingAt sql.NullTime
-		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &isStable, &lastActionAt, &lastFollowingAt)
+		rows.Scan(&id, &name, &class, &race, &level, &hp, &maxHP, &ac, &conditionsJSON, &concentrating, &isStable, &isDead, &lastActionAt, &lastFollowingAt)
 
 		conditions := responseConditions(conditionsJSON)
 
-		status := characterHPStatus(hp, maxHP, isStable)
+		status := characterHPStatus(hp, maxHP, isStable, isDead)
 
 		charInfo := map[string]interface{}{
 			"id":     id,
