@@ -5042,12 +5042,15 @@ func autoAdvanceCombat(campaignID int, campaignName string, round int, turnIndex
 
 	// Advance turn
 	turnIndex++
-	newRound := false
-	if turnIndex >= len(entries) {
-		turnIndex = 0
-		round++
-		newRound = true
-
+	ids := make([]int, len(entries))
+	for i, entry := range entries {
+		ids[i] = entry.ID
+	}
+	var wraps int
+	turnIndex, wraps = nextLivingCombatTurn(turnIndex, ids, combatCharacterIsDead)
+	round += wraps
+	newRound := wraps > 0
+	if newRound {
 		// Reset reactions for all characters (start of new round)
 		db.Exec(`UPDATE characters SET reaction_used = false WHERE lobby_id = $1`, campaignID)
 	}
@@ -11319,6 +11322,9 @@ func handleMyTurn(w http.ResponseWriter, r *http.Request) {
 		characterInfo["is_dead"] = true
 		charStatus = "dead"
 		characterInfo["status"] = charStatus
+		isMyTurn = false
+		suggestions = []string{"Your character has died and cannot take combat actions or death saves."}
+		actions = []map[string]interface{}{}
 	}
 
 	// Add spell slots if caster
@@ -14221,14 +14227,22 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		var turnOrder []InitEntry
 		json.Unmarshal(turnOrderJSON, &turnOrder)
 
-		if turnIndex >= len(turnOrder) {
-			// New round - reset turn index and increment round
-			db.Exec(`
-				UPDATE combat_state 
-				SET current_turn_index = 0, round_number = round_number + 1
-				WHERE lobby_id = $1
-			`, campaignID)
-			turnIndex = 0
+		if len(turnOrder) == 0 {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+			return
+		}
+		ids := make([]int, len(turnOrder))
+		for i, entry := range turnOrder {
+			ids[i] = entry.ID
+		}
+		var wraps int
+		turnIndex, wraps = nextLivingCombatTurn(turnIndex, ids, combatCharacterIsDead)
+		// The initial increment above may have reached the end or a dead
+		// character. Persist the eligible slot before resetting it.
+		db.Exec(`UPDATE combat_state SET current_turn_index = $1,
+			round_number = round_number + $2 WHERE lobby_id = $3`, turnIndex, wraps, campaignID)
+		if wraps > 0 {
 
 			// Reset reactions for all characters in campaign (start of new round)
 			db.Exec(`
@@ -24936,6 +24950,22 @@ func handleAction(w http.ResponseWriter, r *http.Request) {
 	// caller gets a durable outcome rather than a contradictory turn failure.
 	unlockCharacterAction := lockCharacterAction(lobbyID, charID)
 	defer unlockCharacterAction()
+
+	// A dead character must never act, even if a stale initiative entry still
+	// points to them. A stable or conscious character cannot roll death saves.
+	var actorHP int
+	var actorStable, actorDead bool
+	if err := db.QueryRow(`SELECT hp, COALESCE(is_stable, false), COALESCE(is_dead, false)
+		FROM characters WHERE id = $1`, charID).Scan(&actorHP, &actorStable, &actorDead); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "character_lookup_failed"})
+		return
+	}
+	if errorCode := characterActionBlock(req.Action, actorHP, actorStable, actorDead); errorCode != "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": errorCode, "message": "This character cannot take that action; no action was recorded."})
+		return
+	}
 
 	// Validate first aid before spending the actor's action. Never infer the
 	// patient from prose: a wrong or stale target must be a harmless error.
@@ -40587,6 +40617,46 @@ func clearCombatInitiative(campaignID int) error {
 	return err
 }
 
+// nextLivingCombatTurn advances initiative without giving a turn to a dead
+// character. Monsters (negative IDs) remain eligible. rounds counts wraps.
+// The caller supplies the death lookup so the rule can be regression-tested.
+func nextLivingCombatTurn(candidate int, ids []int, isDead func(int) bool) (index, rounds int) {
+	if len(ids) == 0 {
+		return 0, 0
+	}
+	for checked := 0; checked < len(ids); checked++ {
+		if candidate >= len(ids) {
+			candidate = 0
+			rounds++
+		}
+		if ids[candidate] < 0 || !isDead(ids[candidate]) {
+			return candidate, rounds
+		}
+		candidate++
+	}
+	// No eligible combatant remains. Keep the current slot rather than
+	// manufacturing a new round or mutating combat state unexpectedly.
+	return candidate % len(ids), rounds
+}
+
+func combatCharacterIsDead(id int) bool {
+	var dead bool
+	if err := db.QueryRow(`SELECT COALESCE(is_dead, false) FROM characters WHERE id = $1`, id).Scan(&dead); err != nil {
+		return false // Do not skip an entry on an uncertain database read.
+	}
+	return dead
+}
+
+func characterActionBlock(action string, hp int, stable, dead bool) string {
+	if dead {
+		return "character_dead"
+	}
+	if action == "death_save" && (hp != 0 || stable) {
+		return "death_save_unavailable"
+	}
+	return ""
+}
+
 // handleCombatEnd godoc
 // @Summary End combat (GM only)
 // @Description End combat mode and clear initiative
@@ -40746,6 +40816,14 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 				// turnIndex is already 0, which is correct for round 2
 			}
 		}
+	}
+	ids := make([]int, len(entries))
+	for i, entry := range entries {
+		ids[i] = entry.ID
+	}
+	if nextIndex, wraps := nextLivingCombatTurn(turnIndex, ids, combatCharacterIsDead); nextIndex != turnIndex || wraps > 0 {
+		turnIndex = nextIndex
+		round += wraps
 	}
 
 	// Reset legendary actions if the new turn is a monster with legendary actions (v0.8.30)
@@ -40912,13 +40990,14 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 
 	// Advance turn
 	turnIndex++
-	newRound := false
-	if turnIndex >= len(entries) {
-		turnIndex = 0
-		round++
-		newRound = true
-
+	ids := make([]int, len(entries))
+	for i, entry := range entries {
+		ids[i] = entry.ID
 	}
+	var wraps int
+	turnIndex, wraps = nextLivingCombatTurn(turnIndex, ids, combatCharacterIsDead)
+	round += wraps
+	newRound := wraps > 0
 
 	// The auto-skip worker may advance the turn after the read above. Only
 	// commit this skip if the exact turn we inspected is still current.
