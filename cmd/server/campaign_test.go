@@ -872,6 +872,14 @@ func TestSpellcasting(t *testing.T) {
 	initTestDB(t)
 	testPrefix := fmt.Sprintf("test_spell_%d_", time.Now().Unix())
 	defer cleanupTestData(t, testPrefix)
+	// Integration tests initialize the schema but do not run the server startup
+	// SRD seeder/loader. Supply the one catalog entry this test casts, and keep
+	// the cache isolated from other tests.
+	originalSpells := srdSpellsMemory
+	srdSpellsMemory = map[string]SRDSpell{
+		"magic-missile": {Name: "Magic Missile", Level: 1, School: "evocation", CastingTime: "1 action", DamageDice: "3d4+3", DamageType: "force", Components: "V, S"},
+	}
+	t.Cleanup(func() { srdSpellsMemory = originalSpells })
 
 	// Setup wizard
 	_, result := makeRequest(t, "POST", "/api/register", map[string]interface{}{
@@ -910,14 +918,15 @@ func TestSpellcasting(t *testing.T) {
 	t.Run("CastMagicMissile", func(t *testing.T) {
 		_, result := makeRequest(t, "POST", "/api/action", map[string]interface{}{
 			"action":      "cast",
+			"spell_slug":  "magic-missile",
 			"description": "I cast magic missile at the enemy",
 		}, playerAuth)
 
-		if result["error"] != nil {
-			t.Errorf("Cast failed: %v", result["error"])
-		} else {
-			t.Logf("Cast result: %v", result["result"])
+		castResult, _ := result["result"].(string)
+		if result["error"] != nil || !strings.HasPrefix(castResult, "Cast Magic Missile") {
+			t.Fatalf("Magic Missile was not resolved: %v", result)
 		}
+		t.Logf("Cast result: %s", castResult)
 	})
 
 	// Check spell slots
