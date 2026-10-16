@@ -40,6 +40,32 @@ CREATE TABLE characters (
 	return testDB
 }
 
+func TestAbandonedPlayerAdvanceRequiresSkippableCombatTurn(t *testing.T) {
+	now := time.Date(2026, 10, 16, 5, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		inCombat  bool
+		currentID int
+		playerID  int
+		started   sql.NullTime
+		want      bool
+	}{
+		{"exploration", false, 0, 32, sql.NullTime{}, true},
+		{"fresh current turn", true, 32, 32, sql.NullTime{Time: now.Add(-time.Hour), Valid: true}, false},
+		{"exact timeout", true, 32, 32, sql.NullTime{Time: now.Add(-4 * time.Hour), Valid: true}, true},
+		{"other player", true, 35, 32, sql.NullTime{Time: now.Add(-5 * time.Hour), Valid: true}, false},
+		{"monster turn", true, 0, 32, sql.NullTime{Time: now.Add(-5 * time.Hour), Valid: true}, false},
+		{"missing clock", true, 32, 32, sql.NullTime{}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldAdvanceAbandonedPlayer(tc.inCombat, tc.currentID, tc.playerID, tc.started, now); got != tc.want {
+				t.Fatalf("shouldAdvanceAbandonedPlayer() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSQLiteStabilizeConsumesActionAndUpdatesOnlyDyingPatient(t *testing.T) {
 	if got := getActionResourceType("stabilize"); got != "action" {
 		t.Fatalf("stabilize resource = %q, want action", got)

@@ -12901,11 +12901,26 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 				countdowns["exploration_skip_in"] = "overdue"
 				countdowns["combat_skip_in"] = "overdue"
 				activityInfo["inactive_status"] = "abandoned"
-				// An abandoned party member outside the current turn cannot be
-				// skipped here. In particular, removed combatants must not leave
-				// a permanent, misleading GM task behind.
-				if !inCombat || currentCombatCharacterID == id {
+				// The GM combat skip endpoint requires four hours on this exact
+				// turn. Old player activity alone cannot make a fresh turn skippable.
+				if shouldAdvanceAbandonedPlayer(inCombat, currentCombatCharacterID, id, turnStartedAt, time.Now()) {
 					mustAdvancePlayers = append(mustAdvancePlayers, name)
+				}
+			}
+			if inCombat {
+				// Skip eligibility is measured from the current turn, not the
+				// player's last action on a previous turn.
+				if currentCombatCharacterID != id {
+					countdowns["combat_skip_in"] = "not current turn"
+				} else if turnStartedAt.Valid {
+					remaining := 4*time.Hour - time.Since(turnStartedAt.Time)
+					if remaining > 0 {
+						countdowns["combat_skip_in"] = formatDuration(remaining)
+					} else {
+						countdowns["combat_skip_in"] = "overdue"
+					}
+				} else {
+					countdowns["combat_skip_in"] = "unknown (turn clock unavailable)"
 				}
 			}
 			activityInfo["countdowns"] = countdowns
@@ -13619,6 +13634,14 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 	response["needs_attention"] = needsAttention
 
 	json.NewEncoder(w).Encode(response)
+}
+
+func shouldAdvanceAbandonedPlayer(inCombat bool, currentCombatCharacterID, characterID int, turnStartedAt sql.NullTime, now time.Time) bool {
+	if !inCombat {
+		return true
+	}
+	return currentCombatCharacterID == characterID && turnStartedAt.Valid &&
+		now.Sub(turnStartedAt.Time) >= 4*time.Hour
 }
 
 // getMonsterBehavior returns behavioral notes for a monster type
