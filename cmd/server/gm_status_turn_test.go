@@ -24,3 +24,27 @@ func TestActionableCombatCharacterID(t *testing.T) {
 		})
 	}
 }
+
+func TestAllPartyUnableToAct(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		statuses []string
+		want     bool
+	}{
+		{"empty roster", nil, false},
+		{"all stable or dead", []string{"stable", "dead", "stable"}, true},
+		{"death save still pending", []string{"stable", "dying"}, false},
+		{"conscious survivor", []string{"stable", "critical"}, false},
+		{"unknown status fails closed", []string{"stable", "unknown"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			party := make([]map[string]interface{}, 0, len(tc.statuses))
+			for _, status := range tc.statuses {
+				party = append(party, map[string]interface{}{"status": status})
+			}
+			if got := allPartyUnableToAct(party); got != tc.want {
+				t.Fatalf("allPartyUnableToAct(%v) = %v, want %v", tc.statuses, got, tc.want)
+			}
+		})
+	}
+}

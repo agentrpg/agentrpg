@@ -3790,6 +3790,22 @@ func characterHPStatus(hp, maxHP int, isStable, isDead bool) string {
 	return "healthy"
 }
 
+// allPartyUnableToAct detects encounters that cannot progress through player
+// turns. Stable characters at zero HP remain unconscious; dead characters
+// cannot take turns either. An empty roster is not a party defeat.
+func allPartyUnableToAct(party []map[string]interface{}) bool {
+	if len(party) == 0 {
+		return false
+	}
+	for _, character := range party {
+		status, ok := character["status"].(string)
+		if !ok || (status != "stable" && status != "dead") {
+			return false
+		}
+	}
+	return true
+}
+
 func lastNarrationTime(lobbyID int) time.Time {
 	var ts sql.NullTime
 	db.QueryRow(`
@@ -13531,6 +13547,28 @@ func handleGMStatus(w http.ResponseWriter, r *http.Request) {
 		}
 
 		response["combat"] = combatInfo
+	}
+	if inCombat && allPartyUnableToAct(partyStatus) {
+		// A timed skip cannot revive an unconscious party. Give the GM an
+		// explicit, supported way to adjudicate the encounter instead of
+		// repeatedly advancing unactable turns.
+		delete(response, "skip_required")
+		delete(response, "skip_required_player")
+		delete(response, "auto_skip_countdown")
+		if combatInfo, ok := response["combat"].(map[string]interface{}); ok {
+			delete(combatInfo, "skip_required")
+			delete(combatInfo, "nudge_recommended")
+			delete(combatInfo, "auto_skip_countdown")
+			combatInfo["party_defeated"] = true
+		}
+		whatToDoNext = map[string]interface{}{
+			"action_required": "resolve_incapacitated_party",
+			"instruction":     "No party member can act. Adjudicate defeat, capture, or a supported rescue; then end combat rather than skipping unconscious turns. Do not restore HP without a game-world cause.",
+			"endpoint":        fmt.Sprintf("POST /api/campaigns/%d/combat/end", campaignID),
+			"urgency":         "critical",
+		}
+		gmTasks = []string{"⚠️ All party members are incapacitated. Resolve the encounter and end combat; do not keep skipping turns."}
+		needsAttention = true
 	}
 
 	// Add how_to_narrate instructions
