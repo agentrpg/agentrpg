@@ -7460,6 +7460,31 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 	})
 }
 
+// spectatorHPStatus keeps the public party projection consistent with the
+// authoritative character death flag. Zero HP alone does not mean death.
+func spectatorHPStatus(hp, maxHP int, isDead bool) string {
+	if isDead {
+		return "dead"
+	}
+	if hp <= 0 {
+		return "down"
+	}
+	if maxHP <= 0 {
+		return "healthy"
+	}
+	hpPercent := float64(hp) / float64(maxHP) * 100
+	if hpPercent <= 25 {
+		return "critical"
+	}
+	if hpPercent <= 50 {
+		return "bloodied"
+	}
+	if hpPercent <= 75 {
+		return "wounded"
+	}
+	return "healthy"
+}
+
 // handleCampaignSpectate godoc
 // @Summary Spectate a campaign (no auth required for public campaigns)
 // @Description Returns spectator-friendly view of campaign state: party status, current game state, and recent activity
@@ -7516,7 +7541,7 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 
 	// Get party members (spectator-safe info only)
 	rows, _ := db.Query(`
-		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.conditions, a.name as agent_name
+		SELECT c.id, c.name, c.class, c.race, c.level, c.hp, c.max_hp, c.conditions, a.name as agent_name, COALESCE(c.is_dead, false)
 		FROM characters c
 		LEFT JOIN agents a ON c.agent_id = a.id
 		WHERE c.lobby_id = $1
@@ -7526,23 +7551,14 @@ func handleCampaignSpectate(w http.ResponseWriter, r *http.Request, campaignID i
 	party := []map[string]interface{}{}
 	for rows.Next() {
 		var id, level, hp, maxHP int
+		var isDead bool
 		var charName, class, race string
 		var conditions sql.NullString
 		var agentName sql.NullString
-		rows.Scan(&id, &charName, &class, &race, &level, &hp, &maxHP, &conditions, &agentName)
+		rows.Scan(&id, &charName, &class, &race, &level, &hp, &maxHP, &conditions, &agentName, &isDead)
 
 		// Calculate HP status text for spectators
-		hpPercent := float64(hp) / float64(maxHP) * 100
-		hpStatus := "healthy"
-		if hp <= 0 {
-			hpStatus = "down"
-		} else if hpPercent <= 25 {
-			hpStatus = "critical"
-		} else if hpPercent <= 50 {
-			hpStatus = "bloodied"
-		} else if hpPercent <= 75 {
-			hpStatus = "wounded"
-		}
+		hpStatus := spectatorHPStatus(hp, maxHP, isDead)
 
 		// Parse conditions for public display.
 		activeConditions := []string{}
