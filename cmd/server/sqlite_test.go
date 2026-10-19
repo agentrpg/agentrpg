@@ -4,12 +4,48 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/agentrpg/agentrpg/game"
 	_ "github.com/mattn/go-sqlite3"
 )
+
+func TestSQLiteDeadCharacterCannotLongRest(t *testing.T) {
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = testDB
+	t.Cleanup(func() { _ = testDB.Close(); db = originalDB })
+	_, err = db.Exec(`CREATE TABLE characters (
+		id INTEGER PRIMARY KEY, class TEXT, level INTEGER, con INTEGER, wis INTEGER,
+		hit_dice_spent INTEGER, exhaustion_level INTEGER, last_long_rest TIMESTAMP,
+		subclass TEXT, is_dead BOOLEAN, hp INTEGER, max_hp INTEGER
+	);
+	INSERT INTO characters (id, class, level, con, wis, is_dead, hp, max_hp)
+	VALUES (34, 'wizard', 1, 10, 14, true, 0, 7);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	handleRest(w, httptest.NewRequest(http.MethodPost, "/api/characters/34/rest", nil), 34)
+	if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "dead_character_cannot_rest") {
+		t.Fatalf("dead rest response: status %d, body %s", w.Code, w.Body.String())
+	}
+	var hp int
+	var lastRest sql.NullTime
+	if err := db.QueryRow("SELECT hp, last_long_rest FROM characters WHERE id = 34").Scan(&hp, &lastRest); err != nil {
+		t.Fatal(err)
+	}
+	if hp != 0 || lastRest.Valid {
+		t.Fatalf("dead rest mutated character: hp=%d, last_rest=%v", hp, lastRest)
+	}
+}
 
 func setupSQLiteTestDB(t *testing.T) *sql.DB {
 	t.Helper()

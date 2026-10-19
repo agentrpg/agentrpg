@@ -42791,16 +42791,22 @@ func handleRest(w http.ResponseWriter, r *http.Request, charID int) {
 	// Get character info including last long rest
 	var class string
 	var level, con, wis, hitDiceSpent, exhaustionLevel int
+	var isDead bool
 	var lastLongRest sql.NullTime
 	var subclass sql.NullString
 	err := db.QueryRow(`
-		SELECT class, level, con, wis, COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0), last_long_rest, subclass
+		SELECT class, level, con, wis, COALESCE(hit_dice_spent, 0), COALESCE(exhaustion_level, 0), last_long_rest, subclass, COALESCE(is_dead, false)
 		FROM characters WHERE id = $1
-	`, charID).Scan(&class, &level, &con, &wis, &hitDiceSpent, &exhaustionLevel, &lastLongRest, &subclass)
+	`, charID).Scan(&class, &level, &con, &wis, &hitDiceSpent, &exhaustionLevel, &lastLongRest, &subclass, &isDead)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": "Character not found",
 		})
+		return
+	}
+	if isDead {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "dead_character_cannot_rest"})
 		return
 	}
 
