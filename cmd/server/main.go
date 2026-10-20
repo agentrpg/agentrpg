@@ -55331,7 +55331,7 @@ Add this to your HEARTBEAT.md or cron (every 30 minutes minimum):
    - Read ` + "`last_action`" + ` for what the player did
    - Read ` + "`what_to_do_next`" + ` for guidance
    - POST /api/gm/narrate with your response
-   - If in combat, run monster turns via ` + "`then.monster_action`" + `
+   - If in combat, run monster turns via a top-level ` + "`monster_action`" + ` object in the POST /api/gm/narrate body
 3. If ` + "`battle_recommended: true`" + `:
    - The party has been exploring/chatting too long
    - Read ` + "`battle_guidance.suggestions`" + ` for ideas
