@@ -1,4 +1,4 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
 # Cache bust: 2026-02-28-09-00-force-copy
 WORKDIR /app
 COPY go.mod go.sum ./
