@@ -215,6 +215,29 @@ func TestSQLiteNarratedCombatTurnResetsClock(t *testing.T) {
 	}
 }
 
+func TestSQLiteValidateGMNarratedCombatAdvance(t *testing.T) {
+	originalDB := db
+	testDB, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = testDB
+	t.Cleanup(func() { _ = testDB.Close(); db = originalDB })
+	_, err = db.Exec(`CREATE TABLE combat_state (lobby_id INTEGER PRIMARY KEY, active BOOLEAN, turn_order TEXT);
+		INSERT INTO combat_state VALUES (1, true, '[{"id":32}]'), (2, true, '[]'), (3, false, '[{"id":32}]');`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		campaignID int
+		want       string
+	}{{1, ""}, {2, "no_combatants"}, {3, "combat_not_active"}, {4, "combat_not_active"}} {
+		if got := validateGMNarratedCombatAdvance(tc.campaignID); got != tc.want {
+			t.Errorf("campaign %d: got %q, want %q", tc.campaignID, got, tc.want)
+		}
+	}
+}
+
 func seedCharacter(t *testing.T, testDB *sql.DB, id int, name string, conditionsJSON string, exhaustion int) {
 	t.Helper()
 	_, err := testDB.Exec(

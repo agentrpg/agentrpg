@@ -14125,6 +14125,22 @@ func advanceNarratedCombatTurn(campaignID int) error {
 	return err
 }
 
+// Validate the optional initiative advance before recording any narration or
+// monster action. Otherwise a 409 can leave a successful-looking narrative
+// write behind even though no turn could be advanced.
+func validateGMNarratedCombatAdvance(campaignID int) string {
+	var active bool
+	var orderJSON []byte
+	if err := db.QueryRow(`SELECT active, turn_order FROM combat_state WHERE lobby_id = $1`, campaignID).Scan(&active, &orderJSON); err != nil || !active {
+		return "combat_not_active"
+	}
+	var order []json.RawMessage
+	if err := json.Unmarshal(orderJSON, &order); err != nil || len(order) == 0 {
+		return "no_combatants"
+	}
+	return ""
+}
+
 func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -14200,6 +14216,13 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 			"message": "Specify one active campaign_id in the query or JSON body; the two values must agree.",
 		})
 		return
+	}
+	if req.AdvanceTurn {
+		if advanceErr := validateGMNarratedCombatAdvance(campaignID); advanceErr != "" {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": advanceErr, "narration_recorded": false})
+			return
+		}
 	}
 	response := map[string]interface{}{"success": true, "campaign_id": campaignID}
 
