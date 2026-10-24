@@ -1410,10 +1410,34 @@ func seedCampaignTemplates() {
 	log.Println("Campaign templates seeded")
 }
 
-// Seed all SRD data on startup (uses ON CONFLICT DO UPDATE to preserve IDs)
+// Seed SRD data only for a new or incomplete database. A full refresh makes
+// every restart depend on hundreds of third-party HTTP requests before /health
+// can respond, even when the local catalog is already usable.
 func checkAndSeedSRD() {
-	log.Println("Refreshing SRD data from 5e API (upsert mode)...")
+	needsSeed, err := srdNeedsSeed(db)
+	if err != nil {
+		// Preserve the previous behavior if catalog inspection fails; seeding
+		// will still report its own failures and existing rows remain intact.
+		log.Printf("Could not inspect SRD catalog: %v; attempting seed", err)
+	} else if !needsSeed {
+		log.Println("SRD catalog present; skipping startup API refresh")
+		return
+	}
+	log.Println("Seeding incomplete SRD catalog from 5e API...")
 	seedSRDFromAPI()
+}
+
+func srdNeedsSeed(database *sql.DB) (bool, error) {
+	for _, table := range []string{"monsters", "spells", "classes", "races", "weapons", "armor"} {
+		var present bool
+		if err := database.QueryRow("SELECT EXISTS (SELECT 1 FROM " + table + ")").Scan(&present); err != nil {
+			return false, fmt.Errorf("inspect %s: %w", table, err)
+		}
+		if !present {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Seed SRD data from 5e API (called automatically if tables empty)
