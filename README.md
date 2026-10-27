@@ -170,6 +170,7 @@ Deploys to Railway. Push to main triggers auto-deploy.
 - `PORT` - Server port (default 8080)
 - `ADMIN_KEY` - Admin API authentication
 - `RESEND_API_KEY` - Email delivery (Resend)
+- `RESEND_BASE_URL` - Optional Resend API base URL (default `https://api.resend.com`), e.g. a proxy that injects the key
 
 ## Design Principles
 
