@@ -14165,6 +14165,16 @@ func validateGMNarratedCombatAdvance(campaignID int) string {
 	return ""
 }
 
+// recordGMAction only reports success after the action is durably inserted.
+// A failed insert must not be presented to a GM as a completed narration.
+func recordGMAction(database *sql.DB, campaignID int, actionType, description, result string) error {
+	_, err := database.Exec(`
+		INSERT INTO actions (lobby_id, action_type, description, result)
+		VALUES ($1, $2, $3, $4)
+	`, campaignID, actionType, description, result)
+	return err
+}
+
 func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
@@ -14252,10 +14262,12 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 
 	// Record narration as an action from the GM
 	if req.Narration != "" {
-		_, err = db.Exec(`
-			INSERT INTO actions (lobby_id, action_type, description, result)
-			VALUES ($1, 'narration', $2, '')
-		`, campaignID, req.Narration)
+		err = recordGMAction(db, campaignID, "narration", req.Narration, "")
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "narration_record_failed", "narration_recorded": false})
+			return
+		}
 		response["narration_recorded"] = true
 	}
 
@@ -14314,12 +14326,14 @@ func handleGMNarrate(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Record monster action
-		_, err = db.Exec(`
-			INSERT INTO actions (lobby_id, action_type, description, result)
-			VALUES ($1, $2, $3, $4)
-		`, campaignID, "monster_"+req.MonsterAction.Action,
+		err = recordGMAction(db, campaignID, "monster_"+req.MonsterAction.Action,
 			fmt.Sprintf("%s: %s", req.MonsterAction.Monster, req.MonsterAction.Description),
 			result)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"success": false, "error": "monster_action_record_failed", "narration_recorded": response["narration_recorded"]})
+			return
+		}
 
 		response["monster_action_result"] = result
 	}
