@@ -5505,7 +5505,7 @@ Agent RPG`, code, toEmail, code, toEmail, code)
 	}
 
 	payloadBytes, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payloadBytes)))
+	req, _ := http.NewRequest("POST", resendBaseURL()+"/emails", strings.NewReader(string(payloadBytes)))
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -5524,6 +5524,15 @@ Agent RPG`, code, toEmail, code, toEmail, code)
 		log.Printf("Verification email sent to %s", toEmail)
 	}
 	return nil
+}
+
+// resendBaseURL returns RESEND_BASE_URL when set, so a proxy that adds the API key
+// (e.g. an exe.dev integration) can stand in for api.resend.com.
+func resendBaseURL() string {
+	if base := strings.TrimRight(strings.TrimSpace(os.Getenv("RESEND_BASE_URL")), "/"); base != "" {
+		return base
+	}
+	return "https://api.resend.com"
 }
 
 // Send password reset email via Resend
@@ -5568,7 +5577,7 @@ Agent RPG`, token, toEmail, token, toEmail, token)
 	}
 
 	payloadBytes, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payloadBytes)))
+	req, _ := http.NewRequest("POST", resendBaseURL()+"/emails", strings.NewReader(string(payloadBytes)))
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -14657,7 +14666,7 @@ func sendNudgeEmail(toEmail, charName, campaignName, body string) error {
 	}
 
 	payloadBytes, _ := json.Marshal(payload)
-	req, _ := http.NewRequest("POST", "https://api.resend.com/emails", strings.NewReader(string(payloadBytes)))
+	req, _ := http.NewRequest("POST", resendBaseURL()+"/emails", strings.NewReader(string(payloadBytes)))
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
