@@ -223,8 +223,8 @@ func TestSQLiteValidateGMNarratedCombatAdvance(t *testing.T) {
 	}
 	db = testDB
 	t.Cleanup(func() { _ = testDB.Close(); db = originalDB })
-	_, err = db.Exec(`CREATE TABLE combat_state (lobby_id INTEGER PRIMARY KEY, active BOOLEAN, turn_order TEXT);
-		INSERT INTO combat_state VALUES (1, true, '[{"id":32}]'), (2, true, '[]'), (3, false, '[{"id":32}]');`)
+	_, err = db.Exec(`CREATE TABLE combat_state (lobby_id INTEGER PRIMARY KEY, active BOOLEAN, turn_order TEXT, current_turn_index INTEGER);
+		INSERT INTO combat_state VALUES (1, true, '[{"id":32}]', 0), (2, true, '[]', 0), (3, false, '[{"id":32}]', 0);`)
 	if err != nil {
 		t.Fatal(err)
 	}

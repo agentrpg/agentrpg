@@ -5064,7 +5064,7 @@ func autoAdvanceCombat(campaignID int, campaignName string, round int, turnIndex
 	var entries []InitEntry
 	json.Unmarshal(turnOrderJSON, &entries)
 
-	if len(entries) == 0 || turnIndex >= len(entries) {
+	if len(entries) == 0 || turnIndex < 0 || turnIndex >= len(entries) {
 		return 0
 	}
 
@@ -14163,13 +14163,17 @@ func advanceNarratedCombatTurn(campaignID int) error {
 // write behind even though no turn could be advanced.
 func validateGMNarratedCombatAdvance(campaignID int) string {
 	var active bool
+	var turnIndex int
 	var orderJSON []byte
-	if err := db.QueryRow(`SELECT active, turn_order FROM combat_state WHERE lobby_id = $1`, campaignID).Scan(&active, &orderJSON); err != nil || !active {
+	if err := db.QueryRow(`SELECT active, turn_order, current_turn_index FROM combat_state WHERE lobby_id = $1`, campaignID).Scan(&active, &orderJSON, &turnIndex); err != nil || !active {
 		return "combat_not_active"
 	}
 	var order []json.RawMessage
 	if err := json.Unmarshal(orderJSON, &order); err != nil || len(order) == 0 {
 		return "no_combatants"
+	}
+	if turnIndex < 0 || turnIndex >= len(order) {
+		return "invalid_combat_turn"
 	}
 	return ""
 }
@@ -40900,6 +40904,13 @@ func handleCombatNext(w http.ResponseWriter, r *http.Request, campaignID int) {
 
 	if len(entries) == 0 {
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+		return
+	}
+	// Preserve inconsistent initiative for repair instead of panicking or
+	// guessing which character's turn should be consumed.
+	if turnIndex < 0 || turnIndex >= len(entries) {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_combat_turn"})
 		return
 	}
 	// Clear start-of-turn conditions for current character (ending their turn)
