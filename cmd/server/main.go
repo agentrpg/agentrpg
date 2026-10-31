@@ -41105,7 +41105,7 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 	var active bool
 	var turnStartedAt sql.NullTime
 	err = db.QueryRow(`
-		SELECT round_number, current_turn_index, turn_order, active, COALESCE(turn_started_at, NOW())
+		SELECT round_number, current_turn_index, turn_order, active, turn_started_at
 		FROM combat_state WHERE lobby_id = $1
 	`, campaignID).Scan(&round, &turnIndex, &turnOrderJSON, &active, &turnStartedAt)
 
@@ -41147,6 +41147,7 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 	}
 
 	// Advance turn
+	oldTurnIndex := turnIndex
 	turnIndex++
 	ids := make([]int, len(entries))
 	for i, entry := range entries {
@@ -41159,7 +41160,7 @@ func handleCombatSkip(w http.ResponseWriter, r *http.Request, campaignID int) {
 
 	// The auto-skip worker may advance the turn after the read above. Only
 	// commit this skip if the exact turn we inspected is still current.
-	advanced, err := advanceCombatSkipIfCurrent(campaignID, (turnIndex-1+len(entries))%len(entries), turnIndex, round, turnStartedAt.Time)
+	advanced, err := advanceCombatSkipIfCurrent(campaignID, oldTurnIndex, turnIndex, round, turnStartedAt.Time)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]interface{}{"error": "skip_failed"})
