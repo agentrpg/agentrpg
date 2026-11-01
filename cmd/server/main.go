@@ -41776,7 +41776,16 @@ func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) 
 		AC         int    `json:"ac"`
 	}
 	var entries []InitEntry
-	json.Unmarshal(turnOrderJSON, &entries)
+	if err := json.Unmarshal(turnOrderJSON, &entries); err != nil || len(entries) == 0 {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+		return
+	}
+	if turnIndex < 0 || turnIndex >= len(entries) {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_combat_turn"})
+		return
+	}
 
 	// Find and remove the combatant
 	var removed *InitEntry
@@ -41817,7 +41826,11 @@ func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) 
 
 	if len(newEntries) == 0 {
 		// No combatants left, end combat
-		db.Exec("UPDATE combat_state SET active = false WHERE lobby_id = $1", campaignID)
+		if err := clearCombatInitiative(campaignID); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "combat_end_failed"})
+			return
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":      true,
 			"removed":      removed.Name,
