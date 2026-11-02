@@ -41551,13 +41551,19 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 		LegendaryActionsUsed  int    `json:"legendary_actions_used"`     // How many used this round (v0.8.30)
 	}
 	var entries []InitEntry
-	json.Unmarshal(turnOrderJSON, &entries)
-
-	// Track who was current before adding
-	var currentTurnName string
-	if len(entries) > turnIndex && turnIndex >= 0 {
-		currentTurnName = entries[turnIndex].Name
+	if err := json.Unmarshal(turnOrderJSON, &entries); err != nil || len(entries) == 0 {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+		return
 	}
+	if turnIndex < 0 || turnIndex >= len(entries) {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_combat_turn"})
+		return
+	}
+
+	// Names need not be unique (for example, several Goblins). Preserve identity.
+	currentTurnID := entries[turnIndex].ID
 
 	// Find highest existing monster ID (monsters use negative IDs)
 	minID := 0
@@ -41677,7 +41683,7 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 	// Find where the current turn holder ended up after re-sort
 	newTurnIndex := 0
 	for i, e := range entries {
-		if e.Name == currentTurnName {
+		if e.ID == currentTurnID {
 			newTurnIndex = i
 			break
 		}
