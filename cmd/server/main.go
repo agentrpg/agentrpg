@@ -41794,6 +41794,15 @@ func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) 
 	}
 
 	// Find and remove the combatant
+	// Keep the original JSON for retained combatants: the projection above
+	// omits legendary resources and may not know about future metadata.
+	var rawEntries []json.RawMessage
+	if err := json.Unmarshal(turnOrderJSON, &rawEntries); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+		return
+	}
+	retainedEntries := []json.RawMessage{}
 	var removed *InitEntry
 	var removedIdx int
 	newEntries := []InitEntry{}
@@ -41810,6 +41819,7 @@ func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) 
 			removedIdx = i
 		} else {
 			newEntries = append(newEntries, e)
+			retainedEntries = append(retainedEntries, rawEntries[i])
 		}
 	}
 
@@ -41847,7 +41857,7 @@ func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) 
 	}
 
 	// Update combat state
-	updatedJSON, _ := json.Marshal(newEntries)
+	updatedJSON, _ := json.Marshal(retainedEntries)
 	db.Exec(`
 		UPDATE combat_state SET turn_order = $1, current_turn_index = $2, round_number = $3 WHERE lobby_id = $4
 	`, updatedJSON, newTurnIndex, round, campaignID)
@@ -41856,7 +41866,7 @@ func handleCombatRemove(w http.ResponseWriter, r *http.Request, campaignID int) 
 		"success":      true,
 		"removed":      removed.Name,
 		"removed_id":   removed.ID,
-		"turn_order":   newEntries,
+		"turn_order":   retainedEntries,
 		"current_turn": newEntries[newTurnIndex].Name,
 	})
 }
