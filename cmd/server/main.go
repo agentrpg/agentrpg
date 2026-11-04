@@ -41562,6 +41562,19 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 		return
 	}
 
+	// Keep original JSON for existing combatants. The typed projection is only
+	// used for sorting; serializing it would discard conditions and future fields.
+	var originalEntries []json.RawMessage
+	if err := json.Unmarshal(turnOrderJSON, &originalEntries); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "no_combatants"})
+		return
+	}
+	originalByID := make(map[int]json.RawMessage, len(entries))
+	for i, entry := range entries {
+		originalByID[entry.ID] = originalEntries[i]
+	}
+
 	// Names need not be unique (for example, several Goblins). Preserve identity.
 	currentTurnID := entries[turnIndex].ID
 
@@ -41689,8 +41702,18 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 		}
 	}
 
+	// Preserve untouched entries in persistence and response after sorting.
+	preservedEntries := make([]json.RawMessage, len(entries))
+	for i, entry := range entries {
+		if original, ok := originalByID[entry.ID]; ok {
+			preservedEntries[i] = original
+		} else {
+			preservedEntries[i], _ = json.Marshal(entry)
+		}
+	}
+
 	// Update combat state
-	updatedJSON, _ := json.Marshal(entries)
+	updatedJSON, _ := json.Marshal(preservedEntries)
 	db.Exec(`
 		UPDATE combat_state SET turn_order = $1, current_turn_index = $2 WHERE lobby_id = $3
 	`, updatedJSON, newTurnIndex, campaignID)
@@ -41699,7 +41722,7 @@ func handleCombatAdd(w http.ResponseWriter, r *http.Request, campaignID int) {
 		"success":          true,
 		"added_count":      len(added),
 		"combatants_added": added,
-		"turn_order":       entries,
+		"turn_order":       preservedEntries,
 		"current_turn":     entries[newTurnIndex].Name,
 	})
 }

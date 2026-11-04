@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -31,6 +32,7 @@ func TestSQLiteCombatAddPreservesHolderAndRejectsInvalidState(t *testing.T) {
 		name, order, wantError string
 		index                  int
 	}{
+		{"metadata", `[{"id":-1,"name":"Dragon","initiative":20,"conditions":["stunned"],"future_metadata":{"remaining":2},"legendary_actions_used":2},{"id":-2,"name":"Goblin","initiative":10,"conditions":["prone"]}]`, "", 1},
 		{"same name", `[{"id":-1,"name":"Goblin","initiative":20},{"id":-2,"name":"Goblin","initiative":10}]`, "", 1},
 		{"negative index", `[{"id":-1,"name":"Goblin"}]`, "invalid_combat_turn", -1},
 		{"past end", `[{"id":-1,"name":"Goblin"}]`, "invalid_combat_turn", 1},
@@ -61,6 +63,28 @@ func TestSQLiteCombatAddPreservesHolderAndRejectsInvalidState(t *testing.T) {
 					t.Fatalf("rejected addition mutated state: %d %s", index, order)
 				}
 			} else {
+				var original, persisted, returned []map[string]interface{}
+				json.Unmarshal([]byte(tc.order), &original)
+				json.Unmarshal([]byte(order), &persisted)
+				var response struct {
+					TurnOrder []map[string]interface{} `json:"turn_order"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+					t.Fatal(err)
+				}
+				returned = response.TurnOrder
+				for _, before := range original {
+					for _, after := range persisted {
+						if before["id"] == after["id"] && !reflect.DeepEqual(before, after) {
+							t.Fatalf("existing combatant metadata changed: before=%v after=%v", before, after)
+						}
+					}
+					for _, after := range returned {
+						if before["id"] == after["id"] && !reflect.DeepEqual(before, after) {
+							t.Fatalf("response metadata changed: before=%v after=%v", before, after)
+						}
+					}
+				}
 				var entries []struct {
 					ID int `json:"id"`
 				}
