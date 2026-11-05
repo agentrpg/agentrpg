@@ -41931,7 +41931,9 @@ func handleCombatStatus(w http.ResponseWriter, r *http.Request, campaignID int) 
 
 	currentTurn := ""
 	currentID := 0
-	if len(entries) > turnIndex {
+	// A status read must not panic on damaged initiative or guess a holder.
+	// Keep the original index visible so the GM can diagnose and repair it.
+	if turnIndex >= 0 && turnIndex < len(entries) {
 		currentTurn = entries[turnIndex].Name
 		currentID = entries[turnIndex].ID
 	}
