@@ -24660,6 +24660,13 @@ func getTurnStatus(lobbyID int, characterID int) map[string]interface{} {
 		return result
 	}
 
+	// An invalid holder cannot produce a meaningful waiting list. Preserve
+	// combat state for repair rather than indexing outside initiative or
+	// guessing that a player's turn is available.
+	if turnIndex < 0 || turnIndex >= len(entries) {
+		return result
+	}
+
 	currentTurnID := 0
 	currentTurnName := ""
 	if len(entries) > turnIndex {
