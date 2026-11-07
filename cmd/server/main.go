@@ -7433,7 +7433,7 @@ func handleCampaignStart(w http.ResponseWriter, r *http.Request, campaignID int)
 func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) {
 	since := r.URL.Query().Get("since")
 
-	query := "SELECT id, character_id, action_type, description, result, created_at FROM actions WHERE lobby_id = $1"
+	query := "SELECT id, COALESCE(character_id, 0), COALESCE(action_type, ''), COALESCE(description, ''), COALESCE(result, ''), created_at FROM actions WHERE lobby_id = $1"
 	args := []interface{}{campaignID}
 	if since != "" {
 		query += " AND created_at > $2"
@@ -7443,7 +7443,7 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		http.Error(w, "Unable to read campaign actions", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
@@ -7453,7 +7453,10 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 		var id, charID int
 		var actionType, description, result string
 		var createdAt time.Time
-		rows.Scan(&id, &charID, &actionType, &description, &result, &createdAt)
+		if err := rows.Scan(&id, &charID, &actionType, &description, &result, &createdAt); err != nil {
+			http.Error(w, "Unable to read campaign actions", http.StatusInternalServerError)
+			return
+		}
 		actions = append(actions, map[string]interface{}{
 			"id": id, "character_id": charID, "type": actionType,
 			"description": description, "result": result,
@@ -7461,8 +7464,14 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 		})
 	}
 
+	if err := rows.Err(); err != nil {
+		http.Error(w, "Unable to read campaign actions", http.StatusInternalServerError)
+		return
+	}
+	rows.Close()
+
 	// Also get messages
-	messagesQuery := "SELECT id, agent_id, agent_name, message, created_at FROM campaign_messages WHERE lobby_id = $1"
+	messagesQuery := "SELECT id, COALESCE(agent_id, 0), COALESCE(agent_name, ''), COALESCE(message, ''), created_at FROM campaign_messages WHERE lobby_id = $1"
 	msgArgs := []interface{}{campaignID}
 	if since != "" {
 		messagesQuery += " AND created_at > $2"
@@ -7472,19 +7481,29 @@ func handleCampaignFeed(w http.ResponseWriter, r *http.Request, campaignID int) 
 
 	messages := []map[string]interface{}{}
 	msgRows, err := db.Query(messagesQuery, msgArgs...)
-	if err == nil {
-		defer msgRows.Close()
-		for msgRows.Next() {
-			var id, agentID int
-			var agentName, message string
-			var createdAt time.Time
-			msgRows.Scan(&id, &agentID, &agentName, &message, &createdAt)
-			messages = append(messages, map[string]interface{}{
-				"id": id, "agent_id": agentID, "agent_name": agentName,
-				"message": message, "type": "message",
-				"created_at": createdAt.Format(time.RFC3339),
-			})
+	if err != nil {
+		http.Error(w, "Unable to read campaign messages", http.StatusInternalServerError)
+		return
+	}
+	defer msgRows.Close()
+	for msgRows.Next() {
+		var id, agentID int
+		var agentName, message string
+		var createdAt time.Time
+		if err := msgRows.Scan(&id, &agentID, &agentName, &message, &createdAt); err != nil {
+			http.Error(w, "Unable to read campaign messages", http.StatusInternalServerError)
+			return
 		}
+		messages = append(messages, map[string]interface{}{
+			"id": id, "agent_id": agentID, "agent_name": agentName,
+			"message": message, "type": "message",
+			"created_at": createdAt.Format(time.RFC3339),
+		})
+	}
+
+	if err := msgRows.Err(); err != nil {
+		http.Error(w, "Unable to read campaign messages", http.StatusInternalServerError)
+		return
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
