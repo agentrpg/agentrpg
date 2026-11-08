@@ -18043,12 +18043,12 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 
 	for _, charID := range req.CharacterIDs {
 		// Get current XP, level, and subclass
-		var name string
-		var currentXP, currentLevel int
+		var name, class string
+		var currentXP, currentLevel, constitution int
 		var subclass sql.NullString
 		err = db.QueryRow(`
-			SELECT name, COALESCE(xp, 0), level, subclass FROM characters WHERE id = $1
-		`, charID).Scan(&name, &currentXP, &currentLevel, &subclass)
+			SELECT name, COALESCE(xp, 0), level, subclass, class, COALESCE(con, 10) FROM characters WHERE id = $1
+		`, charID).Scan(&name, &currentXP, &currentLevel, &subclass, &class, &constitution)
 
 		if err != nil {
 			continue
@@ -18084,26 +18084,26 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 			// Check for Draconic Resilience HP bonus (v0.8.79)
 			// Draconic sorcerers gain +1 HP per level gained
 			levelsGained := newLevel - currentLevel
-			var hpBonus int
+			// Fixed hit-die average (rounded up), plus Constitution, minimum one.
+			hpPerLevel := getHitDie(class)/2 + 1 + game.Modifier(constitution)
+			if hpPerLevel < 1 {
+				hpPerLevel = 1
+			}
+			hpBonus := hpPerLevel * levelsGained
 			if subclass.Valid && subclass.String != "" {
 				if bonusStr, ok := getSubclassMechanic(subclass.String, newLevel, "bonus_hp_per_level"); ok {
 					bonus, err := strconv.Atoi(bonusStr)
 					if err == nil && bonus > 0 {
-						hpBonus = bonus * levelsGained
+						hpBonus += bonus * levelsGained
 					}
 				}
 			}
 
-			// Update level, pending ASI, and HP bonus
-			if asiEarned > 0 && hpBonus > 0 {
-				_, err = db.Exec(`UPDATE characters SET level = $1, pending_asi = pending_asi + $2, hp = hp + $3, max_hp = max_hp + $3 WHERE id = $4`, newLevel, asiEarned, hpBonus, charID)
-			} else if asiEarned > 0 {
-				_, err = db.Exec(`UPDATE characters SET level = $1, pending_asi = pending_asi + $2 WHERE id = $3`, newLevel, asiEarned, charID)
-			} else if hpBonus > 0 {
-				_, err = db.Exec(`UPDATE characters SET level = $1, hp = hp + $2, max_hp = max_hp + $2 WHERE id = $3`, newLevel, hpBonus, charID)
-			} else {
-				_, err = db.Exec(`UPDATE characters SET level = $1 WHERE id = $2`, newLevel, charID)
-			}
+			// Preserve existing injuries, and never revive dead or zero-HP characters.
+			_, err = db.Exec(`UPDATE characters SET level = $1,
+				pending_asi = COALESCE(pending_asi, 0) + $2,
+				hp = CASE WHEN hp > 0 AND NOT COALESCE(is_dead, false) THEN hp + $3 ELSE hp END,
+				max_hp = max_hp + $3 WHERE id = $4`, newLevel, asiEarned, hpBonus, charID)
 
 			if err == nil {
 				result["level_up"] = true
@@ -18113,10 +18113,10 @@ func handleGMAwardXP(w http.ResponseWriter, r *http.Request) {
 					result["asi_earned"] = asiEarned
 					result["asi_message"] = fmt.Sprintf("You earned %d ability score improvement points! Use POST /api/characters/{id}/asi to apply them.", asiEarned)
 				}
-				// Include Draconic Resilience HP bonus (v0.8.79)
+				// Include the total HP gain, including any subclass bonus.
 				if hpBonus > 0 {
 					result["hp_bonus"] = hpBonus
-					result["hp_bonus_reason"] = "Draconic Resilience: +1 HP per level gained"
+					result["hp_bonus_reason"] = "Fixed hit-die average plus Constitution (minimum 1 per level), including subclass bonuses"
 				}
 
 				levelUps = append(levelUps, map[string]interface{}{
