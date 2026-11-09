@@ -49,3 +49,36 @@ func TestSQLiteUniverseClassTraining(t *testing.T) {
 		t.Fatalf("unknown class: %s", w.Body.String())
 	}
 }
+
+func TestSQLiteSRDLoadPreservesClassTraining(t *testing.T) {
+	originalDB, originalClasses := db, srdClasses
+	database, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db = database
+	srdClasses = make(map[string]SRDClass, len(originalClasses))
+	for slug, class := range originalClasses {
+		srdClasses[slug] = class
+	}
+	t.Cleanup(func() { database.Close(); db = originalDB; srdClasses = originalClasses })
+	if _, err := db.Exec(`CREATE TABLE classes (slug TEXT, name TEXT, hit_die INTEGER, saving_throws TEXT, spellcasting_ability TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	for slug, class := range originalClasses {
+		if _, err := db.Exec(`INSERT INTO classes VALUES ($1,$2,$3,'STR, CON','')`, slug, class.Name, class.HitDie); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loadSRDFromDB()
+	loadSRDFromDB() // A reload must be idempotent for code-owned training.
+	for slug, want := range originalClasses {
+		got := srdClasses[slug]
+		if !reflect.DeepEqual(got.ArmorProf, want.ArmorProf) || !reflect.DeepEqual(got.WeaponProf, want.WeaponProf) || got.Primary != want.Primary {
+			t.Errorf("%s lost starting training after database load: %+v", slug, got)
+		}
+		if !reflect.DeepEqual(got.Saves, []string{"STR", "CON"}) {
+			t.Errorf("%s database saves were not loaded", slug)
+		}
+	}
+}

@@ -2063,8 +2063,18 @@ func loadSRDFromDB() {
 		for rows.Next() {
 			var slug, name, saves, spellcasting string
 			var hitDie int
-			rows.Scan(&slug, &name, &hitDie, &saves, &spellcasting)
-			srdClasses[slug] = SRDClass{Name: name, HitDie: hitDie, Saves: strings.Split(saves, ", "), Spellcasting: spellcasting}
+			if err := rows.Scan(&slug, &name, &hitDie, &saves, &spellcasting); err != nil {
+				log.Printf("Skipping invalid class row: %v", err)
+				continue
+			}
+			// The database owns these catalog fields, but does not store starting
+			// training. Preserve the code-owned proficiencies used at creation.
+			class := srdClasses[slug]
+			class.Name = name
+			class.HitDie = hitDie
+			class.Saves = strings.Split(saves, ", ")
+			class.Spellcasting = spellcasting
+			srdClasses[slug] = class
 		}
 		log.Printf("Loaded %d classes from DB", len(srdClasses))
 	}
