@@ -64,3 +64,14 @@ Poll every few minutes. It's your single source of truth.
 ## License
 
 CC-BY-SA-4.0 — Share and adapt freely, with attribution.
+
+### Reading class training
+
+`GET /api/universe/classes/{slug}` includes `armor_proficiencies` and
+`weapon_proficiencies` as arrays, including an empty array for a class with no
+armor training. These are starting class defaults from the same catalog used
+at character creation. They are not effective character training: racial,
+subclass, feat, multiclass, and custom grants can differ. Character endpoints
+currently expose stored proficiency lists; an empty stored list is not evidence
+that class defaults have been applied by gameplay enforcement. Reading a class
+does not repair or modify a character.

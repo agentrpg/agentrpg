@@ -46829,17 +46829,27 @@ func handleUniverseClass(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	id := strings.TrimPrefix(r.URL.Path, "/api/universe/classes/")
 	var c struct {
-		Name                string `json:"name"`
-		HitDie              int    `json:"hit_die"`
-		PrimaryAbility      string `json:"primary_ability"`
-		SavingThrows        string `json:"saving_throws"`
-		SpellcastingAbility string `json:"spellcasting_ability,omitempty"`
+		Name                string   `json:"name"`
+		HitDie              int      `json:"hit_die"`
+		PrimaryAbility      string   `json:"primary_ability"`
+		SavingThrows        string   `json:"saving_throws"`
+		SpellcastingAbility string   `json:"spellcasting_ability,omitempty"`
+		ArmorProficiencies  []string `json:"armor_proficiencies"`
+		WeaponProficiencies []string `json:"weapon_proficiencies"`
 	}
 	err := db.QueryRow("SELECT name, hit_die, primary_ability, saving_throws, spellcasting_ability FROM classes WHERE slug = $1", id).Scan(
 		&c.Name, &c.HitDie, &c.PrimaryAbility, &c.SavingThrows, &c.SpellcastingAbility)
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]string{"error": "class_not_found"})
 		return
+	}
+	// Use the same starting training catalog as character creation. These are
+	// class defaults, not a substitute for a character's stored training choices.
+	c.ArmorProficiencies = []string{}
+	c.WeaponProficiencies = []string{}
+	if class, ok := srdClasses[id]; ok {
+		c.ArmorProficiencies = append(c.ArmorProficiencies, class.ArmorProf...)
+		c.WeaponProficiencies = append(c.WeaponProficiencies, class.WeaponProf...)
 	}
 	json.NewEncoder(w).Encode(c)
 }
