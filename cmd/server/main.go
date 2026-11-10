@@ -48967,10 +48967,11 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 	var class, charName string
 	var level int
 	var invocationsJSON []byte
+	var skillsRaw string
 	err = db.QueryRow(`
-		SELECT agent_id, name, class, level, COALESCE(eldritch_invocations, '[]')
+		SELECT agent_id, name, class, level, COALESCE(eldritch_invocations, '[]'), COALESCE(skill_proficiencies, '')
 		FROM characters WHERE id = $1
-	`, req.CharacterID).Scan(&ownerID, &charName, &class, &level, &invocationsJSON)
+	`, req.CharacterID).Scan(&ownerID, &charName, &class, &level, &invocationsJSON, &skillsRaw)
 
 	if err != nil {
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -49006,7 +49007,11 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var currentInvocations []string
-	json.Unmarshal(invocationsJSON, &currentInvocations)
+	if err := json.Unmarshal(invocationsJSON, &currentInvocations); err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_invocation_state"})
+		return
+	}
 
 	// Check if already known
 	for _, c := range currentInvocations {
@@ -49045,30 +49050,29 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 	currentInvocations = append(currentInvocations, invocationSlug)
 	updatedJSON, _ := json.Marshal(currentInvocations)
 
-	_, err = db.Exec("UPDATE characters SET eldritch_invocations = $1 WHERE id = $2", updatedJSON, req.CharacterID)
-	if err != nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error":   "database_error",
-			"message": err.Error(),
-		})
-		return
-	}
-
-	// Apply passive effects
+	// Character creation, readback, and skill checks use comma-separated training.
+	// Accept the legacy JSON written by this endpoint, but never discard bad data.
 	effects := []string{}
+	newSkills := skillsRaw
 	if inv.Mechanics["grant_proficiency"] != "" {
-		// Add skill proficiencies (Beguiling Influence)
-		proficiencies := strings.Split(inv.Mechanics["grant_proficiency"], ",")
-		var currentSkillsJSON []byte
-		db.QueryRow("SELECT COALESCE(skill_proficiencies, '[]') FROM characters WHERE id = $1", req.CharacterID).Scan(&currentSkillsJSON)
 		var currentSkills []string
-		json.Unmarshal(currentSkillsJSON, &currentSkills)
-
-		for _, prof := range proficiencies {
+		if strings.HasPrefix(strings.TrimSpace(skillsRaw), "[") {
+			if err := json.Unmarshal([]byte(skillsRaw), &currentSkills); err != nil {
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_skill_state"})
+				return
+			}
+		} else if strings.TrimSpace(skillsRaw) != "" {
+			currentSkills = strings.Split(skillsRaw, ",")
+		}
+		for i := range currentSkills {
+			currentSkills[i] = strings.TrimSpace(currentSkills[i])
+		}
+		for _, prof := range strings.Split(inv.Mechanics["grant_proficiency"], ",") {
 			prof = strings.TrimSpace(prof)
 			alreadyHas := false
-			for _, s := range currentSkills {
-				if strings.EqualFold(s, prof) {
+			for _, skill := range currentSkills {
+				if strings.EqualFold(skill, prof) {
 					alreadyHas = true
 					break
 				}
@@ -49078,8 +49082,23 @@ func handleCharacterInvocations(w http.ResponseWriter, r *http.Request) {
 				effects = append(effects, fmt.Sprintf("Gained proficiency in %s", prof))
 			}
 		}
-		updatedSkillsJSON, _ := json.Marshal(currentSkills)
-		db.Exec("UPDATE characters SET skill_proficiencies = $1 WHERE id = $2", updatedSkillsJSON, req.CharacterID)
+		newSkills = strings.Join(currentSkills, ", ")
+	}
+
+	// Persist the invocation and its passive training together. Compare the exact
+	// read state so a concurrent selection cannot silently overwrite either list.
+	result, err := db.Exec(`UPDATE characters SET eldritch_invocations = $1, skill_proficiencies = $2
+		WHERE id = $3 AND CAST(COALESCE(eldritch_invocations, '[]') AS TEXT) = $4
+		AND COALESCE(skill_proficiencies, '') = $5`, updatedJSON, newSkills, req.CharacterID, string(invocationsJSON), skillsRaw)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "database_error", "message": err.Error()})
+		return
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "character_state_changed", "message": "Read character state and retry your invocation selection."})
+		return
 	}
 
 	response := map[string]interface{}{

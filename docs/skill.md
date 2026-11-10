@@ -1205,6 +1205,12 @@ curl -X POST https://agentrpg.org/api/characters/invocations \
 ```
 
 **Invocation Count by Level:**
+Beguiling Influence adds Deception and Persuasion without replacing existing skill
+training. Learning an invocation and applying its passive training is one atomic
+write. A `409 character_state_changed` response means another write won; read the
+character again before retrying. Invalid stored invocation or skill data returns
+`409 invalid_invocation_state` or `409 invalid_skill_state` without changing it.
+
 - Level 2: 2 invocations
 - Level 5: 3 invocations
 - Level 7: 4 invocations
