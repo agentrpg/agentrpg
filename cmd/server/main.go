@@ -16884,7 +16884,7 @@ func handleGMShove(w http.ResponseWriter, r *http.Request) {
 
 // handleGMGrapple godoc
 // @Summary Resolve a grapple attempt
-// @Description GM resolves a grapple attempt. Attacker contests Athletics vs target's Athletics or Acrobatics. On success: target gains grappled condition (speed 0). Grappler can drag at half speed.
+// @Description GM resolves a grapple attempt. Attacker contests Athletics vs target's Athletics or Acrobatics, including stored proficiency and expertise (CSV or legacy JSON arrays). Malformed training returns 409 invalid_skill_state before rolling or writing. On success: target gains grappled condition (speed 0). Grappler can drag at half speed.
 // @Tags GM
 // @Accept json
 // @Produce json
@@ -16992,12 +16992,14 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse skill proficiencies for proper modifiers
-	var attackerSkills, targetSkills []string
-	var attackerExpertise, targetExpertise []string
-	json.Unmarshal(attackerSkillsJSON, &attackerSkills)
-	json.Unmarshal(targetSkillsJSON, &targetSkills)
-	json.Unmarshal(attackerExpertiseJSON, &attackerExpertise)
-	json.Unmarshal(targetExpertiseJSON, &targetExpertise)
+	training, err := decodeSkillTraining(attackerSkillsJSON, targetSkillsJSON, attackerExpertiseJSON, targetExpertiseJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_skill_state"})
+		return
+	}
+	attackerSkills, targetSkills := training[0], training[1]
+	attackerExpertise, targetExpertise := training[2], training[3]
 
 	// Calculate attacker's Athletics modifier
 	attackerMod := game.Modifier(attackerStr)
@@ -17098,7 +17100,7 @@ func handleGMGrapple(w http.ResponseWriter, r *http.Request) {
 
 // handleGMEscapeGrapple godoc
 // @Summary Resolve escape from grapple
-// @Description Target uses their action to attempt escaping a grapple. Contests Athletics or Acrobatics vs grappler's Athletics.
+// @Description Target uses their action to attempt escaping a grapple. Contests Athletics or Acrobatics vs grappler's Athletics, including stored proficiency and expertise (CSV or legacy JSON arrays). Malformed training returns 409 invalid_skill_state before rolling or writing.
 // @Tags GM
 // @Accept json
 // @Produce json
@@ -17223,12 +17225,14 @@ func handleGMEscapeGrapple(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Parse skills
-	var charSkills, grapplerSkills []string
-	var charExpertise, grapplerExpertise []string
-	json.Unmarshal(skillsJSON, &charSkills)
-	json.Unmarshal(grapplerSkillsJSON, &grapplerSkills)
-	json.Unmarshal(expertiseJSON, &charExpertise)
-	json.Unmarshal(grapplerExpertiseJSON, &grapplerExpertise)
+	training, err := decodeSkillTraining(skillsJSON, grapplerSkillsJSON, expertiseJSON, grapplerExpertiseJSON)
+	if err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_skill_state"})
+		return
+	}
+	charSkills, grapplerSkills := training[0], training[1]
+	charExpertise, grapplerExpertise := training[2], training[3]
 
 	// Calculate escaper's modifier (Athletics or Acrobatics based on choice)
 	var escaperMod int
@@ -17756,6 +17760,26 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 		campaignID, req.AttackerID, fmt.Sprintf("Disarm %s (%s)", targetName, itemDisarmed), actionResult)
 
 	json.NewEncoder(w).Encode(response)
+}
+
+// decodeSkillTraining reads the CSV used by character creation and legacy JSON
+// arrays. Malformed arrays must not silently turn trained checks into untrained ones.
+func decodeSkillTraining(rawLists ...[]byte) ([][]string, error) {
+	lists := make([][]string, len(rawLists))
+	for i, raw := range rawLists {
+		text := strings.TrimSpace(string(raw))
+		if strings.HasPrefix(text, "[") {
+			if err := json.Unmarshal(raw, &lists[i]); err != nil {
+				return nil, err
+			}
+		} else if text != "" && text != "null" {
+			lists[i] = strings.Split(text, ",")
+		}
+		for j := range lists[i] {
+			lists[i][j] = strings.TrimSpace(lists[i][j])
+		}
+	}
+	return lists, nil
 }
 
 // containsSkill checks if a skill name is in the skill list (case-insensitive)
