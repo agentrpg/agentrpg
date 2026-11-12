@@ -14839,8 +14839,19 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate stored training before rolling, recording checks, or spending resources.
+	training, err := decodeSkillTraining([]byte(skillProfsRaw.String), []byte(expertiseRaw.String))
+	if err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_skill_state"})
+		return
+	}
+	normalizeSkillName := func(skill string) string {
+		return strings.ToLower(strings.ReplaceAll(strings.TrimSpace(skill), " ", "_"))
+	}
+
 	// v0.8.23: Check for auto-fail conditions (deafened/blinded)
-	skillUsedForCheck := strings.ToLower(strings.ReplaceAll(req.Skill, " ", "_"))
+	skillUsedForCheck := normalizeSkillName(req.Skill)
 	if req.RequiresHearing && hasCondition(req.CharacterID, "deafened") {
 		desc := fmt.Sprintf("%s: %s check (DC %d) - auto-fail (deafened)", charName, req.Skill, req.DC)
 		if req.Description != "" {
@@ -14886,25 +14897,19 @@ func handleGMSkillCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse skill proficiencies into a set for quick lookup
+	// Use the same canonical name for stored training and requested skills.
 	skillProfs := make(map[string]bool)
-	if skillProfsRaw.Valid && skillProfsRaw.String != "" {
-		for _, skill := range strings.Split(skillProfsRaw.String, ",") {
-			skillProfs[strings.TrimSpace(strings.ToLower(skill))] = true
-		}
+	for _, skill := range training[0] {
+		skillProfs[normalizeSkillName(skill)] = true
 	}
-
-	// Parse expertise into a set (v0.8.13)
 	expertiseSkills := make(map[string]bool)
-	if expertiseRaw.Valid && expertiseRaw.String != "" {
-		for _, exp := range strings.Split(expertiseRaw.String, ",") {
-			expertiseSkills[strings.TrimSpace(strings.ToLower(exp))] = true
-		}
+	for _, skill := range training[1] {
+		expertiseSkills[normalizeSkillName(skill)] = true
 	}
 
 	// Determine which ability to use
 	abilityUsed := strings.ToLower(req.Ability)
-	skillUsed := strings.ToLower(strings.ReplaceAll(req.Skill, " ", "_"))
+	skillUsed := normalizeSkillName(req.Skill)
 
 	// If skill provided, map to ability
 	if skillUsed != "" {
