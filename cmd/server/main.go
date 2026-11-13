@@ -25447,18 +25447,17 @@ func resolveStabilizeAction(actorID, targetID int, targetName string) (string, e
 		FROM characters WHERE id = $1`, actorID).Scan(&wisdom, &level, &skills, &expertise); err != nil {
 		return "", err
 	}
+	// Match character creation's CSV and legacy JSON without silently discarding
+	// malformed training. Expertise doubles proficiency; it cannot grant it.
+	training, err := decodeSkillTraining([]byte(skills), []byte(expertise))
+	if err != nil {
+		return "", fmt.Errorf("invalid skill training: %w", err)
+	}
 	mod := game.Modifier(wisdom)
-	proficient := false
-	for _, skill := range strings.Split(skills, ",") {
-		proficient = proficient || strings.EqualFold(strings.TrimSpace(skill), "medicine")
-	}
-	if proficient {
+	if containsSkill(training[0], "medicine") {
 		mod += game.ProficiencyBonus(level)
-	}
-	for _, skill := range strings.Split(expertise, ",") {
-		if strings.EqualFold(strings.TrimSpace(skill), "medicine") {
+		if containsSkill(training[1], "medicine") {
 			mod += game.ProficiencyBonus(level)
-			break
 		}
 	}
 	roll := game.RollDie(20)
