@@ -17644,15 +17644,15 @@ func handleGMDisarm(w http.ResponseWriter, r *http.Request) {
 	attackMod += game.ProficiencyBonus(attackerLevel) // Assume proficiency with attack
 
 	// Calculate target's Athletics or Acrobatics (whichever is higher)
-	// Parse skill proficiencies
-	targetSkills := strings.Split(targetSkillProfs, ",")
-	for i := range targetSkills {
-		targetSkills[i] = strings.TrimSpace(targetSkills[i])
+	// Accept current CSV storage and legacy JSON, rejecting malformed training
+	// before rolling a contest or recording a disarm result.
+	training, err := decodeSkillTraining([]byte(targetSkillProfs), []byte(targetExpertise))
+	if err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_skill_state"})
+		return
 	}
-	targetExpSkills := strings.Split(targetExpertise, ",")
-	for i := range targetExpSkills {
-		targetExpSkills[i] = strings.TrimSpace(targetExpSkills[i])
-	}
+	targetSkills, targetExpSkills := training[0], training[1]
 
 	// Athletics (STR-based)
 	targetAthMod := game.Modifier(targetStr)
