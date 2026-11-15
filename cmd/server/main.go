@@ -15455,20 +15455,15 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse tool proficiencies
-	toolProfs := make(map[string]bool)
-	if toolProfsRaw != "" {
-		for _, tool := range strings.Split(toolProfsRaw, ",") {
-			toolProfs[strings.TrimSpace(strings.ToLower(tool))] = true
-		}
-	}
-
-	// Parse expertise (v0.8.13)
-	expertiseTools := make(map[string]bool)
-	if expertiseRaw != "" {
-		for _, exp := range strings.Split(expertiseRaw, ",") {
-			expertiseTools[strings.TrimSpace(strings.ToLower(exp))] = true
-		}
+	// Accept current CSV and legacy JSON training before spending resources.
+	training, err := decodeSkillTraining([]byte(toolProfsRaw), []byte(expertiseRaw))
+	if err != nil {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error":   "invalid_tool_state",
+			"message": "Stored tool proficiency or expertise data is malformed",
+		})
+		return
 	}
 
 	// Normalize the requested tool name
@@ -15530,11 +15525,11 @@ func handleGMToolCheck(w http.ResponseWriter, r *http.Request) {
 
 	// Check for proficiency and expertise (v0.8.13)
 	totalMod := abilityMod
-	isProficient := toolProfs[toolLower]
+	isProficient := containsSkill(training[0], toolLower)
 	// Also check normalized versions (thieves' tools → thieves_tools)
 	normalizedTool := strings.ReplaceAll(toolLower, " ", "_")
 	normalizedTool = strings.ReplaceAll(normalizedTool, "'", "")
-	hasExpertise := expertiseTools[toolLower] || expertiseTools[normalizedTool]
+	hasExpertise := isProficient && (containsSkill(training[1], toolLower) || containsSkill(training[1], normalizedTool))
 	if isProficient {
 		if hasExpertise {
 			// Expertise: double proficiency bonus
