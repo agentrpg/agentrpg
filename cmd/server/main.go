@@ -39762,9 +39762,15 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 			abilityMod = intMod
 		}
 
-		// Check proficiency
-		isProficient := strings.Contains(strings.ToLower(skillProficiencies), skill)
-		hasExpertise := strings.Contains(strings.ToLower(expertise), skill)
+		// Decode CSV and legacy JSON before rolling or recording a check.
+		training, err := decodeSkillTraining([]byte(skillProficiencies), []byte(expertise))
+		if err != nil {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_skill_state"})
+			return
+		}
+		isProficient := containsSkill(training[0], skill)
+		hasExpertise := isProficient && containsSkill(training[1], skill)
 
 		bonus := abilityMod
 		if isProficient {
