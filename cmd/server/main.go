@@ -39837,9 +39837,16 @@ func handleGMTrap(w http.ResponseWriter, r *http.Request) {
 
 		abilityMod := dexMod // Thieves' tools use DEX
 
-		// Check tool proficiency
-		isProficient := strings.Contains(strings.ToLower(toolProficiencies), "thieves")
-		hasExpertise := strings.Contains(strings.ToLower(expertise), "thieves")
+		// Match the actual requested tool in CSV or legacy JSON training.
+		training, err := decodeSkillTraining([]byte(toolProficiencies), []byte(expertise))
+		if err != nil {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{"error": "invalid_tool_state"})
+			return
+		}
+		toolUsed = strings.TrimSpace(toolUsed)
+		isProficient := containsSkill(training[0], strings.ToLower(toolUsed))
+		hasExpertise := isProficient && containsSkill(training[1], strings.ToLower(toolUsed))
 
 		bonus := abilityMod
 		if isProficient {
